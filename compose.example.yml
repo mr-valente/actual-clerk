@@ -1,0 +1,55 @@
+services:
+  actual-clerk:
+    build: .
+    # image: ghcr.io/your-name/actual-clerk:latest
+    container_name: actual-clerk
+    restart: unless-stopped
+    init: true
+    ports:
+      - "8080:8080"
+    # Any documented Clerk variable added to .env is passed through. The
+    # explicit entries below provide useful Compose defaults and validation.
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      ACTUAL_URL: ${ACTUAL_URL:-http://actual_server:5006}
+      ACTUAL_PASSWORD: ${ACTUAL_PASSWORD:?Set ACTUAL_PASSWORD in .env}
+      ACTUAL_BUDGET_ID: ${ACTUAL_BUDGET_ID:?Set ACTUAL_BUDGET_ID in .env}
+      ACTUAL_ENCRYPTION_PASSWORD: ${ACTUAL_ENCRYPTION_PASSWORD:-}
+      ACTUAL_VERIFY_SSL: ${ACTUAL_VERIFY_SSL:-}
+      CLERK_SIMPLEFIN_ACCESS_URL: ${CLERK_SIMPLEFIN_ACCESS_URL:-}
+      CLERK_OPENAI_BASE_URL: ${CLERK_OPENAI_BASE_URL:-}
+      CLERK_OPENAI_API_KEY: ${CLERK_OPENAI_API_KEY:-}
+      CLERK_MODEL: ${CLERK_MODEL:-}
+      CLERK_APPLY_MODE: ${CLERK_APPLY_MODE:-}
+      CLERK_CATEGORIZATION_ENABLED: ${CLERK_CATEGORIZATION_ENABLED:-}
+      CLERK_AI_ENABLED: ${CLERK_AI_ENABLED:-}
+      CLERK_COMMITTED_GROUPS: ${CLERK_COMMITTED_GROUPS:-}
+      CLERK_MONTHLY_INCOME: ${CLERK_MONTHLY_INCOME:-}
+      CLERK_CURRENCY: ${CLERK_CURRENCY:-}
+      CLERK_SYNC_INTERVAL_MINUTES: ${CLERK_SYNC_INTERVAL_MINUTES:-}
+      CLERK_HEALTH_INTERVAL_MINUTES: ${CLERK_HEALTH_INTERVAL_MINUTES:-}
+      CLERK_DIGEST_TIME: ${CLERK_DIGEST_TIME:-}
+      CLERK_NOTIFICATIONS_ENABLED: ${CLERK_NOTIFICATIONS_ENABLED:-}
+      CLERK_NTFY_URL: ${CLERK_NTFY_URL:-}
+      CLERK_NTFY_TOPIC: ${CLERK_NTFY_TOPIC:-}
+      CLERK_NTFY_TOKEN: ${CLERK_NTFY_TOKEN:-}
+      CLERK_LOG_LEVEL: ${CLERK_LOG_LEVEL:-}
+      TZ: ${TZ:-UTC}
+    volumes:
+      - clerk_data:/app/data
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    security_opt:
+      - no-new-privileges:true
+    networks:
+      - actual
+
+volumes:
+  clerk_data:
+
+networks:
+  actual:
+    external: true
+    name: ${ACTUAL_DOCKER_NETWORK:-actual_default}

@@ -1,0 +1,355 @@
+from __future__ import annotations
+
+import time
+
+from actual_clerk.db import Database
+
+
+def decision(**kwargs):
+    base = {
+        "transaction_id": "txn-1",
+        "account_id": "acct-1",
+        "account_name": "Checking",
+        "payee_name": "Blue Bottle",
+        "merchant_key": "blue bottle",
+        "transaction_date": "2026-08-21",
+        "amount_cents": -650,
+        "source": "memory",
+        "status": "applied",
+        "category_id": "cat-coffee",
+        "category_name": "Coffee",
+        "confidence": 0.9,
+        "tags": ["subscription"],
+        "rationale": {"reason": "history"},
+    }
+    base.update(kwargs)
+    return base
+
+
+# ---------------------------------------------------------------------- jobs
+
+
+def test_a_second_request_for_a_running_kind_is_a_duplicate(database):
+    first, created_first = database.enqueue_job("sync", 3)
+    second, created_second = database.enqueue_job("sync", 3)
+    assert created_first is True
+    assert created_second is False
+    assert second["id"] == first["id"]
+    # A different kind still queues.
+    _, created_other = database.enqueue_job("health", 3)
+    assert created_other is True
+
+
+def test_claiming_moves_a_job_to_running_exactly_once(database):
+    database.enqueue_job("sync", 3)
+    claimed = database.claim_job("worker-a", 60)
+    assert claimed["status"] == "running"
+    assert claimed["attempt"] == 1
+    assert database.claim_job("worker-b", 60) is None
+
+
+def test_an_expired_lease_is_reclaimed(database):
+    database.enqueue_job("sync", 3)
+    database.claim_job("worker-a", lease_seconds=-1)
+    reclaimed = database.claim_job("worker-b", 60)
+    assert reclaimed is not None
+    assert reclaimed["phase"] == "starting"
+    assert reclaimed["attempt"] == 2
+
+
+def test_a_crashed_run_is_requeued_on_startup(database, data_dir):
+    database.enqueue_job("sync", 3)
+    database.claim_job("worker-a", 600)
+    reopened = Database(data_dir / "clerk.db")
+    reopened.initialize()
+    [job] = reopened.list_jobs(kind="sync")
+    assert job["status"] == "queued"
+    assert job["phase"] == "recovered"
+
+
+def test_a_retryable_failure_waits_then_a_terminal_one_gives_up(database):
+    database.enqueue_job("sync", 2)
+    job = database.claim_job("worker", 60)
+    assert database.fail_or_retry(job["id"], "boom", "temporary", True) == "retry_wait"
+    stored = database.get_job(job["id"])
+    assert stored["next_run_at"] > time.time()
+    database.claim_job("worker", 60)  # not due yet, so nothing is claimed
+    assert database.fail_or_retry(job["id"], "boom", "permanent", False) == "failed"
+
+
+def test_retries_stop_at_the_attempt_limit(database):
+    database.enqueue_job("sync", 1)
+    job = database.claim_job("worker", 60)
+    assert database.fail_or_retry(job["id"], "boom", "temporary", True) == "failed"
+
+
+def test_a_finished_job_can_be_retried_but_not_duplicated(database):
+    database.enqueue_job("sync", 3)
+    job = database.claim_job("worker", 60)
+    database.finish_job(job["id"], status="failed", phase="failed")
+    assert database.retry_job(job["id"]) is not None
+    # It is active again, so a second retry is refused.
+    assert database.retry_job(job["id"]) is None
+
+
+def test_only_queued_jobs_can_be_cancelled(database):
+    job, _ = database.enqueue_job("sync", 3)
+    assert database.cancel_job(job["id"]) is True
+    assert database.cancel_job(job["id"]) is False
+
+
+def test_job_results_and_events_round_trip(database):
+    job, _ = database.enqueue_job("categorize", 3)
+    database.add_event(job["id"], "info", "started", "working", {"n": 1})
+    database.finish_job(job["id"], result={"applied": 4})
+    stored = database.get_job(job["id"], include_events=True)
+    assert stored["result"] == {"applied": 4}
+    assert stored["events"][0]["data"] == {"n": 1}
+    assert database.last_job("categorize", "completed")["id"] == job["id"]
+
+
+def test_jobs_can_be_listed_by_state_and_kind(database):
+    database.enqueue_job("sync", 3)
+    database.enqueue_job("health", 3)
+    assert len(database.list_jobs(status="active")) == 2
+    assert len(database.list_jobs(kind="sync")) == 1
+    assert database.list_jobs(status="completed") == []
+
+
+# ----------------------------------------------------------------- decisions
+
+
+def test_a_new_proposal_supersedes_an_open_review(database):
+    database.add_decision(decision(status="needs_review"))
+    database.add_decision(decision(status="needs_review", confidence=0.5))
+    open_reviews = database.list_decisions(status="needs_review")
+    assert len(open_reviews) == 1
+    assert len(database.list_decisions(status="superseded")) == 1
+
+
+def test_resolving_a_review_is_atomic(database):
+    database.add_decision(decision(status="needs_review"))
+    [review] = database.list_decisions(status="needs_review")
+    assert database.resolve_decision(review["id"], "applied") is not None
+    # A second click finds nothing left to resolve.
+    assert database.resolve_decision(review["id"], "applied") is None
+
+
+def test_open_reviews_are_reported_for_exclusion(database):
+    database.add_decision(decision(status="needs_review"))
+    database.add_decision(decision(transaction_id="txn-2", status="applied"))
+    assert database.open_review_transaction_ids() == {"txn-1"}
+
+
+def test_decisions_keep_their_tags_and_rationale(database):
+    decision_id = database.add_decision(decision())
+    stored = database.get_decision(decision_id)
+    assert stored["tags"] == ["subscription"]
+    assert stored["rationale"]["reason"] == "history"
+    assert database.get_decision("missing") is None
+
+
+# -------------------------------------------------------------------- memory
+
+
+def test_memory_accumulates_and_corrections_are_counted(database):
+    database.record_memory("blue bottle", "cat-coffee", "Coffee")
+    database.record_memory("blue bottle", "cat-coffee", "Coffee")
+    database.record_memory("blue bottle", "cat-dining", "Dining", correction=True)
+    rows = {row["category_id"]: row for row in database.memory_for("blue bottle")}
+    assert rows["cat-coffee"]["hits"] == 2
+    assert rows["cat-dining"]["corrections"] == 1
+    assert database.memory_size() == 1
+
+    database.forget_merchant("blue bottle")
+    assert database.memory_for("blue bottle") == []
+
+
+def test_incomplete_memory_rows_are_ignored(database):
+    database.record_memory("", "cat-coffee", "Coffee")
+    database.record_memory("blue bottle", "", "Coffee")
+    assert database.memory_size() == 0
+
+
+# ------------------------------------------------------------ rule promotion
+
+
+def rule(**kwargs):
+    base = {
+        "merchant_key": "blue bottle",
+        "merchant_label": "Blue Bottle",
+        "category_id": "cat-coffee",
+        "category_name": "Coffee",
+        "match_value": "BLUE BOTTLE",
+        "observations": 3,
+    }
+    base.update(kwargs)
+    return base
+
+
+def test_a_merchant_is_only_suggested_once(database):
+    assert database.suggest_rule(**rule()) is not None
+    assert database.suggest_rule(**rule()) is None
+
+
+def test_a_declined_merchant_is_not_offered_again(database):
+    rule_id = database.suggest_rule(**rule())
+    database.resolve_rule_suggestion(rule_id, "declined")
+    assert database.suggest_rule(**rule()) is None
+
+
+def test_creating_a_rule_claims_it_first(database):
+    rule_id = database.suggest_rule(**rule())
+    assert database.claim_rule_suggestion(rule_id) is not None
+    assert database.claim_rule_suggestion(rule_id) is None
+    database.resolve_rule_suggestion(rule_id, "created")
+    assert database.list_rule_suggestions(status="created")[0]["id"] == rule_id
+
+
+# -------------------------------------------------------------------- health
+
+
+def snapshot(account_id="acct-1", status="ok", detail=""):
+    return {"account_id": account_id, "account_name": "Checking", "status": status, "detail": detail}
+
+
+def test_only_a_real_change_of_state_produces_a_transition(database):
+    assert len(database.record_health([snapshot()])) == 1
+    assert database.record_health([snapshot()]) == []
+    [transition] = database.record_health([snapshot(status="error", detail="down")])
+    assert transition["previous_status"] == "ok"
+    assert transition["status"] == "error"
+
+
+def test_health_snapshots_and_events_are_retained(database):
+    database.record_health([snapshot()])
+    database.record_health([snapshot(status="stale")])
+    [stored] = database.health_snapshots()
+    assert stored["status"] == "stale"
+    assert len(database.list_health_events()) == 2
+
+
+def test_accounts_removed_from_actual_stop_being_reported(database):
+    database.record_health([snapshot("acct-1"), snapshot("acct-2")])
+    database.prune_health(["acct-1"])
+    assert [item["account_id"] for item in database.health_snapshots()] == ["acct-1"]
+    database.prune_health([])
+    assert database.health_snapshots() == []
+
+
+# ------------------------------------------------------------------ digests
+
+
+def test_a_digest_is_claimed_once_a_day(database):
+    assert database.claim_digest("2026-08-21") is True
+    assert database.claim_digest("2026-08-21") is False
+    assert database.claim_digest("2026-08-22") is True
+
+
+def test_a_failed_digest_releases_its_claim(database):
+    database.claim_digest("2026-08-21")
+    database.release_digest("2026-08-21")
+    assert database.claim_digest("2026-08-21") is True
+
+
+def test_only_delivered_digests_are_shown(database):
+    database.claim_digest("2026-08-20")
+    database.complete_digest("2026-08-20", {"title": "old"}, delivered=False, error="off")
+    assert database.latest_digest() is None
+    database.claim_digest("2026-08-21")
+    database.complete_digest("2026-08-21", {"title": "today"}, delivered=True)
+    assert database.latest_digest()["payload"]["title"] == "today"
+
+
+# ---------------------------------------------------------------- snapshots
+
+
+def test_snapshots_round_trip_with_their_age(database):
+    assert database.get_snapshot("overview") is None
+    database.set_snapshot("overview", {"budget": {"free_cents": 100}})
+    stored = database.get_snapshot("overview")
+    assert stored["budget"]["free_cents"] == 100
+    assert stored["snapshot_updated_at"] <= time.time()
+
+
+def test_settings_round_trip(database):
+    assert database.get_setting("runtime") is None
+    database.set_setting("runtime", "{}")
+    database.set_setting("runtime", '{"a":1}')
+    assert database.get_setting("runtime") == '{"a":1}'
+
+
+# ------------------------------------------------------------------- counts
+
+
+def test_dashboard_counts_reflect_the_work_outstanding(database):
+    database.enqueue_job("sync", 3)
+    database.add_decision(decision(status="needs_review"))
+    database.add_decision(decision(transaction_id="txn-2", status="applied"))
+    database.suggest_rule(**rule())
+    database.record_health([snapshot(status="error")])
+    counts = database.counts()
+    assert counts == {
+        "active_jobs": 1,
+        "failed_jobs": 0,
+        "needs_review": 1,
+        "applied_today": 1,
+        "rule_suggestions": 1,
+        "degraded_accounts": 1,
+    }
+
+
+# --------------------------------------------------------------- monitoring
+
+
+def test_accounts_are_monitored_until_told_otherwise(database):
+    assert database.unmonitored_account_ids() == set()
+    database.set_monitoring("a1", False, "Old Savings")
+    assert database.unmonitored_account_ids() == {"a1"}
+    database.set_monitoring("a1", True)
+    assert database.unmonitored_account_ids() == set()
+
+
+def test_monitoring_survives_health_rows_being_pruned(database):
+    """The preference is the user's, not a by-product of the last check."""
+    database.set_monitoring("a1", False, "Old Savings")
+    database.record_health([{"account_id": "a1", "account_name": "Old Savings", "status": "muted"}])
+    database.prune_health([])
+    assert database.health_snapshots() == []
+    assert database.unmonitored_account_ids() == {"a1"}
+
+
+def test_a_later_update_keeps_the_known_account_name(database):
+    database.set_monitoring("a1", False, "Old Savings")
+    database.set_monitoring("a1", True)
+    with database.connect() as connection:
+        row = connection.execute(
+            "SELECT account_name FROM account_monitoring WHERE account_id='a1'"
+        ).fetchone()
+    assert row["account_name"] == "Old Savings"
+
+
+def test_muted_accounts_are_not_counted_as_degraded(database):
+    database.record_health(
+        [
+            {"account_id": "a1", "account_name": "Dormant", "status": "muted"},
+            {"account_id": "a2", "account_name": "Checking", "status": "error"},
+        ]
+    )
+    assert database.counts()["degraded_accounts"] == 1
+
+
+def test_every_path_that_hands_out_a_job_parses_it_the_same_way(database):
+    """`params` and `result` must never leak as raw JSON strings."""
+    created, _ = database.enqueue_job("categorize", 3, params={"full": True})
+    duplicate, was_new = database.enqueue_job("categorize", 3)
+    claimed = database.claim_job("worker", 60)
+    database.finish_job(claimed["id"], status="failed", phase="failed", result={"applied": 1})
+    retried = database.retry_job(claimed["id"])
+
+    assert was_new is False
+    for job in (created, duplicate, claimed, retried):
+        assert job["params"] == {"full": True}
+        assert "params_json" not in job
+        assert "result_json" not in job
+    assert database.get_job(claimed["id"])["params"] == {"full": True}

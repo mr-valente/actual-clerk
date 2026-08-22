@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="theme-color" content="#102a43" />
+    <meta name="description" content="A budgeting assistant sidecar for Actual Budget" />
+    <title>Actual Clerk</title>
+    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <script>
+      try {
+        const saved = JSON.parse(localStorage.getItem("actual-clerk-appearance") || "null");
+        if (saved?.theme) document.documentElement.dataset.theme = saved.theme;
+        if (saved?.density) document.documentElement.dataset.density = saved.density;
+        if (saved?.motion) document.documentElement.dataset.motion = saved.motion;
+      } catch { /* use server defaults */ }
+    </script>
+    <link rel="stylesheet" href="/assets/styles.css" />
+  </head>
+  <body>
+    <div class="app-shell">
+      <aside class="sidebar" aria-label="Primary navigation">
+        <a class="brand" href="#overview" aria-label="Actual Clerk home">
+          <span class="brand-mark" aria-hidden="true">
+            <svg viewBox="0 0 40 40" role="img">
+              <path d="M6.5 12.5h27v20h-27z" />
+              <path d="M6.5 18.5h27M12 25.5h6M12 29h10" />
+              <path class="spark" d="m31 5 1.3 3L35.5 9.3 32.3 10.6 31 13.7l-1.3-3.1L26.5 9.3 29.7 8z" />
+            </svg>
+          </span>
+          <span><strong>Actual</strong><em>Clerk</em></span>
+        </a>
+
+        <nav class="nav-list">
+          <a href="#overview" data-route="overview"><span class="nav-icon">⌂</span><span>Overview</span></a>
+          <a href="#review" data-route="review"><span class="nav-icon">◇</span><span>Review</span><b id="nav-review-count"></b></a>
+          <a href="#accounts" data-route="accounts"><span class="nav-icon">⇄</span><span>Connections</span><b id="nav-health-count" class="alarm"></b></a>
+          <a href="#recurring" data-route="recurring"><span class="nav-icon">↻</span><span>Recurring</span></a>
+          <a href="#activity" data-route="activity"><span class="nav-icon">✓</span><span>Activity</span></a>
+          <a href="#settings" data-route="settings"><span class="nav-icon">⚙</span><span>Settings</span></a>
+        </nav>
+
+        <div class="sidebar-foot">
+          <div class="local-badge" id="connection-badge"><i></i><span>Actual</span></div>
+          <span class="version" id="app-version">Actual Clerk</span>
+        </div>
+      </aside>
+
+      <div class="workspace">
+        <header class="topbar">
+          <button class="mobile-menu" id="mobile-menu" aria-label="Open navigation">☰</button>
+          <div>
+            <p class="eyebrow" id="page-eyebrow">Budget</p>
+            <h1 id="page-title">Overview</h1>
+          </div>
+          <div class="top-actions">
+            <span class="automation-pill" id="automation-pill"><i></i><span>Automatic sync</span></span>
+            <button class="button primary" data-action="sync-now"><span>↻</span> Sync now</button>
+          </div>
+        </header>
+
+        <main id="content" tabindex="-1">
+          <div class="initial-loader">
+            <span class="loader-mark"></span>
+            <p>Loading…</p>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <div class="scrim" id="scrim"></div>
+    <aside class="drawer" id="drawer" aria-label="Details" aria-hidden="true">
+      <div id="drawer-content"></div>
+    </aside>
+
+    <dialog id="claim-dialog" class="dialog">
+      <form method="dialog" id="claim-form">
+        <button class="icon-button dialog-close" type="button" data-action="close-claim" aria-label="Close">×</button>
+        <p class="eyebrow">SimpleFIN</p>
+        <h2>Connect SimpleFIN</h2>
+        <p class="muted">Paste the setup token from your SimpleFIN Bridge. Clerk claims it once and stores the resulting access URL. A token cannot be claimed twice, so generate a fresh one if this fails.</p>
+        <label class="field">
+          <span>Setup token</span>
+          <textarea name="setup_token" rows="4" placeholder="aHR0cHM6Ly9icmlkZ2Uuc2ltcGxlZmluLm9yZy8…" required></textarea>
+          <small>Clerk uses this only to read balances and connection status. It never moves money.</small>
+        </label>
+        <div class="dialog-actions">
+          <button class="button ghost" type="button" data-action="close-claim">Cancel</button>
+          <button class="button primary" value="default" type="submit">Claim token</button>
+        </div>
+      </form>
+    </dialog>
+
+    <dialog id="category-dialog" class="dialog">
+      <form method="dialog" id="category-form">
+        <button class="icon-button dialog-close" type="button" data-action="close-category" aria-label="Close">×</button>
+        <p class="eyebrow">Actual budget</p>
+        <h2>Create a category</h2>
+        <p class="muted">Clerk adds the category to Actual. Give it a budget for this month afterwards so it counts as committed spending.</p>
+        <div class="form-grid">
+          <label class="field full"><span>Category name</span><input name="name" required maxlength="100" /></label>
+          <label class="field full"><span>Category group</span><input name="group_name" list="group-options" required maxlength="100" /><small>An existing group, or a new one Actual will create.</small></label>
+        </div>
+        <datalist id="group-options"></datalist>
+        <div class="dialog-actions">
+          <button class="button ghost" type="button" data-action="close-category">Cancel</button>
+          <button class="button primary" value="default" type="submit">Create category</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast-region" id="toasts" aria-live="polite"></div>
+    <script type="module" src="/assets/app.js"></script>
+  </body>
+</html>
