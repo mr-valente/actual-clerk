@@ -25,6 +25,26 @@ class FakeGateway:
         self.skipped: list[dict[str, str]] = []
         self.error: Exception | None = None
         self.overview = overview or {"budget": {}, "categories": [], "health": []}
+        self.snapshot_payload: dict[str, Any] | None = None
+        self.probe_payload: dict[str, Any] = {
+            "budget_type_preference": "tracking",
+            "reads_table": "reflect_budgets",
+            "is_tracking": True,
+            "tables": {
+                "zero_budgets": {"rows": 0, "non_zero": 0, "total_cents": 0},
+                "reflect_budgets": {"rows": 8, "non_zero": 3, "total_cents": 400000},
+            },
+            "budget_name": "Household",
+            "budget_id": "budget-1",
+        }
+
+    async def snapshot(self, *, today=None):
+        if self.snapshot_payload is None:
+            raise ActualGatewayError("An Actual server password is not configured")
+        return self.snapshot_payload
+
+    async def run(self, fn, *, refresh: bool = True):
+        return self.probe_payload
 
     def status(self):
         return {"connected": True, "last_error": "", "last_connected_at": None}
@@ -453,3 +473,98 @@ async def test_an_ordinary_filing_run_is_not_a_catch_up(client):
 async def test_the_full_flag_is_meaningless_for_other_job_kinds(client):
     response = await client.post("/api/jobs", json={"kind": "sync", "full": True})
     assert response.json()["job"]["params"] == {}
+
+
+# --------------------------------------------------------------- diagnostics
+
+
+async def test_diagnostics_still_reports_when_actual_cannot_be_read(client, gateway):
+    """The report is most needed exactly when the budget will not open."""
+    response = await client.get("/api/diagnostics")
+    assert response.status_code == 200
+    body = response.json()
+    assert "ACTUAL CLERK DIAGNOSTIC" in body["report"]
+    assert "password is not configured" in body["report"]
+    assert body["generated_at"]
+
+
+async def test_diagnostics_reports_on_a_live_snapshot(client, gateway):
+    from tests.factories import snapshot as make_snapshot
+    from tests.factories import transaction as make_transaction
+
+    gateway.snapshot_payload = make_snapshot(
+        transactions=[
+            make_transaction(
+                datetime.date.today(), 400000, payee="Work", category_id="cat-paycheck"
+            )
+        ],
+        budgeted={"cat-paycheck": 400000, "cat-rent": 120000},
+    )
+    response = await client.get("/api/diagnostics")
+    report = response.json()["report"]
+    assert "TRACKING" in report
+    assert "Actual's Projected Savings" in report
+    assert "Checking" in report
+
+
+async def test_diagnostics_redaction_is_opt_in(client, gateway):
+    from tests.factories import account as make_account
+    from tests.factories import snapshot as make_snapshot
+
+    gateway.snapshot_payload = make_snapshot(
+        accounts=[make_account("Ally Savings")], budgeted={"cat-rent": 120000}
+    )
+    plain = (await client.get("/api/diagnostics")).json()["report"]
+    hidden = (await client.get("/api/diagnostics", params={"redact": "true"})).json()["report"]
+    assert "Ally Savings" in plain
+    assert "Ally Savings" not in hidden
+    assert "Account 1" in hidden
+
+
+# ------------------------------------------------------------------- assets
+
+
+async def test_index_stamps_asset_urls_with_a_content_hash(client):
+    """A wheel dates every file to 2020, which browsers read as licence to
+    cache for months. The stamp changes with the bytes, so a rebuilt container
+    is never served from a stale cache."""
+    import hashlib
+
+    from actual_clerk.main import STATIC_DIRECTORY
+
+    html = (await client.get("/")).text
+    for name in ("app.js", "styles.css"):
+        digest = hashlib.sha256((STATIC_DIRECTORY / name).read_bytes()).hexdigest()[:12]
+        assert f"/assets/{name}?v={digest}" in html
+        assert f'"/assets/{name}"' not in html, "an unstamped URL would keep the old cache alive"
+
+
+async def test_index_is_never_cached_without_revalidating(client):
+    response = await client.get("/")
+    assert response.headers["cache-control"] == "no-cache"
+
+
+async def test_assets_are_revalidated_rather_than_heuristically_cached(client):
+    response = await client.get("/assets/app.js")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers.get("etag")
+
+
+async def test_revalidating_an_unchanged_asset_costs_no_body(client):
+    first = await client.get("/assets/app.js")
+    again = await client.get("/assets/app.js", headers={"If-None-Match": first.headers["etag"]})
+    assert again.status_code == 304
+    assert not again.content
+
+
+async def test_the_asset_stamp_follows_the_file_contents():
+    """Rebuilding without changing an asset must not change its URL."""
+    import hashlib
+
+    from actual_clerk.main import STATIC_DIRECTORY, _asset_query
+
+    stamps = _asset_query()
+    for name, stamp in stamps.items():
+        expected = hashlib.sha256((STATIC_DIRECTORY / name).read_bytes()).hexdigest()[:12]
+        assert stamp == expected

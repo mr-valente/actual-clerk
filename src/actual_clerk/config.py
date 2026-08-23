@@ -81,7 +81,7 @@ class Settings(BaseModel):
     sync_enabled: bool = True
     sync_interval_minutes: int = Field(default=60, ge=5, le=1440)
     bank_sync_enabled: bool = True
-    transaction_stale_days: int = Field(default=4, ge=1, le=90)
+    transaction_stale_days: int = Field(default=8, ge=1, le=365)
 
     # --- Connection health ------------------------------------------------
     health_interval_minutes: int = Field(default=60, ge=5, le=1440)

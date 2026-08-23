@@ -1,16 +1,18 @@
 from __future__ import annotations
 
+import hashlib
 import logging
 import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, TextIO
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from actual_clerk import __version__
@@ -20,6 +22,7 @@ from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleC
 from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
 from actual_clerk.config import SettingsManager, data_directory
 from actual_clerk.db import Database
+from actual_clerk.diagnostics import build_report, probe_budget_file
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
 from actual_clerk.schemas import (
     ClaimSetupTokenRequest,
@@ -231,6 +234,48 @@ def _snapshot_age(snapshot: dict[str, Any]) -> float | None:
 async def refresh(request: Request) -> dict[str, Any]:
     """Read the budget immediately rather than waiting for the next tick."""
     return await _jobs(request).refresh_now()
+
+
+@app.get("/api/diagnostics")
+async def diagnostics(request: Request, redact: bool = Query(False)) -> dict[str, Any]:
+    """One plain-text report explaining every figure the Overview shows.
+
+    Reads only. The live read is attempted first so the report can compare what
+    Actual holds right now against the snapshot the dashboard is drawn from --
+    which is the difference most disagreements turn out to be.
+    """
+    settings = _settings_manager(request).get()
+    database = _database(request)
+    gateway = _gateway(request)
+    today = datetime.now(settings.zone).date()
+
+    snapshot: dict[str, Any] | None = None
+    probe: dict[str, Any] | None = None
+    snapshot_error = ""
+    try:
+        snapshot = await gateway.snapshot(today=today)
+        probe = await gateway.run(probe_budget_file, refresh=False)
+    except ActualGatewayError as exc:
+        snapshot_error = str(exc)
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail to render
+        snapshot_error = f"{type(exc).__name__}: {exc}"
+
+    report = build_report(
+        settings=settings,
+        today=today,
+        snapshot=snapshot,
+        stored_overview=database.get_snapshot(OVERVIEW_SNAPSHOT),
+        probe=probe,
+        gateway_status=gateway.status(),
+        jobs=[_serialize_job(job) for job in database.list_jobs(limit=10)],
+        last_sync=database.last_job("sync", "completed"),
+        health=[_serialize_record(item) for item in database.health_snapshots()],
+        unmonitored=database.unmonitored_account_ids(),
+        counts=database.counts(),
+        snapshot_error=snapshot_error,
+        redact=redact,
+    )
+    return {"report": report, "generated_at": datetime.now(UTC).isoformat()}
 
 
 @app.get("/api/accounts")
@@ -518,14 +563,56 @@ async def test_settings(target: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-app.mount("/assets", StaticFiles(directory=STATIC_DIRECTORY), name="assets")
+class RevalidatedStatics(StaticFiles):
+    """Assets that must be revalidated rather than trusted to look fresh.
+
+    A wheel normalises every file timestamp to a fixed date so builds are
+    reproducible, which leaves the installed assets claiming to be years old.
+    Starlette sends that date as Last-Modified and no Cache-Control at all, and
+    a browser reading those two facts together is entitled to cache the file
+    heuristically for months. That is how a freshly deployed container can go
+    on serving the previous interface. Revalidation costs one conditional
+    request per asset, answered with a bodiless 304.
+    """
+
+    def file_response(self, *args: Any, **kwargs: Any) -> Response:
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
+def _asset_query() -> dict[str, str]:
+    """A content hash per asset, so changed bytes always mean a changed URL.
+
+    This is what rescues a browser that has already cached the old asset: the
+    stamped URL is a different cache key, so nothing has to expire first.
+    """
+    stamps: dict[str, str] = {}
+    for name in ("app.js", "styles.css", "favicon.svg"):
+        try:
+            digest = hashlib.sha256((STATIC_DIRECTORY / name).read_bytes()).hexdigest()
+        except OSError:  # pragma: no cover - a missing asset is its own error
+            digest = __version__
+        stamps[name] = digest[:12]
+    return stamps
+
+
+@lru_cache(maxsize=1)
+def _index_html() -> str:
+    html = (STATIC_DIRECTORY / "index.html").read_text(encoding="utf-8")
+    for name, stamp in _asset_query().items():
+        html = html.replace(f"/assets/{name}", f"/assets/{name}?v={stamp}")
+    return html
+
+
+app.mount("/assets", RevalidatedStatics(directory=STATIC_DIRECTORY), name="assets")
 
 
 @app.get("/{path:path}", include_in_schema=False)
-async def single_page_app(path: str) -> FileResponse:
+async def single_page_app(path: str) -> Response:
     if path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
-    return FileResponse(STATIC_DIRECTORY / "index.html", headers={"Cache-Control": "no-cache"})
+    return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
 
 
 def run() -> None:

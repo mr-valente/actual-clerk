@@ -418,6 +418,8 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .change strong { display: block; font-size: 10px; }
 .change small { color: var(--ink-faint); font-size: 9px; line-height: 1.45; }
 .code-block { padding: 12px; overflow: auto; border-radius: 8px; color: #e0e7f0; background: #16233a; font: 9px/1.5 ui-monospace, monospace; white-space: pre-wrap; }
+/* The diagnostic report is column-aligned, so it must not be re-wrapped. */
+.diagnostic-output { max-height: 60vh; white-space: pre; overflow: auto; font-size: 10px; line-height: 1.45; tab-size: 4; user-select: text; }
 .resolution-box { padding: 16px; border: 1px solid var(--accent-2); border-radius: 10px; background: var(--accent-soft); }
 .resolution-box h3 { color: var(--accent); }
 .resolution-box p { color: var(--ink-soft); font-size: 10px; line-height: 1.55; }

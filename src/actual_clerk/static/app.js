@@ -609,6 +609,54 @@ async function showJob(id) {
   } catch (error) { toast("Could not load the run", error.message, "error"); closeDrawer(); }
 }
 
+// ------------------------------------------------------------- diagnostics
+
+// The report is one block of text on purpose: it is meant to be copied whole
+// into a bug report, where a screenshot of a dashboard explains nothing.
+async function runDiagnostics(redact = false) {
+  state.diagnosticsRedact = redact;
+  openDrawer(`${drawerHeader("Diagnostics", "Reading Actual…")}<div class="drawer-body"><p class="muted">Reading the budget live and comparing it with the stored overview. This takes a few seconds.</p><div class="skeleton"></div></div>`);
+  try {
+    const result = await api(`/api/diagnostics?redact=${redact ? "true" : "false"}`);
+    state.diagnosticsReport = result.report;
+    openDrawer(`${drawerHeader("Diagnostics", "Report")}<div class="drawer-body">
+      <section class="detail-section">
+        <p class="muted">Findings are listed at the top. Copy the whole report if you are asking someone for help with it.</p>
+        <div class="resolution-actions">
+          <button class="button primary" type="button" data-action="copy-diagnostics">Copy report</button>
+          <button class="button ghost" type="button" data-action="rerun-diagnostics">Run again</button>
+          <button class="button ghost" type="button" data-action="toggle-diagnostics-redact">${redact ? "Show real names" : "Hide names"}</button>
+        </div>
+        <p class="muted">${redact ? "Account, category, and group names are replaced with stable labels such as “Group 3”. Amounts and structure are kept, since those are what the report is for." : "Real names are shown. Use “Hide names” before sharing this report with anyone."}</p>
+      </section>
+      <section class="detail-section"><pre class="code-block diagnostic-output" id="diagnostic-output">${escapeHtml(result.report)}</pre></section>
+    </div>`);
+  } catch (error) {
+    toast("Could not run diagnostics", error.message, "error");
+    closeDrawer();
+  }
+}
+
+async function copyDiagnostics() {
+  const text = state.diagnosticsReport || "";
+  if (!text) return;
+  try {
+    // Only available on a secure origin, which a self-hosted Clerk often is not.
+    await navigator.clipboard.writeText(text);
+    toast("Copied", "The whole report is on your clipboard.");
+    return;
+  } catch { /* fall through to the selection fallback */ }
+  const output = document.querySelector("#diagnostic-output");
+  if (output && window.getSelection) {
+    const range = document.createRange();
+    range.selectNodeContents(output);
+    const selection = window.getSelection();
+    selection.removeAllRanges();
+    selection.addRange(range);
+    toast("Select and copy", "This browser blocked clipboard access, so the report is selected for you.", "error");
+  }
+}
+
 // ----------------------------------------------------------------- settings
 
 function settingInput(name, label, value, options = {}) {
@@ -717,7 +765,6 @@ async function renderSettings() {
           ${settingInput("monthly_income_override", "Monthly income", s.monthly_income_override, { type: "number", min: 0, step: 0.01, note: "Leave at 0 and Clerk uses the income you budgeted in Actual, then income actually received, then a trailing average. Only set this if you budget no income in Actual." })}
           ${settingInput("income_lookback_months", "Months in the income average", s.income_lookback_months, { type: "number", min: 1, max: 12 })}
           ${settingInput("budget_currency", "Currency", s.budget_currency, { note: "Three-letter code, used for display only." })}
-          ${settingInput("transaction_stale_days", "Warn when an account has no transaction for (days)", s.transaction_stale_days, { type: "number", min: 1, max: 90 })}
           ${committedGroupPicker(s)}
         </div></div></section>
 
@@ -749,9 +796,10 @@ async function renderSettings() {
           ${settingInput("appearance_motion", "Animation and motion", s.appearance_motion, { type: "select", full: true, choices: [["system", "Follow system"], ["full", "Full motion"], ["reduced", "Reduced motion"]] })}
         </div></div></section>
 
-        <section class="panel settings-section" id="settings-advanced"><header class="panel-head"><div><h3>Limits &amp; reliability</h3><p class="section-description">Bounds on how much history Clerk reads and how hard it retries.</p></div></header><div class="panel-body"><div class="form-grid">
+        <section class="panel settings-section" id="settings-advanced"><header class="panel-head"><div><h3>Limits &amp; reliability</h3><p class="section-description">Bounds on how much history Clerk reads and how hard it retries.</p></div><button class="button ghost small" type="button" data-action="run-diagnostics">Run diagnostics</button></header><div class="panel-body"><div class="form-grid">
           ${settingInput("history_lookback_days", "History read from Actual (days)", s.history_lookback_days, { type: "number", min: 30, max: 3650, note: "Feeds the memory, the recurring detection, and the income average." })}
-          ${settingInput("balance_stale_hours", "Call a bank balance stale after (hours)", s.balance_stale_hours, { type: "number", min: 2, max: 720 })}
+          ${settingInput("transaction_stale_days", "Call an account quiet after (days)", s.transaction_stale_days, { type: "number", min: 1, max: 365, note: "Drives \u201CNo recent transactions\u201D. Raise it for accounts that only see action monthly." })}
+          ${settingInput("balance_stale_hours", "Call a bank balance stale after (hours)", s.balance_stale_hours, { type: "number", min: 2, max: 720, note: "Drives \u201CStale data\u201D, which is about the age of the balance the bank reports \u2014 not how many transactions arrive." })}
           ${settingInput("balance_tolerance", "Balance difference to ignore", s.balance_tolerance, { type: "number", min: 0, step: 0.01, note: "Pending transactions make small differences normal." })}
           ${settingInput("request_timeout_seconds", "Request timeout (seconds)", s.request_timeout_seconds, { type: "number", min: 10 })}
           ${settingInput("model_max_retries", "Request retries", s.model_max_retries, { type: "number", min: 0, max: 10 })}
@@ -812,6 +860,10 @@ document.addEventListener("click", async (event) => {
     enqueue("categorize", "History catch-up", { full: true });
   }
   if (action === "check-connections") enqueue("health", "Connection check");
+  if (action === "run-diagnostics") { event.preventDefault(); await runDiagnostics(Boolean(state.diagnosticsRedact)); }
+  if (action === "rerun-diagnostics") { event.preventDefault(); await runDiagnostics(Boolean(state.diagnosticsRedact)); }
+  if (action === "copy-diagnostics") { event.preventDefault(); await copyDiagnostics(); }
+  if (action === "toggle-diagnostics-redact") { event.preventDefault(); await runDiagnostics(!state.diagnosticsRedact); }
   if (action === "run-health") enqueue("health", "Connection check");
   if (action === "job-detail") showJob(target.dataset.id);
   if (action === "review-detail") showDecision(target.dataset.id);

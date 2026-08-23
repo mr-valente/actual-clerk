@@ -314,7 +314,7 @@ def _evaluate_one(
                 "transaction is missing on one side."
             )
 
-    if days_since is not None and days_since > transaction_stale_days * 2:
+    if days_since is not None and days_since > transaction_stale_days:
         statuses.append("no_transactions")
         signals.append(f"No transaction has arrived in Actual for {days_since} days.")
     elif account.last_transaction_date is None:

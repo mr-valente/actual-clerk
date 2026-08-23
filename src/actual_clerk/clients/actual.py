@@ -18,11 +18,18 @@ import logging
 import threading
 from collections.abc import Callable, Sequence
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
 from actual import Actual, ActualError
-from actual.database import Transactions
+from actual.database import (
+    Categories,
+    CategoryMapping,
+    PayeeMapping,
+    Payees,
+    Transactions,
+)
 from actual.queries import (
     create_category,
     create_rule,
@@ -77,7 +84,64 @@ def _payee_name(transaction: Transactions) -> str:
     return str(getattr(payee, "name", "") or "")
 
 
-def transaction_dict(transaction: Transactions) -> dict[str, Any] | None:
+@dataclass(frozen=True)
+class Redirects:
+    """Where Actual sends a category or payee that was merged into another.
+
+    Deleting a category into a replacement, or merging two payees, does not
+    rewrite the transactions that referenced the original. Actual records a
+    redirect instead and resolves it on every read -- its own `v_transactions`
+    view and its query layer both join through `category_mapping` and
+    `payee_mapping`, and a freshly created row is mapped to itself. Reading
+    `transactions.category` without that hop yields an id that no longer names
+    anything, which is spending that has quietly lost its category.
+    """
+
+    categories: dict[str, str]
+    payees: dict[str, str]
+    category_names: dict[str, str]
+    payee_names: dict[str, str]
+
+    @staticmethod
+    def _follow(mapping: dict[str, str], identifier: str) -> str:
+        # Actual repoints existing redirects when it merges, so a chain should
+        # not arise; the bound only stops a corrupt file from spinning here.
+        seen = set()
+        while identifier in mapping and identifier not in seen:
+            seen.add(identifier)
+            identifier = mapping[identifier]
+        return identifier
+
+    def category(self, identifier: str | None) -> str | None:
+        return self._follow(self.categories, identifier) if identifier else identifier
+
+    def payee(self, identifier: str | None) -> str | None:
+        return self._follow(self.payees, identifier) if identifier else identifier
+
+
+def read_redirects(session: Any) -> Redirects:
+    """Load Actual's category and payee redirect tables."""
+    categories = {
+        row.id: row.transfer_id
+        for row in session.exec(select(CategoryMapping)).all()
+        if row.transfer_id and row.transfer_id != row.id
+    }
+    payees = {
+        row.id: row.target_id
+        for row in session.exec(select(PayeeMapping)).all()
+        if row.target_id and row.target_id != row.id
+    }
+    category_names = {
+        row.id: str(row.name or "")
+        for row in session.exec(select(Categories)).all()
+    }
+    payee_names = {row.id: str(row.name or "") for row in session.exec(select(Payees)).all()}
+    return Redirects(categories, payees, category_names, payee_names)
+
+
+def transaction_dict(
+    transaction: Transactions, redirects: Redirects | None = None
+) -> dict[str, Any] | None:
     """Flatten one Actual transaction into the shape the rest of Clerk uses.
 
     Returns None for a row Clerk cannot place in time. Every number Clerk
@@ -89,14 +153,23 @@ def transaction_dict(transaction: Transactions) -> dict[str, Any] | None:
         return None
     account = getattr(transaction, "account", None)
     category = getattr(transaction, "category", None)
+    category_id = transaction.category_id
+    category_name = str(getattr(category, "name", "") or "")
     payee = _payee_name(transaction)
+    if redirects is not None:
+        category_id = redirects.category(category_id)
+        if category_id != transaction.category_id:
+            category_name = redirects.category_names.get(category_id or "", "")
+        payee_id = redirects.payee(transaction.payee_id)
+        if payee_id != transaction.payee_id:
+            payee = redirects.payee_names.get(payee_id or "", payee)
     description = transaction.imported_description or ""
     return {
         "id": transaction.id,
         "date": transaction.get_date(),
         "amount_cents": int(transaction.amount or 0),
-        "category_id": transaction.category_id,
-        "category_name": str(getattr(category, "name", "") or ""),
+        "category_id": category_id,
+        "category_name": category_name,
         "payee_name": payee,
         "imported_description": description,
         "merchant_key": normalize_merchant(payee, description),
@@ -140,6 +213,82 @@ def account_balances(session: Any) -> dict[str, tuple[int, int]]:
     return {row[0]: (int(row[1] or 0), int(row[2] or 0)) for row in rows}
 
 
+def transaction_fingerprints(session: Any) -> dict[str, tuple[str | None, str | None]]:
+    """The fields a re-delivered import overwrites in place, before it runs."""
+    return {
+        row[0]: (row[1], row[2])
+        for row in session.exec(
+            select(Transactions.id, Transactions.payee_id, Transactions.notes)
+        ).all()
+    }
+
+
+def restore_overwritten(
+    imported: Sequence[Transactions], before: dict[str, tuple[str | None, str | None]]
+) -> tuple[list[Transactions], int]:
+    """Separate genuinely new transactions, undoing edits to ones already held.
+
+    Returns the new transactions and how many existing ones were put back.
+    """
+    fresh: list[Transactions] = []
+    protected = 0
+    for item in imported:
+        prior = before.get(item.id)
+        if prior is None:
+            fresh.append(item)
+            continue
+        payee_id, notes = prior
+        if item.payee_id != payee_id or (item.notes or "") != (notes or ""):
+            item.payee_id = payee_id
+            item.notes = notes
+            protected += 1
+    return fresh, protected
+
+
+def write_updates(
+    session: Any, updates: Sequence[dict[str, Any]], *, overwrite: bool = False
+) -> dict[str, Any]:
+    """Apply category and tag updates to open transactions, reporting refusals.
+
+    Separate from the gateway so the rules it enforces can be exercised against
+    a real budget database rather than described by a mock.
+    """
+    applied: list[str] = []
+    skipped: list[dict[str, str]] = []
+    # Actual does not enforce this column as a foreign key, so a stale id would
+    # be written happily and read back later as spending with no category.
+    # Refuse it here rather than discover it in a report weeks later.
+    live_categories = {row.id for row in session.exec(select(Categories)).all()}
+    for update in updates:
+        transaction = session.get(Transactions, update["transaction_id"])
+        if transaction is None or transaction.tombstone:
+            skipped.append({"id": update["transaction_id"], "reason": "deleted"})
+            continue
+        category_id = update.get("category_id")
+        if category_id and category_id not in live_categories:
+            skipped.append({"id": transaction.id, "reason": "unknown_category"})
+            continue
+        occupied = bool(transaction.category_id) and transaction.category_id != category_id
+        if category_id and occupied and not overwrite:
+            skipped.append({"id": transaction.id, "reason": "already_categorized"})
+            continue
+        changed = False
+        if category_id and transaction.category_id != category_id:
+            transaction.category_id = category_id
+            changed = True
+        add_tags = update.get("add_tags") or []
+        if add_tags:
+            notes = apply_tags(transaction.notes, add_tags)
+            if notes != (transaction.notes or ""):
+                transaction.notes = notes
+                changed = True
+        if changed:
+            applied.append(transaction.id)
+        else:
+            skipped.append({"id": transaction.id, "reason": "no_change"})
+    return {"applied": applied, "skipped": skipped}
+
+
 def collect_snapshot(actual: Actual, *, settings: Settings, today: datetime.date) -> dict[str, Any]:
     """Read everything Clerk needs from the budget in one pass."""
     session = actual.session
@@ -170,6 +319,7 @@ def collect_snapshot(actual: Actual, *, settings: Settings, today: datetime.date
             }
         )
 
+    redirects = read_redirects(session)
     balances = account_balances(session)
     accounts = []
     for account in get_accounts(session):
@@ -195,7 +345,7 @@ def collect_snapshot(actual: Actual, *, settings: Settings, today: datetime.date
     transactions = [
         flattened
         for flattened in (
-            transaction_dict(item)
+            transaction_dict(item, redirects)
             for item in get_transactions(session, start_date=history_start, end_date=history_end)
         )
         if flattened is not None
@@ -204,11 +354,25 @@ def collect_snapshot(actual: Actual, *, settings: Settings, today: datetime.date
     # Every month's budget, not just this one: a bill accrued a twelfth at a
     # time is only understood by looking at what earlier months set aside.
     budgeted_history: dict[str, dict[str, int]] = {}
+    # A budget row keeps the category id it was written against, so merging a
+    # category leaves its budget addressed to a name that no longer exists.
+    # Those rows are followed to the surviving category, but only where it has
+    # no row of its own for that month -- a merge must never invent money.
+    inherited: dict[str, dict[str, int]] = {}
     for budget in get_budgets(session):
         if not budget.category_id or budget.month is None:
             continue
         key = budget.get_date().strftime("%Y-%m")
-        budgeted_history.setdefault(key, {})[budget.category_id] = int(budget.amount or 0)
+        target = redirects.category(budget.category_id) or budget.category_id
+        amount = int(budget.amount or 0)
+        if target == budget.category_id:
+            budgeted_history.setdefault(key, {})[target] = amount
+        else:
+            inherited.setdefault(key, {})[target] = amount
+    for key, rows in inherited.items():
+        month_rows = budgeted_history.setdefault(key, {})
+        for category_id, amount in rows.items():
+            month_rows.setdefault(category_id, amount)
     budgeted = budgeted_history.get(today.strftime("%Y-%m"), {})
 
     last_transaction: dict[str, datetime.date] = {}
@@ -401,14 +565,37 @@ class ActualGateway:
         return await self.run(_test)
 
     async def bank_sync(self, *, run_rules: bool = True) -> dict[str, Any]:
-        """Ask Actual's server to pull fresh transactions from the bank."""
+        """Ask Actual's server to pull fresh transactions from the bank.
+
+        The import asks each account for everything since the newest
+        transaction it already holds, so a quiet account re-delivers the same
+        tail on every run. A re-delivered transaction is matched to the one
+        already stored and has its payee and notes overwritten in place, which
+        both erases the tags Clerk wrote and silently reverts a payee a rule
+        had set. Two guards keep a repeat delivery from being destructive:
+        anything the import rewrote on a transaction that already existed is
+        put back, and Actual's rules are run only over transactions that are
+        genuinely new, which is when Actual itself runs them.
+
+        The second guard matters most for a rule that sets a transfer payee.
+        Reverting the payee leaves `transferred_id` still pointing at the
+        counterpart, so re-running that rule finds an ordinary payee, skips
+        the clean-up that would have removed the old transfer, and builds a
+        second counterpart -- once per sync, forever.
+        """
 
         def _sync(actual: Actual) -> dict[str, Any]:
-            imported = actual.run_bank_sync(run_rules=run_rules)
+            before = transaction_fingerprints(actual.session)
+            imported = actual.run_bank_sync(run_rules=False)
+            fresh, protected = restore_overwritten(imported, before)
+            if run_rules and fresh:
+                actual.run_rules(fresh)
             if imported:
                 actual.commit()
             return {
                 "imported": len(imported),
+                "new": len(fresh),
+                "protected": protected,
                 "accounts": sorted(
                     {str(getattr(getattr(item, "account", None), "name", "") or "") for item in imported}
                     - {""}
@@ -439,36 +626,10 @@ class ActualGateway:
         """
 
         def _apply(actual: Actual) -> dict[str, Any]:
-            session = actual.session
-            applied: list[str] = []
-            skipped: list[dict[str, str]] = []
-            for update in updates:
-                transaction = session.get(Transactions, update["transaction_id"])
-                if transaction is None or transaction.tombstone:
-                    skipped.append({"id": update["transaction_id"], "reason": "deleted"})
-                    continue
-                category_id = update.get("category_id")
-                occupied = bool(transaction.category_id) and transaction.category_id != category_id
-                if category_id and occupied and not overwrite:
-                    skipped.append({"id": transaction.id, "reason": "already_categorized"})
-                    continue
-                changed = False
-                if category_id and transaction.category_id != category_id:
-                    transaction.category_id = category_id
-                    changed = True
-                add_tags = update.get("add_tags") or []
-                if add_tags:
-                    notes = apply_tags(transaction.notes, add_tags)
-                    if notes != (transaction.notes or ""):
-                        transaction.notes = notes
-                        changed = True
-                if changed:
-                    applied.append(transaction.id)
-                else:
-                    skipped.append({"id": transaction.id, "reason": "no_change"})
-            if applied:
+            result = write_updates(actual.session, updates, overwrite=overwrite)
+            if result["applied"]:
                 actual.commit()
-            return {"applied": applied, "skipped": skipped}
+            return result
 
         if not updates:
             return {"applied": [], "skipped": []}

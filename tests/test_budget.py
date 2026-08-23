@@ -505,3 +505,58 @@ def test_month_helpers():
     assert months_before(datetime.date(2026, 3, 1), 3) == ["2025-12", "2026-01", "2026-02"]
     assert months_before(datetime.date(2026, 1, 1), 2) == ["2025-11", "2025-12"]
     assert months_before(datetime.date(2026, 3, 1), 0) == []
+
+
+# ----------------------------------------------- categories Actual deleted
+
+
+def test_spending_on_a_deleted_category_counts_as_uncategorized():
+    """Actual tombstones a deleted category and leaves its transactions
+    pointing at it, so the id survives with nothing to resolve it to."""
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 11), -250456, "cat-that-was-deleted"),
+        ]
+    )
+    assert result.uncategorized_cents == 250456
+    assert result.uncategorized_count == 1
+    # It is still real spending, so it still competes for free money.
+    assert result.discretionary_spent_cents == 250456
+
+
+def test_a_deleted_category_never_appears_as_a_named_top_category():
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 11), -250456, "cat-that-was-deleted"),
+            TransactionInfo("3", datetime.date(2026, 8, 12), -3000, "out"),
+        ]
+    )
+    assert [line["category_id"] for line in result.top_categories] == ["out"]
+
+
+def test_a_refund_on_a_deleted_category_gives_the_money_back():
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 11), -9000, "gone"),
+            TransactionInfo("3", datetime.date(2026, 8, 13), 3000, "gone"),
+        ]
+    )
+    assert result.uncategorized_cents == 6000
+    assert result.discretionary_spent_cents == 6000
+
+
+def test_a_hidden_category_is_still_a_real_category():
+    """Hidden is not deleted: Actual still returns it, so it keeps its name."""
+    categories = [*CATEGORIES, CategoryInfo("old", "Old Hobby", "Everyday", hidden=True)]
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 11), -4200, "old"),
+        ],
+        categories=categories,
+    )
+    assert result.uncategorized_cents == 0
+    assert [line["category_id"] for line in result.top_categories] == ["old"]

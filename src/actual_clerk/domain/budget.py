@@ -253,6 +253,13 @@ def build_budget_report(
         if transaction.is_starting_balance:
             continue
         category_id = transaction.category_id or ""
+        # Deleting a category in Actual tombstones it rather than removing it,
+        # and every transaction that referenced it keeps pointing at it. Money
+        # sitting in a category that no longer exists is uncategorized in the
+        # only sense that matters, and counting it as such is what puts it back
+        # in front of you instead of silently swelling discretionary spending.
+        if category_id and category_id not in by_id:
+            category_id = ""
         if category_id and category_id in income_ids:
             # Income lands on-budget only; a transfer is not new money.
             if not transaction.off_budget and not transaction.is_transfer:
