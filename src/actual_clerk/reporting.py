@@ -18,7 +18,6 @@ from actual_clerk.domain.budget import (
     month_bounds,
 )
 from actual_clerk.domain.health import ActualAccountInfo, SimpleFinAccountInfo
-from actual_clerk.domain.recurring import Charge, detect_recurring, summarize_recurring
 
 
 def to_category_infos(snapshot: dict[str, Any]) -> list[CategoryInfo]:
@@ -113,45 +112,6 @@ def budget_report(
     return report.as_dict()
 
 
-def recurring_report(
-    snapshot: dict[str, Any], *, today: datetime.date
-) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    charges = [
-        Charge(
-            date=item["date"],
-            amount_cents=item["amount_cents"],
-            merchant_key=item["merchant_key"],
-            payee_name=item["payee_name"] or item["merchant_label"],
-            category_id=item.get("category_id"),
-            category_name=item.get("category_name", ""),
-            account_name=item.get("account_name", ""),
-        )
-        for item in snapshot["transactions"]
-        if not item.get("is_transfer")
-        and not item.get("is_starting_balance")
-        and not item.get("off_budget")
-    ]
-    series = detect_recurring(charges, today=today, budgeted_by_category=snapshot["budgeted"])
-    return [item.as_dict() for item in series], summarize_recurring(series)
-
-
-def upcoming_charges(
-    series: list[dict[str, Any]], *, today: datetime.date, within_days: int = 7
-) -> list[dict[str, Any]]:
-    """Recurring charges expected in the next few days, soonest first."""
-    horizon = today + datetime.timedelta(days=within_days)
-    upcoming = []
-    for item in series:
-        try:
-            expected = datetime.date.fromisoformat(item["next_expected"])
-        except (KeyError, ValueError):
-            continue
-        if today <= expected <= horizon:
-            upcoming.append(item)
-    upcoming.sort(key=lambda item: item["next_expected"])
-    return upcoming
-
-
 def freshness(
     snapshot: dict[str, Any],
     settings: Settings,
@@ -203,18 +163,3 @@ def freshness(
     }
 
 
-def spending_trend(snapshot: dict[str, Any], *, today: datetime.date, months: int = 6) -> list[dict]:
-    """Discretionary-versus-committed spend per month, for the dashboard chart."""
-    totals: dict[tuple[int, int], int] = {}
-    for item in snapshot["transactions"]:
-        if item.get("off_budget") or item.get("is_transfer") or item.get("is_starting_balance"):
-            continue
-        if item["amount_cents"] >= 0:
-            continue
-        key = (item["date"].year, item["date"].month)
-        totals[key] = totals.get(key, 0) - item["amount_cents"]
-    ordered = sorted(totals)[-months:]
-    return [
-        {"month": f"{year:04d}-{month:02d}", "spent_cents": totals[(year, month)]}
-        for year, month in ordered
-    ]

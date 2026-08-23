@@ -5,11 +5,8 @@ import datetime
 from actual_clerk.reporting import (
     budget_report,
     freshness,
-    recurring_report,
-    spending_trend,
     to_actual_accounts,
     to_simplefin_accounts,
-    upcoming_charges,
 )
 
 from .factories import account, snapshot, transaction
@@ -53,50 +50,6 @@ def test_an_income_override_reaches_the_report(settings):
     assert report["income_basis"] == "override"
 
 
-def test_recurring_detection_ignores_transfers_and_off_budget_accounts(settings):
-    charges = [
-        transaction(
-            TODAY - datetime.timedelta(days=30 * index + 6),
-            -1599,
-            payee="Netflix",
-            category_id="cat-subscriptions",
-        )
-        for index in range(4)
-    ]
-    noise = [
-        transaction(
-            TODAY - datetime.timedelta(days=30 * index + 6),
-            -2000,
-            payee="Brokerage",
-            off_budget=True,
-        )
-        for index in range(4)
-    ] + [
-        transaction(
-            TODAY - datetime.timedelta(days=30 * index + 6),
-            -3000,
-            payee="Savings Move",
-            is_transfer=True,
-        )
-        for index in range(4)
-    ]
-    series, summary = recurring_report(snapshot(transactions=charges + noise), today=TODAY)
-    assert [item["label"] for item in series] == ["Netflix"]
-    assert summary["count"] == 1
-
-
-def test_upcoming_charges_are_bounded_and_ordered():
-    series = [
-        {"label": "Late", "next_expected": "2026-08-30"},
-        {"label": "Soon", "next_expected": "2026-08-23"},
-        {"label": "Far", "next_expected": "2026-09-30"},
-        {"label": "Past", "next_expected": "2026-08-10"},
-        {"label": "Broken"},
-    ]
-    upcoming = upcoming_charges(series, today=TODAY, within_days=10)
-    assert [item["label"] for item in upcoming] == ["Soon", "Late"]
-
-
 def test_freshness_flags_a_synced_account_that_stopped_delivering(settings):
     settings.transaction_stale_days = 4
     snap = snapshot(
@@ -135,30 +88,6 @@ def test_a_synced_account_with_no_history_is_stale(settings):
 def test_closed_accounts_are_left_out_of_freshness(settings):
     snap = snapshot(accounts=[account("Old", closed=True)], transactions=[])
     assert freshness(snap, settings, today=TODAY)["accounts"] == []
-
-
-def test_the_trend_sums_on_budget_outflow_per_month():
-    snap = snapshot(
-        transactions=[
-            transaction(datetime.date(2026, 7, 3), -5000, payee="A"),
-            transaction(datetime.date(2026, 7, 9), -2500, payee="B"),
-            transaction(datetime.date(2026, 8, 4), -1000, payee="C"),
-            transaction(datetime.date(2026, 8, 5), 40000, payee="Pay"),
-            transaction(datetime.date(2026, 8, 6), -9999, payee="Moved", is_transfer=True),
-            transaction(datetime.date(2026, 8, 7), -8888, payee="Brokerage", off_budget=True),
-        ]
-    )
-    assert spending_trend(snap, today=TODAY) == [
-        {"month": "2026-07", "spent_cents": 7500},
-        {"month": "2026-08", "spent_cents": 1000},
-    ]
-
-
-def test_the_trend_is_bounded_to_the_requested_months():
-    transactions = [
-        transaction(datetime.date(2025, month, 5), -1000, payee="X") for month in range(1, 13)
-    ]
-    assert len(spending_trend(snapshot(transactions=transactions), today=TODAY, months=6)) == 6
 
 
 def test_snapshot_accounts_convert_for_the_health_check():

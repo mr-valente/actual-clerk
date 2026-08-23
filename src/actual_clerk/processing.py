@@ -32,11 +32,8 @@ from actual_clerk.domain.health import evaluate_accounts, summarize
 from actual_clerk.reporting import (
     budget_report,
     freshness,
-    recurring_report,
-    spending_trend,
     to_actual_accounts,
     to_simplefin_accounts,
-    upcoming_charges,
 )
 
 log = logging.getLogger(__name__)
@@ -416,9 +413,15 @@ class JobManager:
             await client.close()
 
     async def _run_digest(self, job: dict[str, Any], settings: Settings) -> dict[str, Any]:
+        """Build the morning report and deliver it.
+
+        A forced run is a rehearsal: it sends the same message but does not
+        reserve today's date, so the real morning delivery still happens.
+        """
+        forced = bool((job.get("params") or {}).get("force"))
         local_now = datetime.datetime.now(settings.zone)
         local_date = local_now.date().isoformat()
-        if not self.database.claim_digest(local_date):
+        if not forced and not self.database.claim_digest(local_date):
             return {"skipped": "already sent today"}
         try:
             today = local_now.date()
@@ -428,16 +431,19 @@ class JobManager:
                 report=overview["budget"],
                 health=self.database.health_snapshots(),
                 review_count=self.database.counts()["needs_review"],
-                recurring_summary=overview["recurring_summary"],
-                upcoming=overview["upcoming"],
                 currency=settings.budget_currency,
                 today=today,
             )
             if not settings.notifications_enabled:
-                self.database.complete_digest(
-                    local_date, payload, delivered=False, error="notifications are disabled"
-                )
-                return {"delivered": False, "reason": "notifications are disabled"}
+                if not forced:
+                    self.database.complete_digest(
+                        local_date, payload, delivered=False, error="notifications are disabled"
+                    )
+                return {
+                    "delivered": False,
+                    "forced": forced,
+                    "reason": "notifications are disabled",
+                }
             client = NtfyClient(settings)
             try:
                 await client.publish(
@@ -448,12 +454,14 @@ class JobManager:
                 )
             finally:
                 await client.close()
-            self.database.complete_digest(local_date, payload, delivered=True)
-            return {"delivered": True, "title": payload["title"]}
+            if not forced:
+                self.database.complete_digest(local_date, payload, delivered=True)
+            return {"delivered": True, "forced": forced, "title": payload["title"]}
         except Exception:
             # Release the claim so a retry, or tomorrow's run, is not blocked
             # by a digest that never actually went out.
-            self.database.release_digest(local_date)
+            if not forced:
+                self.database.release_digest(local_date)
             raise
 
     # ------------------------------------------------------------- overview
@@ -466,16 +474,11 @@ class JobManager:
         health: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         unmonitored = self.database.unmonitored_account_ids()
-        series, summary = recurring_report(snapshot, today=today)
         overview = {
             "budget": budget_report(snapshot, settings, today=today),
-            "recurring": series,
-            "recurring_summary": summary,
-            "upcoming": upcoming_charges(series, today=today),
             "freshness": freshness(
                 snapshot, settings, today=today, unmonitored_ids=unmonitored
             ),
-            "trend": spending_trend(snapshot, today=today),
             "accounts": [
                 {
                     "id": account["id"],

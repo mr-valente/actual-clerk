@@ -22,17 +22,11 @@ from typing import Any
 _TAG_PATTERN = re.compile(r"#([^\s#]+)")
 _VALID_TAG = re.compile(r"^[^\s#]+$")
 
-SUBSCRIPTION = "subscription"
-RECURRING = "recurring"
-ANNUAL = "annual"
 UNUSUAL = "unusual"
 REFUND = "refund"
 
 # Colours come from Actual's own palette so Clerk's tags look native.
 TAG_DEFINITIONS: dict[str, tuple[str, str]] = {
-    SUBSCRIPTION: ("#8719e0", "Charged on a schedule for a fixed amount"),
-    RECURRING: ("#1980d4", "Charged on a schedule for a varying amount"),
-    ANNUAL: ("#7a0ecc", "Renews once a year"),
     UNUSUAL: ("#b88115", "Much larger than this merchant's usual charge"),
     REFUND: ("#147d64", "Money returned rather than spent"),
 }
@@ -115,23 +109,12 @@ def derive_tags(
     *,
     amount_cents: int,
     merchant_key: str,
-    recurring_kind: str = "",
-    recurring_interval_days: float = 0.0,
     stats: MerchantStats | None = None,
-    tag_cadence: bool = True,
     tag_anomalies: bool = True,
 ) -> list[str]:
     """Decide which descriptive tags a transaction has earned."""
 
     tags: list[str] = []
-    if tag_cadence and merchant_key:
-        if recurring_kind == "subscription":
-            tags.append(SUBSCRIPTION)
-        elif recurring_kind == "recurring":
-            tags.append(RECURRING)
-        if recurring_kind and recurring_interval_days >= 350:
-            tags.append(ANNUAL)
-
     if tag_anomalies:
         if amount_cents > 0:
             tags.append(REFUND)

@@ -66,7 +66,6 @@ class Settings(BaseModel):
     tagging_enabled: bool = True
     clerk_tag: str = Field(default="clerk", max_length=40)
     tag_provenance: bool = True
-    tag_cadence: bool = True
     tag_anomalies: bool = True
 
     # --- Budget report ----------------------------------------------------
@@ -280,7 +279,6 @@ ENVIRONMENT_FIELDS = {
     "CLERK_TAGGING_ENABLED": "tagging_enabled",
     "CLERK_TAG": "clerk_tag",
     "CLERK_TAG_PROVENANCE": "tag_provenance",
-    "CLERK_TAG_CADENCE": "tag_cadence",
     "CLERK_TAG_ANOMALIES": "tag_anomalies",
     "CLERK_COMMITTED_GROUPS": "committed_groups",
     "CLERK_MONTHLY_INCOME": "monthly_income_override",

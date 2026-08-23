@@ -45,8 +45,6 @@ To add a group, scroll to the bottom of the category list and use the add-group 
 
 Group names do not matter to Clerk. What matters is which categories carry a budgeted amount.
 
-> **Tip.** Open Clerk's **Recurring** page first. Clerk has already scanned your history and listed everything billing on a schedule, with its monthly cost. Anything flagged *No budget set for its category this month* is a bill still unaccounted for.
-
 ## Step 3. Budget your expected income
 
 1. On the **Budget** screen, find the **Income** group. Actual keeps exactly one.
@@ -155,7 +153,7 @@ Having copied the year forward in step 4, there is nothing to do month to month.
 | A bill changes | Update that category and copy it forward from the month the change takes effect |
 | A new bill starts | Add the category, budget it, copy it forward |
 
-Forget entirely and Clerk says so: free money jumps to your whole income, and every recurring charge gains a *No budget set* flag on the Recurring page.
+Forget entirely and Clerk says so: free money jumps to your whole income, because nothing is committed against it.
 
 ## How free money is calculated
 

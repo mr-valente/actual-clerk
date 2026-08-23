@@ -18,7 +18,6 @@ const state = {
   settings: null,
   health: null,
   jobFilter: "all",
-  recurringFilter: "all",
   poll: null,
 };
 
@@ -26,7 +25,6 @@ const pageMeta = {
   overview: ["Budget", "Overview"],
   review: ["Needs a decision", "Review"],
   accounts: ["Bank sync", "Connections"],
-  recurring: ["Commitments", "Recurring"],
   activity: ["History", "Activity"],
   settings: ["Configuration", "Settings"],
 };
@@ -158,7 +156,7 @@ function budgetHero() {
     return `<section class="hero"><div class="hero-top"><div class="hero-headline"><p class="eyebrow">Free money</p><div class="hero-amount"><strong>—</strong></div><p class="hero-sub">Clerk has not read the budget yet. Run a sync, or check the Actual connection in Settings.</p></div></div></section>`;
   }
   if (!report.configured) {
-    return `<section class="hero"><div class="hero-top"><div class="hero-headline"><p class="eyebrow">Free money</p><div class="hero-amount"><strong>Set your income</strong></div><p class="hero-sub">Clerk works out free money as expected income minus everything you have budgeted. It cannot find any income yet. Budget your expected income against an income category in Actual (the tracking budget asks for exactly this), or enter a monthly figure in Clerk's settings.</p></div><div class="hero-side"><a class="button primary" href="#settings-budget">Set monthly income</a></div></div></section>`;
+    return `<section class="hero"><div class="hero-top"><div class="hero-headline"><p class="eyebrow">Free money</p><div class="hero-amount"><strong>Set your income</strong></div><p class="hero-sub">Clerk works out free money as expected income minus everything you have budgeted. It cannot find any income yet. Budget your expected income against an income category in Actual -- the tracking budget asks for exactly this.</p></div><div class="hero-side"><a class="button primary" href="#settings-actual">Open settings</a></div></div></section>`;
   }
 
   const free = report.free_cents || 0;
@@ -168,6 +166,15 @@ function budgetHero() {
   const paceRatio = report.days_in_month ? report.day_of_month / report.days_in_month : 0;
   const overspent = remaining < 0;
   const paceClass = report.on_track ? "pace-ahead" : "pace-behind";
+  // "-49% left" reads as a quantity of something you still have. Past zero the
+  // honest phrasing is how far past it you are.
+  const share = Number(report.remaining_percent) || 0;
+  const shareLabel = free <= 0 ? "" : share < 0
+    ? `${percent(Math.abs(share))} over budget`
+    : `${percent(share)} left`;
+  const paceDelta = Math.abs(report.pace_delta_cents || 0);
+  const paceTitle = `An even month would have spent ${money(report.pace_expected_cents)} by day `
+    + `${report.day_of_month} of ${report.days_in_month}. You have spent ${money(spent)}.`;
   const incomeNote = {
     override: "from the monthly income you set in Clerk",
     budgeted: "from the income you budgeted in Actual",
@@ -182,7 +189,7 @@ function budgetHero() {
         <p class="eyebrow">Free money · ${escapeHtml(report.month)} · day ${report.day_of_month} of ${report.days_in_month}</p>
         <div class="hero-amount ${overspent ? "spent" : ""}">
           <strong>${money(remaining)}</strong>
-          <span class="pct">${percent(report.remaining_percent)} left</span>
+          ${shareLabel ? `<span class="pct">${shareLabel}</span>` : ""}
         </div>
         <p class="hero-sub">${overspent
           ? `You are ${money(Math.abs(remaining))} past the free money for this month.`
@@ -190,7 +197,7 @@ function budgetHero() {
       </div>
       <div class="hero-side">
         <div class="hero-chip"><span>Safe to spend daily</span><strong>${money(report.daily_safe_to_spend_cents)}</strong></div>
-        <div class="hero-chip ${paceClass}"><span>${report.on_track ? "Ahead of pace" : "Behind pace"}</span><strong>${money(Math.abs(report.pace_delta_cents))}</strong></div>
+        <div class="hero-chip ${paceClass}" title="${escapeHtml(paceTitle)}"><span>${report.on_track ? "Under an even pace" : "Over an even pace"}</span><strong>${money(paceDelta)}</strong></div>
       </div>
     </div>
     <div class="gauge" role="img" aria-label="${percent(report.spent_percent)} of free money spent">
@@ -235,24 +242,6 @@ function healthRow(item, { actions = true, toggle = false } = {}) {
   </article>`;
 }
 
-function reviewRow(item) {
-  const proposal = item.category_name || item.proposed_category || "No suggestion";
-  const options = (overview().categories || []).map((category) =>
-    `<option value="${escapeHtml(category.id)}" ${category.id === item.category_id ? "selected" : ""}>${escapeHtml(category.group_name ? `${category.group_name} · ${category.name}` : category.name)}</option>`).join("");
-  return `<article class="data-row review-row">
-    <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${shortDate(item.transaction_date)} · ${escapeHtml(item.account_name)} · <span class="money">${money(item.amount_cents)}</span></small>${(item.tags || []).length ? `<span class="tag-list">${item.tags.map((tag) => `<span class="tag">#${escapeHtml(tag)}</span>`).join("")}</span>` : ""}</div>
-    <div><select class="select-inline" data-role="review-category" data-id="${escapeHtml(item.id)}"><option value="">${escapeHtml(item.category_id ? proposal : "Choose a category…")}</option>${options}</select></div>
-    <div>${statusChip(item.source)}</div>
-    <div class="row-meta"><span class="confidence ${item.confidence < 0.5 ? "low" : ""}">${percent(item.confidence)}</span><br /><span>confidence</span></div>
-    <div class="row-actions">
-      ${item.proposed_category ? `<button class="button secondary small" data-action="create-category" data-name="${escapeHtml(item.proposed_category)}" title="The model found no existing category for this merchant">+ ${escapeHtml(item.proposed_category)}</button>` : ""}
-      <button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(item.id)}">Why</button>
-      <button class="button ghost small" data-action="review-dismiss" data-id="${escapeHtml(item.id)}">Skip</button>
-      <button class="button primary small" data-action="review-accept" data-id="${escapeHtml(item.id)}">Apply</button>
-    </div>
-  </article>`;
-}
-
 function ruleRow(item) {
   return `<article class="data-row rule-row">
     <span class="mark">⚡</span>
@@ -262,16 +251,6 @@ function ruleRow(item) {
       <button class="button ghost small" data-action="rule-decline" data-id="${escapeHtml(item.id)}">No thanks</button>
       <button class="button primary small" data-action="rule-create" data-id="${escapeHtml(item.id)}">Create rule</button>
     </div>
-  </article>`;
-}
-
-function recurringRow(item) {
-  return `<article class="data-row recurring-row">
-    <span class="mark ${escapeHtml(item.kind)}">${item.kind === "subscription" ? "∞" : "↻"}</span>
-    <div class="row-title"><strong>${escapeHtml(item.label)}</strong><small>${escapeHtml(titleCase(item.cadence))} · ${escapeHtml(item.category_name || "Uncategorized")} · ${item.occurrences} charge(s)</small>${item.flags.length ? `<span class="tag-list">${item.flags.map((flag) => `<span class="tag">${escapeHtml(flag)}</span>`).join("")}</span>` : ""}</div>
-    <div class="row-amount money">${money(item.latest_amount_cents)}</div>
-    <div class="row-amount money">${money(item.monthly_cost_cents)}<br /><span class="row-meta">per month</span></div>
-    <div class="row-meta">Next ${shortDate(item.next_expected)}${item.days_overdue ? `<br /><span class="danger-text">${item.days_overdue} day(s) late</span>` : ""}</div>
   </article>`;
 }
 
@@ -349,7 +328,6 @@ async function renderRoute({ quiet = false } = {}) {
     if (state.route === "overview") await renderOverview();
     if (state.route === "review") await renderReview();
     if (state.route === "accounts") await renderAccounts();
-    if (state.route === "recurring") renderRecurring();
     if (state.route === "activity") await renderActivity();
     if (state.route === "settings") await renderSettings();
   } catch (error) {
@@ -360,23 +338,20 @@ async function renderRoute({ quiet = false } = {}) {
 
 async function renderOverview() {
   const data = state.data;
-  const view = overview();
   const counts = data.counts || {};
+  const view = overview();
   // Everything read straight off the snapshot first, then anything derived
   // from it -- a derived value placed above its source throws.
   const health = view.health || [];
   const fresh = view.freshness || {};
-  const recurringSummary = view.recurring_summary || {};
-  const upcoming = view.upcoming || [];
-  const trend = view.trend || [];
   const report = budget();
 
   const degraded = health.filter(isDegraded);
-  const watched = health.filter(isWatched);
-  const quiet = watched.filter(isQuiet);
-  const mutedCount = health.filter((item) => item.status === "muted").length;
   const staleAccounts = (fresh.accounts || []).filter((item) => item.stale);
-  const maxTrend = Math.max(1, ...trend.map((item) => item.spent_cents));
+  // Everything else on this page is only as true as the last read, so the one
+  // thing worth reporting about Clerk itself is when that read happened.
+  const staleSnapshot = Number(data.stale) > 6 * 3600;
+  const lastRead = data.last_sync?.completed_at ? relativeTime(data.last_sync.completed_at) : "not yet";
 
   const configured = state.health?.configured || {};
   const setupBanner = !configured.actual
@@ -393,60 +368,116 @@ async function renderOverview() {
     ${budgetHero()}
 
     <section class="grid metrics">
-      <article class="metric-card ${counts.needs_review ? "warning" : "good"}"><span class="metric-icon">◇</span><span class="metric-label">Waiting for you</span><div class="metric-value">${counts.needs_review || 0}</div><span class="metric-note">${counts.applied_today || 0} filed automatically today</span></article>
-      <article class="metric-card ${degraded.length ? "error" : "good"}"><span class="metric-icon">⇄</span><span class="metric-label">Bank connections</span><div class="metric-value">${watched.filter((item) => item.status === "ok").length}/${watched.length}</div><span class="metric-note">${degraded.length ? `${degraded.length} need attention` : quiet.length ? `${quiet.length} quiet, none broken` : "All reporting normally"}${mutedCount ? ` · ${mutedCount} not monitored` : ""}</span></article>
-      <article class="metric-card"><span class="metric-icon">∞</span><span class="metric-label">Recurring per month</span><div class="metric-value">${money(recurringSummary.monthly_total_cents || 0, { compact: true })}</div><span class="metric-note">${recurringSummary.count || 0} commitment(s), ${recurringSummary.subscription_count || 0} subscription(s)</span></article>
-      <article class="metric-card ${report.uncategorized_count ? "warning" : ""}"><span class="metric-icon">✎</span><span class="metric-label">Uncategorized this month</span><div class="metric-value">${report.uncategorized_count || 0}</div><span class="metric-note">${money(report.uncategorized_cents || 0)} unaccounted for</span></article>
+      <article class="metric-card"><span class="metric-icon">▤</span><span class="metric-label">Committed (budgeted)</span><div class="metric-value">${money(report.committed_cents || 0, { compact: true })}</div><span class="metric-note">${money(report.committed_spent_cents || 0)} of it spent so far</span></article>
+      <article class="metric-card"><span class="metric-icon">◇</span><span class="metric-label">Discretionary spent</span><div class="metric-value">${money(report.discretionary_spent_cents || 0, { compact: true })}</div><span class="metric-note">against ${money(report.free_cents || 0)} of free money</span></article>
+      <article class="metric-card ${report.uncategorized_count ? "warning" : "good"}"><span class="metric-icon">✎</span><span class="metric-label">Uncategorized this month</span><div class="metric-value">${report.uncategorized_count || 0}</div><span class="metric-note">${money(report.uncategorized_cents || 0)} unaccounted for</span></article>
+      <article class="metric-card ${staleSnapshot ? "warning" : ""}"><span class="metric-icon">◈</span><span class="metric-label">Filed by Clerk today</span><div class="metric-value">${counts.applied_today || 0}</div><span class="metric-note">${counts.needs_review ? `${counts.needs_review} waiting · ` : ""}read from Actual ${escapeHtml(lastRead)}</span></article>
     </section>
 
     <section class="grid overview-grid">
       <div>
-        <article class="panel">
-          <header class="panel-head"><div><h2>Bank connections</h2><p>Checked directly against SimpleFIN, not just Actual's last sync</p></div><a href="#accounts" class="panel-link">All accounts</a></header>
-          <div class="status-list">${health.length ? health.slice(0, 6).map((item) => healthRow(item)).join("") : emptyState("⇄", "No connection data yet", "Clerk checks every linked account against SimpleFIN. Run a sync, or add your SimpleFIN access URL in Settings.")}</div>
-        </article>
         <article class="panel">
           <header class="panel-head"><div><h2>Where the free money went</h2><p>Discretionary spending this month, largest first</p></div></header>
           <div class="quick-list">${(report.top_categories || []).length
             ? report.top_categories.map((item) => `<div class="quick-item"><span>${escapeHtml((item.category_name || "?").slice(0, 1).toUpperCase())}</span><div><strong>${escapeHtml(item.category_name)}</strong><p>${escapeHtml(item.group_name || "")}</p></div><span class="row-amount money">${money(item.spent_cents)}</span></div>`).join("")
             : emptyState("✓", "Nothing discretionary yet", "Spending outside your committed categories shows up here as the month goes on.")}</div>
         </article>
-        ${trend.length > 1 ? `<article class="panel">
-          <header class="panel-head"><div><h2>Monthly spending</h2><p>Total on-budget outflow per month</p></div></header>
-          <div class="panel-body"><div class="trend">${trend.map((item, index) => `<div class="trend-bar ${index === trend.length - 1 ? "current" : ""}"><i style="height:${Math.max(3, (item.spent_cents / maxTrend) * 92)}px" title="${escapeHtml(money(item.spent_cents))}"></i><span>${escapeHtml(item.month.slice(5))}</span></div>`).join("")}</div></div>
-        </article>` : ""}
       </div>
       <div>
         <article class="panel">
-          <header class="panel-head"><div><h2>Due in the next week</h2><p>Recurring charges Clerk expects</p></div><a href="#recurring" class="panel-link">All recurring</a></header>
-          <div class="quick-list">${upcoming.length
-            ? upcoming.slice(0, 5).map((item) => `<div class="quick-item"><span>${item.kind === "subscription" ? "∞" : "↻"}</span><div><strong>${escapeHtml(item.label)}</strong><p>${shortDate(item.next_expected)} · ${escapeHtml(item.category_name || "Uncategorized")}</p></div><span class="row-amount money">${money(item.typical_amount_cents)}</span></div>`).join("")
-            : emptyState("↻", "Nothing due this week", "Clerk lists a charge here once it has seen the same merchant bill on a schedule three times.")}</div>
+          <header class="panel-head"><div><h2>Bank connections</h2><p>Checked directly against SimpleFIN, not just Actual's last sync</p></div><a href="#accounts" class="panel-link">All accounts</a></header>
+          <div class="status-list">${health.length ? health.slice(0, 6).map((item) => healthRow(item)).join("") : emptyState("⇄", "No connection data yet", "Clerk checks every linked account against SimpleFIN. Run a sync, or add your SimpleFIN access URL in Settings.")}</div>
         </article>
-        <article class="panel">
-          <header class="panel-head"><div><h2>Recent activity</h2><p>Sync, filing, and connection checks</p></div><a href="#activity" class="panel-link">History</a></header>
-          <div class="status-list">${(data.jobs || []).length ? data.jobs.slice(0, 5).map((job) => jobRow(job, { actions: false })).join("") : emptyState("↻", "No runs yet", "Clerk syncs on a schedule. Use Sync now to start the first run.")}</div>
-        </article>
-        ${data.digest ? `<article class="panel">
-          <header class="panel-head"><div><h2>This morning's digest</h2><p>Sent ${escapeHtml(data.digest.local_date)}</p></div></header>
-          <div class="panel-body"><strong style="font-size:12px">${escapeHtml(data.digest.payload?.title || "")}</strong><p class="muted" style="white-space:pre-line;font-size:11px;line-height:1.6;margin:8px 0 0">${escapeHtml(data.digest.payload?.message || "")}</p></div>
-        </article>` : ""}
       </div>
     </section>`;
+}
+
+// A backlog is made of merchants, not transactions: the same coffee shop can
+// account for forty rows and one decision. Grouping is what makes a long
+// queue finishable, so the queue is grouped before it is drawn.
+function groupReviews(reviews) {
+  const groups = new Map();
+  for (const item of reviews) {
+    const key = item.merchant_key || item.payee_name || item.id;
+    if (!groups.has(key)) {
+      groups.set(key, {
+        key,
+        label: item.payee_name || item.merchant_key || "Transaction",
+        items: [],
+        total_cents: 0,
+        suggestion_id: item.category_id || "",
+        suggestion_name: item.category_name || "",
+        proposed: item.proposed_category || "",
+        confidence: item.confidence ?? 0,
+        source: item.source,
+      });
+    }
+    const group = groups.get(key);
+    group.items.push(item);
+    group.total_cents += Number(item.amount_cents) || 0;
+    group.confidence = Math.min(group.confidence, item.confidence ?? 0);
+    if (!group.suggestion_id && item.category_id) {
+      group.suggestion_id = item.category_id;
+      group.suggestion_name = item.category_name || "";
+    }
+  }
+  return [...groups.values()].sort((a, b) => b.items.length - a.items.length
+    || Math.abs(b.total_cents) - Math.abs(a.total_cents));
+}
+
+function categoryOptions(selectedId) {
+  return (overview().categories || []).map((category) =>
+    `<option value="${escapeHtml(category.id)}" ${category.id === selectedId ? "selected" : ""}>${escapeHtml(category.group_name ? `${category.group_name} · ${category.name}` : category.name)}</option>`).join("");
+}
+
+function reviewGroupRow(group) {
+  const ids = group.items.map((item) => item.id).join(",");
+  const dates = group.items.map((item) => item.transaction_date).sort();
+  const span = dates.length > 1 ? `${shortDate(dates[0])} – ${shortDate(dates[dates.length - 1])}` : shortDate(dates[0]);
+  const accounts = [...new Set(group.items.map((item) => item.account_name).filter(Boolean))];
+  return `<article class="data-row review-row">
+    <div class="row-title">
+      <strong>${escapeHtml(group.label)}</strong>
+      <small>${group.items.length} transaction${group.items.length === 1 ? "" : "s"} · ${span}${accounts.length ? ` · ${escapeHtml(accounts.slice(0, 2).join(", "))}` : ""}</small>
+    </div>
+    <div class="row-amount money">${money(group.total_cents)}</div>
+    <div class="cell-select">
+      <select class="select-inline" data-role="review-category" data-id="${escapeHtml(group.key)}">
+        <option value="">${escapeHtml(group.suggestion_name || "Choose a category…")}</option>
+        ${categoryOptions(group.suggestion_id)}
+      </select>
+    </div>
+    <div class="cell-confidence"><span class="confidence ${group.confidence < 0.5 ? "low" : ""}">${percent(group.confidence)}</span><small>confidence</small></div>
+    <div class="row-actions">
+      ${!group.suggestion_id && group.proposed ? `<button class="button secondary small" data-action="create-category" data-name="${escapeHtml(group.proposed)}" title="The model found no existing category for this merchant">+ ${escapeHtml(group.proposed)}</button>` : ""}
+      <button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(group.items[0].id)}">Why</button>
+      <button class="button ghost small" data-action="review-dismiss-group" data-ids="${escapeHtml(ids)}">Skip</button>
+      <button class="button primary small" data-action="review-accept-group" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}">Apply${group.items.length > 1 ? ` ${group.items.length}` : ""}</button>
+    </div>
+  </article>`;
 }
 
 async function renderReview() {
   [state.reviews, state.rules] = await Promise.all([api("/api/reviews"), api("/api/rules")]);
   const suggestions = state.rules;
+  const groups = groupReviews(state.reviews);
+  const allIds = state.reviews.map((item) => item.id).join(",");
+  const withSuggestion = groups.filter((group) => group.suggestion_id).length;
   content.innerHTML = `
-    <section class="page-intro"><div><h2>Review</h2><p>Clerk files what it is confident about and asks about the rest. Applying a category here also teaches Clerk, so the same merchant is handled on its own next time.</p></div><div class="actions"><button class="button ghost" data-action="catch-up">Catch up on all history</button><button class="button ghost" data-action="run-categorize">Re-run filing</button></div></section>
+    <section class="page-intro"><div><h2>Review</h2><p>Clerk files what it is confident about and asks about the rest. These are grouped by merchant: one decision settles every transaction from that merchant, and teaches Clerk to handle it alone next time — no Actual rule required.</p></div><div class="actions"><button class="button ghost" data-action="catch-up">Catch up on all history</button><button class="button ghost" data-action="run-categorize">Re-run filing</button></div></section>
     ${suggestions.length ? `<article class="panel">
       <header class="panel-head"><div><h2>Rules worth promoting</h2><p>Merchants Clerk has filed the same way repeatedly. A native Actual rule handles them at import, before Clerk or any model is involved.</p></div>${statusChip("suggested", `${suggestions.length} suggested`)}</header>
       <div class="status-list">${suggestions.map(ruleRow).join("")}</div>
     </article>` : ""}
     <article class="panel" style="margin-top:18px">
-      <header class="panel-head"><div><h2>Transactions to categorize</h2><p>${state.reviews.length} waiting</p></div></header>
-      <div class="status-list">${state.reviews.length ? state.reviews.map(reviewRow).join("") : emptyState("✓", "Nothing is waiting", "Every recent transaction has a category, or Clerk was confident enough to file it. New spending appears here when Clerk is unsure.")}</div>
+      <header class="panel-head">
+        <div><h2>Waiting on you</h2><p>${state.reviews.length} transaction${state.reviews.length === 1 ? "" : "s"} across ${groups.length} merchant${groups.length === 1 ? "" : "s"}${withSuggestion ? ` · ${withSuggestion} with a suggestion ready` : ""}</p></div>
+        ${state.reviews.length ? `<div class="actions"><button class="button ghost small" data-action="review-dismiss-all" data-ids="${escapeHtml(allIds)}">Skip all ${state.reviews.length}</button></div>` : ""}
+      </header>
+      ${groups.length ? `<div class="row-head review-row">
+        <span>Merchant</span><span class="align-right">Total</span><span>Category</span><span>Confidence</span><span></span>
+      </div>` : ""}
+      <div class="status-list">${groups.length ? groups.map(reviewGroupRow).join("") : emptyState("✓", "Nothing is waiting", "Every recent transaction has a category, or Clerk was confident enough to file it. New spending appears here when Clerk is unsure.")}</div>
     </article>`;
 }
 
@@ -472,32 +503,6 @@ async function renderAccounts() {
         <div class="row-title"><strong>${escapeHtml(event.account_name)} · ${escapeHtml(titleCase(event.previous_status || "new"))} → ${escapeHtml(titleCase(event.status))}</strong><small>${escapeHtml((event.detail || "").slice(0, 120))}</small></div>
         <div class="row-meta">${relativeTime(event.created_at)}</div>
       </article>`).join("") : emptyState("✓", "No status changes recorded", "Clerk notes a line here whenever an account's connection health changes, and sends one notification for it.")}</div>
-    </article>`;
-}
-
-function renderRecurring() {
-  const view = overview();
-  const series = view.recurring || [];
-  const summary = view.recurring_summary || {};
-  const filters = ["all", "subscription", "recurring", "unbudgeted", "overdue"];
-  const filtered = series.filter((item) => {
-    if (state.recurringFilter === "all") return true;
-    if (state.recurringFilter === "unbudgeted") return !item.budgeted;
-    if (state.recurringFilter === "overdue") return item.days_overdue > 0;
-    return item.kind === state.recurringFilter;
-  });
-  content.innerHTML = `
-    <section class="page-intro"><div><h2>Recurring commitments</h2><p>Everything Clerk has seen bill on a schedule at least three times. These are the amounts to budget for in Actual: once a category carries a budget, Clerk counts it as committed rather than as free money.</p></div></section>
-    <section class="grid metrics">
-      <article class="metric-card"><span class="metric-icon">∞</span><span class="metric-label">Per month</span><div class="metric-value">${money(summary.monthly_total_cents || 0, { compact: true })}</div><span class="metric-note">${summary.count || 0} commitment(s)</span></article>
-      <article class="metric-card"><span class="metric-icon">▤</span><span class="metric-label">Subscriptions</span><div class="metric-value">${money(summary.subscription_monthly_cents || 0, { compact: true })}</div><span class="metric-note">${summary.subscription_count || 0} fixed-price renewals</span></article>
-      <article class="metric-card ${summary.unbudgeted_count ? "warning" : "good"}"><span class="metric-icon">!</span><span class="metric-label">Not budgeted</span><div class="metric-value">${money(summary.unbudgeted_monthly_cents || 0, { compact: true })}</div><span class="metric-note">${summary.unbudgeted_count || 0} without a budget this month</span></article>
-      <article class="metric-card ${summary.overdue_count ? "warning" : ""}"><span class="metric-icon">⏱</span><span class="metric-label">Overdue</span><div class="metric-value">${summary.overdue_count || 0}</div><span class="metric-note">Expected but not yet arrived</span></article>
-    </section>
-    ${(summary.price_changes || []).length ? `<div class="alert-banner"><span>↗</span><div><strong>Subscription prices changed</strong><p>${escapeHtml(summary.price_changes.map((item) => `${item.label} ${item.percent > 0 ? "+" : ""}${Math.round(item.percent * 100)}%`).join(" · "))}</p></div></div>` : ""}
-    <article class="panel">
-      <div class="toolbar"><div class="filter-tabs">${filters.map((filter) => `<button class="${filter === state.recurringFilter ? "active" : ""}" data-action="recurring-filter" data-filter="${filter}">${titleCase(filter)}</button>`).join("")}</div><span class="spacer"></span><span class="muted" style="font-size:11px">${filtered.length} shown</span></div>
-      <div class="status-list">${filtered.length ? filtered.map(recurringRow).join("") : emptyState("↻", "Nothing matches", "Clerk needs three charges from the same merchant at a regular interval before it calls something recurring.")}</div>
     </article>`;
 }
 
@@ -686,17 +691,6 @@ function settingToggle(name, title, description, checked) {
   return `<label class="toggle-row ${locked ? "locked" : ""}"><span><strong>${escapeHtml(title)}</strong><small class="${locked ? "environment-note" : ""}">${escapeHtml(note)}</small></span><span class="toggle-control"><input type="checkbox" name="${name}" ${checked ? "checked" : ""} ${locked ? "disabled" : ""} /><i aria-hidden="true"></i></span></label>`;
 }
 
-function committedGroupPicker(settings) {
-  const groups = overview().groups || [];
-  const chosen = new Set(settings.committed_groups || []);
-  if (!groups.length) {
-    return `<div class="field full"><label>Committed category groups</label><small>Clerk lists your Actual category groups here after its first sync.</small></div>`;
-  }
-  return `<div class="field full"><label>Committed category groups</label>
-    <div class="group-picker">${groups.map((group) => `<label><input type="checkbox" name="committed_groups" value="${escapeHtml(group)}" ${chosen.has(group) ? "checked" : ""} /> ${escapeHtml(group)}</label>`).join("")}</div>
-    <small>Groups holding your recurring bills. Leave every box unchecked and Clerk treats any category you budgeted this month as committed, which is what the budget setup guide sets up.</small></div>`;
-}
-
 async function renderSettings() {
   state.settings = await api("/api/settings");
   const s = state.settings;
@@ -709,7 +703,6 @@ async function renderSettings() {
         <a href="#settings-model">Local model</a>
         <a href="#settings-filing">Filing</a>
         <a href="#settings-tags">Tags</a>
-        <a href="#settings-budget">Budget report</a>
         <a href="#settings-schedule">Sync &amp; digest</a>
         <a href="#settings-notifications">Notifications</a>
         <a href="#settings-appearance">Appearance</a>
@@ -755,18 +748,10 @@ async function renderSettings() {
           ${settingToggle("tagging_enabled", "Tag transactions Clerk files", "Adds descriptive tags alongside the category.", s.tagging_enabled)}
           <div class="check-grid">
             ${settingCheck("tag_provenance", "Mark Clerk's own work", "Adds your Clerk tag so you can find, review, or undo everything Clerk touched from inside Actual.", s.tag_provenance)}
-            ${settingCheck("tag_cadence", "Tag subscriptions and recurring bills", "#subscription for fixed renewals, #recurring for variable ones, #annual for yearly charges.", s.tag_cadence)}
             ${settingCheck("tag_anomalies", "Tag refunds and outsized charges", "#refund for money coming back, #unusual for a charge far above a merchant's normal size.", s.tag_anomalies)}
           </div>
           <div class="form-grid">${settingInput("clerk_tag", "Clerk tag", s.clerk_tag, { full: true, note: "Written without the leading #." })}</div>
         </div></section>
-
-        <section class="panel settings-section" id="settings-budget"><header class="panel-head"><div><h3>Budget report</h3><p class="section-description">Free money is expected income minus what you have already committed.</p></div></header><div class="panel-body"><div class="form-grid">
-          ${settingInput("monthly_income_override", "Monthly income", s.monthly_income_override, { type: "number", min: 0, step: 0.01, note: "Leave at 0 and Clerk uses the income you budgeted in Actual, then income actually received, then a trailing average. Only set this if you budget no income in Actual." })}
-          ${settingInput("income_lookback_months", "Months in the income average", s.income_lookback_months, { type: "number", min: 1, max: 12 })}
-          ${settingInput("budget_currency", "Currency", s.budget_currency, { note: "Three-letter code, used for display only." })}
-          ${committedGroupPicker(s)}
-        </div></div></section>
 
         <section class="panel settings-section" id="settings-schedule"><header class="panel-head"><div><h3>Sync &amp; digest</h3><p class="section-description">How often Clerk pulls from Actual and when it sends the morning report.</p></div></header><div class="panel-body">
           ${settingToggle("sync_enabled", "Sync on a schedule", "Pulls the budget, asks Actual to run bank sync, then files what arrived.", s.sync_enabled)}
@@ -780,7 +765,7 @@ async function renderSettings() {
           </div>
         </div></section>
 
-        <section class="panel settings-section" id="settings-notifications"><header class="panel-head"><div><h3>Notifications</h3><p class="section-description">ntfy delivers the morning digest and connection alerts.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="notifications">Send test</button></header><div class="panel-body">
+        <section class="panel settings-section" id="settings-notifications"><header class="panel-head"><div><h3>Notifications</h3><p class="section-description">ntfy delivers the morning digest and connection alerts.</p></div><div class="actions"><button class="button ghost small" type="button" data-action="test-connection" data-target="notifications">Send test</button><button class="button ghost small" type="button" data-action="send-digest">Send report now</button></div></header><div class="panel-body">
           ${settingToggle("notifications_enabled", "Enable ntfy notifications", "Without this, Clerk still builds the digest and shows it on the overview.", s.notifications_enabled)}
           ${settingToggle("health_alerts_enabled", "Alert when a bank connection changes", "One message when a connection breaks and one when it recovers, never a repeat every hour.", s.health_alerts_enabled)}
           <div class="form-grid">
@@ -791,13 +776,14 @@ async function renderSettings() {
         </div></section>
 
         <section class="panel settings-section" id="settings-appearance"><header class="panel-head"><div><h3>Appearance</h3><p class="section-description">Personalizes this browser without changing anything in Actual.</p></div></header><div class="panel-body"><div class="form-grid">
+          ${settingInput("budget_currency", "Currency", s.budget_currency, { note: "Three-letter code, used for display only." })}
           ${settingInput("appearance_theme", "Color theme", s.appearance_theme, { type: "select", choices: [["system", "Follow system"], ["light", "Light"], ["dark", "Dark"]] })}
           ${settingInput("appearance_density", "Interface density", s.appearance_density, { type: "select", choices: [["comfortable", "Comfortable"], ["compact", "Compact"]] })}
           ${settingInput("appearance_motion", "Animation and motion", s.appearance_motion, { type: "select", full: true, choices: [["system", "Follow system"], ["full", "Full motion"], ["reduced", "Reduced motion"]] })}
         </div></div></section>
 
         <section class="panel settings-section" id="settings-advanced"><header class="panel-head"><div><h3>Limits &amp; reliability</h3><p class="section-description">Bounds on how much history Clerk reads and how hard it retries.</p></div><button class="button ghost small" type="button" data-action="run-diagnostics">Run diagnostics</button></header><div class="panel-body"><div class="form-grid">
-          ${settingInput("history_lookback_days", "History read from Actual (days)", s.history_lookback_days, { type: "number", min: 30, max: 3650, note: "Feeds the memory, the recurring detection, and the income average." })}
+          ${settingInput("history_lookback_days", "History read from Actual (days)", s.history_lookback_days, { type: "number", min: 30, max: 3650, note: "Feeds the memory and the income average." })}
           ${settingInput("transaction_stale_days", "Call an account quiet after (days)", s.transaction_stale_days, { type: "number", min: 1, max: 365, note: "Drives \u201CNo recent transactions\u201D. Raise it for accounts that only see action monthly." })}
           ${settingInput("balance_stale_hours", "Call a bank balance stale after (hours)", s.balance_stale_hours, { type: "number", min: 2, max: 720, note: "Drives \u201CStale data\u201D, which is about the age of the balance the bank reports \u2014 not how many transactions arrive." })}
           ${settingInput("balance_tolerance", "Balance difference to ignore", s.balance_tolerance, { type: "number", min: 0, step: 0.01, note: "Pending transactions make small differences normal." })}
@@ -820,6 +806,20 @@ async function enqueue(kind, label, extra = {}) {
     toast(result.created ? `${label} started` : `${label} already running`, result.created ? "Progress appears under Activity." : "");
     await renderRoute({ quiet: true });
   } catch (error) { toast(`Could not start ${label.toLowerCase()}`, error.message, "error"); }
+}
+
+async function resolveReviewGroup(idList, action, categoryId) {
+  const ids = (idList || "").split(",").filter(Boolean);
+  if (!ids.length) return;
+  try {
+    const body = { ids, action, ...(categoryId ? { category_id: categoryId } : {}) };
+    const result = await api("/api/reviews/resolve", { method: "POST", body: JSON.stringify(body) });
+    if (action === "dismiss") toast("Skipped", `${result.resolved} transaction(s) will not be asked about again.`);
+    else if (!result.resolved) toast("Nothing to change", "Those transactions were already resolved or removed in Actual.");
+    else toast("Applied in Actual", `${result.resolved} transaction(s) categorized, and Clerk will remember this merchant.`);
+    closeDrawer();
+    await renderRoute({ quiet: true });
+  } catch (error) { toast("Could not apply", error.message, "error"); }
 }
 
 async function resolveReview(id, action, categoryId) {
@@ -860,6 +860,11 @@ document.addEventListener("click", async (event) => {
     enqueue("categorize", "History catch-up", { full: true });
   }
   if (action === "check-connections") enqueue("health", "Connection check");
+  if (action === "send-digest") {
+    event.preventDefault();
+    // A rehearsal, not the real thing: it must not consume today's delivery.
+    await enqueue("digest", "Morning report", { force: true });
+  }
   if (action === "run-diagnostics") { event.preventDefault(); await runDiagnostics(Boolean(state.diagnosticsRedact)); }
   if (action === "rerun-diagnostics") { event.preventDefault(); await runDiagnostics(Boolean(state.diagnosticsRedact)); }
   if (action === "copy-diagnostics") { event.preventDefault(); await copyDiagnostics(); }
@@ -868,7 +873,6 @@ document.addEventListener("click", async (event) => {
   if (action === "job-detail") showJob(target.dataset.id);
   if (action === "review-detail") showDecision(target.dataset.id);
   if (action === "account-detail") showAccount(target.dataset.id);
-  if (action === "recurring-filter") { state.recurringFilter = target.dataset.filter; renderRecurring(); }
   if (action === "job-filter") { state.jobFilter = target.dataset.filter; renderActivity(); }
 
   if (action === "review-accept") {
@@ -878,6 +882,22 @@ document.addEventListener("click", async (event) => {
     await resolveReview(target.dataset.id, chosen ? "recategorize" : "accept", chosen || undefined);
   }
   if (action === "review-dismiss") { event.stopPropagation(); await resolveReview(target.dataset.id, "dismiss"); }
+  if (action === "review-accept-group") {
+    event.stopPropagation();
+    const select = document.querySelector(`[data-role="review-category"][data-id="${CSS.escape(target.dataset.key)}"]`);
+    const chosen = select?.value || "";
+    await resolveReviewGroup(target.dataset.ids, chosen ? "recategorize" : "accept", chosen || undefined);
+  }
+  if (action === "review-dismiss-group") {
+    event.stopPropagation();
+    await resolveReviewGroup(target.dataset.ids, "dismiss");
+  }
+  if (action === "review-dismiss-all") {
+    event.stopPropagation();
+    const ids = (target.dataset.ids || "").split(",").filter(Boolean);
+    if (!window.confirm(`Skip all ${ids.length} waiting transaction(s)?\n\nThey keep whatever category they already have in Actual, and Clerk stops asking about them.`)) return;
+    await resolveReviewGroup(target.dataset.ids, "dismiss");
+  }
 
   if (action === "rule-create" || action === "rule-decline") {
     const create = action === "rule-create";
@@ -962,13 +982,12 @@ content.addEventListener("submit", async (event) => {
   const locked = new Set(state.settings?.environment_overrides || []);
   const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_cadence", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "notifications_enabled", "health_alerts_enabled"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "notifications_enabled", "health_alerts_enabled"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;
     values[key] = integers.has(key) ? Number.parseInt(value, 10) : decimals.has(key) ? Number.parseFloat(value) : value;
   }
-  values.committed_groups = data.getAll("committed_groups");
   for (const key of checks) if (!locked.has(key)) values[key] = data.get(key) === "on";
   for (const key of ["actual_password", "actual_encryption_password", "simplefin_access_url", "openai_api_key", "ntfy_token"]) {
     if (data.get(`clear_${key}`) === "on") values[key] = "";

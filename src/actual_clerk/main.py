@@ -25,6 +25,7 @@ from actual_clerk.db import Database
 from actual_clerk.diagnostics import build_report, probe_budget_file
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
 from actual_clerk.schemas import (
+    BulkResolveRequest,
     ClaimSetupTokenRequest,
     CreateCategoryRequest,
     EnqueueRequest,
@@ -365,7 +366,11 @@ async def get_job(job_id: str, request: Request) -> dict[str, Any]:
 
 @app.post("/api/jobs", status_code=status.HTTP_202_ACCEPTED)
 async def enqueue_job(payload: EnqueueRequest, request: Request) -> dict[str, Any]:
-    params = {"full": True} if payload.full and payload.kind == "categorize" else None
+    params: dict[str, Any] | None = None
+    if payload.full and payload.kind == "categorize":
+        params = {"full": True}
+    elif payload.force and payload.kind == "digest":
+        params = {"force": True}
     job, created = await _jobs(request).enqueue(payload.kind, trigger="manual", params=params)
     return {"created": created, "job": _serialize_job(job)}
 
@@ -386,6 +391,73 @@ async def cancel_job(job_id: str, request: Request) -> dict[str, bool]:
     if not _database(request).cancel_job(job_id):
         raise HTTPException(status_code=409, detail="Only queued jobs can be cancelled")
     return {"cancelled": True}
+
+
+@app.post("/api/reviews/resolve")
+async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict[str, Any]:
+    """Resolve many reviews in one write.
+
+    A backlog is cleared a merchant at a time, not a transaction at a time, so
+    the categories go to Actual in a single batch and every decision is claimed
+    before that batch is sent -- a failed write hands them all back.
+    """
+    database = _database(request)
+    settings = _settings_manager(request).get()
+
+    if payload.action == "dismiss":
+        dismissed = [
+            decision_id
+            for decision_id in payload.ids
+            if database.resolve_decision(decision_id, "dismissed")
+        ]
+        return {"status": "dismissed", "resolved": len(dismissed)}
+
+    updates: list[dict[str, Any]] = []
+    claimed: list[tuple[str, dict[str, Any], str]] = []
+    for decision_id in payload.ids:
+        pending = database.get_decision(decision_id)
+        if not pending or pending["status"] != "needs_review":
+            continue
+        category_id = (
+            payload.category_id if payload.action == "recategorize" else pending["category_id"]
+        )
+        if not category_id:
+            continue
+        if not database.resolve_decision(decision_id, "applied"):
+            continue
+        add_tags = list(pending.get("tags") or [])
+        if settings.tag_provenance and settings.clerk_tag:
+            add_tags.append(settings.clerk_tag)
+        claimed.append((decision_id, pending, category_id))
+        updates.append(
+            {
+                "transaction_id": pending["transaction_id"],
+                "category_id": category_id,
+                "add_tags": add_tags,
+            }
+        )
+
+    if not updates:
+        return {"status": "skipped", "resolved": 0}
+
+    try:
+        result = await _gateway(request).apply_updates(updates, overwrite=True)
+    except ActualGatewayError:
+        for decision_id, _, _ in claimed:
+            database.reopen_decision(decision_id)
+        raise
+
+    applied = set(result["applied"])
+    for _decision_id, pending, category_id in claimed:
+        if pending["transaction_id"] not in applied:
+            continue
+        database.record_memory(
+            pending["merchant_key"],
+            category_id,
+            _category_name(database, category_id) or pending["category_name"],
+            correction=payload.action == "recategorize",
+        )
+    return {"status": "applied", "resolved": len(applied), "skipped": len(result["skipped"])}
 
 
 @app.post("/api/reviews/{decision_id}/resolve")

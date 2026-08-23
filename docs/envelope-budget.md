@@ -14,7 +14,7 @@ Allow about twenty minutes, plus a minute at the start of each month.
 ## Before you start
 
 - Clerk connected to your Actual server and showing your accounts.
-- A few months of transaction history in Actual. Clerk uses it to find your recurring bills for you.
+- A few months of transaction history in Actual. Clerk uses it to learn where your spending belongs.
 
 ### What to expect from this mode
 
@@ -50,8 +50,6 @@ To add a category:
 To add a group, scroll to the bottom of the category list and use the add-group control.
 
 Group names do not matter to Clerk. What matters is which categories carry a budgeted amount.
-
-> **Tip.** Open Clerk's **Recurring** page first. Clerk has already scanned your history and listed everything billing on a schedule, with its monthly cost. Anything flagged *No budget set for its category this month* is a bill still unaccounted for.
 
 ## Step 3. Budget each recurring bill
 
@@ -146,7 +144,7 @@ On the 1st of each month:
 
 **Set budgets to 3 month average** is the alternative when bills drift.
 
-Forget entirely and Clerk says so: free money jumps to your whole income, and every recurring charge gains a *No budget set* flag on the Recurring page.
+Forget entirely and Clerk says so: free money jumps to your whole income, because nothing is committed against it.
 
 ## How free money is calculated
 

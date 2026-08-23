@@ -524,6 +524,22 @@ def build_report(
             f"{money(spent_by_category[''], cur).strip()} of spending this month is "
             "uncategorized, and all of it counts against free money.",
         )
+        # Naming them is the whole point: "4 uncategorized" is unactionable when
+        # Actual shows none, and the rows themselves say which is right.
+        r.sub("the uncategorized transactions themselves")
+        for transaction in sorted(month_transactions, key=lambda item: item.date):
+            if transaction.category_id:
+                continue
+            if transaction.off_budget or transaction.is_transfer:
+                continue
+            if transaction.is_starting_balance or transaction.spend_cents <= 0:
+                continue
+            r.text(
+                f"    {transaction.date}  {money(transaction.spend_cents, cur)}  "
+                f"{hide('Account', transaction.account_name)[:22]:<22} "
+                f"{hide('Payee', transaction.payee_name) if transaction.payee_name else '(no payee)'}"
+            )
+            r.text(f"      id {transaction.id}")
 
     # --------------------------------------------------------------- 6b
     # Every figure on the Overview is a partition of one month's spending. If

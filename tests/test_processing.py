@@ -91,8 +91,8 @@ def manager(database, settings_manager):
     return manager
 
 
-async def run_job(manager, kind):
-    job, _ = await manager.enqueue(kind)
+async def run_job(manager, kind, params=None):
+    job, _ = await manager.enqueue(kind, params=params)
     claimed = manager.database.claim_job("test-worker", 600)
     await manager._run_job(claimed)
     return manager.database.get_job(job["id"], include_events=True)
@@ -249,7 +249,11 @@ async def test_a_status_change_is_recorded_once(manager):
 
 async def test_a_digest_is_built_even_when_notifications_are_off(manager):
     job = await run_job(manager, "digest")
-    assert job["result"] == {"delivered": False, "reason": "notifications are disabled"}
+    assert job["result"] == {
+        "delivered": False,
+        "forced": False,
+        "reason": "notifications are disabled",
+    }
     # The claim is kept so the same day is not attempted again and again.
     assert manager.database.latest_digest() is None
 
@@ -451,3 +455,34 @@ async def test_an_unmonitored_account_is_never_called_stale(manager):
     assert overview["freshness"]["stale_accounts"] == 0
     assert overview["freshness"]["up_to_date"] is True
     assert overview["accounts"][0]["monitored"] is False
+
+
+async def test_a_forced_digest_does_not_spend_todays_delivery(manager, settings_manager):
+    """The rehearsal must leave the real morning report still to come."""
+    settings_manager.update(
+        {"notifications_enabled": True, "ntfy_topic": "clerk-test", "ntfy_url": "https://ntfy.sh"}
+    )
+    rehearsal = await run_job(manager, "digest", {"force": True})
+    assert rehearsal["result"]["forced"] is True
+
+    morning = await run_job(manager, "digest")
+    assert "skipped" not in morning["result"], "the morning report must still go out"
+    assert morning["result"]["forced"] is False
+
+
+async def test_a_forced_digest_can_be_repeated(manager, settings_manager):
+    settings_manager.update(
+        {"notifications_enabled": True, "ntfy_topic": "clerk-test", "ntfy_url": "https://ntfy.sh"}
+    )
+    for _ in range(3):
+        job = await run_job(manager, "digest", {"force": True})
+        assert "skipped" not in job["result"]
+
+
+async def test_an_unforced_digest_is_still_once_a_day(manager, settings_manager):
+    settings_manager.update(
+        {"notifications_enabled": True, "ntfy_topic": "clerk-test", "ntfy_url": "https://ntfy.sh"}
+    )
+    await run_job(manager, "digest")
+    again = await run_job(manager, "digest")
+    assert again["result"] == {"skipped": "already sent today"}

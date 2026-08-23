@@ -252,7 +252,10 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .row-title strong { display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .row-title small, .row-meta { color: var(--ink-faint); font-size: 10px; }
 .row-meta strong { color: var(--ink-soft); }
-.row-actions { display: flex; justify-content: flex-end; gap: 6px; }
+/* Wraps rather than widening: the column is a fixed track so that every row's
+   columns line up, and an occasional extra button makes one row taller
+   instead of shifting every other row sideways. */
+.row-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 6px; }
 .row-amount { text-align: right; font-size: 13px; font-weight: 700; font-variant-numeric: tabular-nums; }
 
 .health-row { grid-template-columns: 30px minmax(150px, 1.2fr) minmax(120px, .8fr) 120px 152px; }
@@ -262,8 +265,24 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .toggle-control.compact input:checked + i::after { transform: translateX(13px); }
 .dot.muted { background: #98a1ae; box-shadow: 0 0 0 3px var(--surface-muted); opacity: .7; }
 .status-chip.muted { color: var(--ink-faint); background: var(--surface-muted); }
-.review-row { grid-template-columns: minmax(160px, 1.3fr) minmax(140px, 1fr) 92px 100px auto; }
-.recurring-row { grid-template-columns: 34px minmax(150px, 1.2fr) 110px 110px minmax(120px, .8fr); }
+/* Every column is a fixed track or a bounded fraction, and the action column
+   is a fixed width: a row whose last column sizes to its buttons shifts every
+   other column whenever one row happens to carry an extra button. */
+.review-row { grid-template-columns: minmax(150px, 1.4fr) 104px minmax(150px, 1fr) 82px 210px; }
+
+/* A header that shares the row's own grid, so the labels sit over the values
+   they name rather than near them. */
+.row-head { padding: 9px 20px; display: grid; align-items: center; gap: 13px; border-bottom: 1px solid var(--line);
+  background: var(--hover); color: var(--ink-faint); font-size: 9.5px; font-weight: 700;
+  letter-spacing: .08em; text-transform: uppercase; }
+.row-head .align-right { text-align: right; }
+.row-amount small { display: block; margin-top: 2px; color: var(--ink-faint); font-size: 9px; font-weight: 500;
+  letter-spacing: .02em; text-transform: none; }
+.cell-select { min-width: 0; }
+.cell-select .select-inline { width: 100%; }
+.cell-confidence { text-align: right; font-variant-numeric: tabular-nums; }
+.cell-confidence small { display: block; margin-top: 2px; color: var(--ink-faint); font-size: 9px; }
+.cell-status { display: flex; justify-content: flex-start; }
 .job-row { grid-template-columns: 34px minmax(150px, 1fr) minmax(140px, .8fr) 100px auto; }
 .decision-row { grid-template-columns: 30px minmax(160px, 1.2fr) minmax(140px, .9fr) 92px 100px; }
 .rule-row { grid-template-columns: 34px minmax(180px, 1.4fr) minmax(130px, .8fr) auto; }
@@ -279,14 +298,13 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .mark.model { color: var(--accent); background: var(--accent-soft); }
 .mark.unresolved { color: var(--amber); background: var(--amber-soft); }
 .mark.subscription { color: var(--accent); background: var(--accent-soft); }
-.mark.recurring { color: var(--blue); background: var(--blue-soft); }
 
 .status-chip { width: max-content; padding: 4px 8px; border-radius: 99px; color: var(--ink-soft); background: var(--surface-muted); font-size: 9px; font-weight: 800; letter-spacing: .055em; text-transform: uppercase; }
 .status-chip.running, .status-chip.queued, .status-chip.retry_wait { color: var(--blue); background: var(--blue-soft); }
 .status-chip.completed, .status-chip.applied, .status-chip.ok, .status-chip.created { color: var(--green); background: var(--green-soft); }
 .status-chip.failed, .status-chip.error, .status-chip.missing { color: var(--red-ink); background: var(--red-soft); }
 .status-chip.needs_review, .status-chip.stale, .status-chip.drifted, .status-chip.suggested,
-.status-chip.no_transactions { color: var(--amber-ink); background: var(--amber-soft); }
+.status-chip.warning, .status-chip.no_transactions { color: var(--amber-ink); background: var(--amber-soft); }
 .status-chip.memory { color: var(--blue); background: var(--blue-soft); }
 .status-chip.model { color: var(--accent); background: var(--accent-soft); }
 .confidence { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 11px; font-weight: 800; color: var(--accent); }
@@ -319,7 +337,10 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .page-intro { margin: 0 0 22px; display: flex; gap: 18px; align-items: flex-end; }
 .page-intro h2 { margin: 0 0 5px; font-size: 19px; }
 .page-intro p { max-width: 700px; margin: 0; color: var(--ink-soft); font-size: 11px; line-height: 1.6; }
-.page-intro .actions { margin-left: auto; display: flex; gap: 8px; }
+/* Any header action group, not just the page intro: two buttons dropped into a
+   panel header were touching because only the intro variant had a gap. */
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.page-intro .actions, .panel-head .actions { margin-left: auto; }
 .toolbar { min-height: 54px; padding: 9px 13px; display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--line-soft); flex-wrap: wrap; }
 .filter-tabs { display: flex; gap: 4px; }
 .filter-tabs button { min-height: 31px; padding: 0 11px; border: 0; border-radius: 7px; color: var(--ink-soft); background: transparent; cursor: pointer; font-size: 10px; font-weight: 750; }
@@ -343,8 +364,8 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .settings-section { scroll-margin-top: 130px; }
 .settings-section .panel-body { display: grid; gap: 17px; }
 .section-description { margin: 4px 0 0; color: var(--ink-faint); font-size: 10px; line-height: 1.5; }
-.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 15px; }
-.field { display: grid; gap: 6px; color: var(--ink-soft); font-size: 10px; font-weight: 750; }
+.form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; gap: 15px 16px; }
+.field { display: grid; align-content: start; gap: 6px; color: var(--ink-soft); font-size: 10px; font-weight: 750; }
 .field.full { grid-column: 1 / -1; }
 .field input, .field textarea, .field select { width: 100%; min-height: 39px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--input); outline: none; font-weight: 500; font-size: 12px; resize: vertical; }
 .field input:focus, .field textarea:focus, .field select:focus { border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(135,25,224,.11); }
@@ -488,10 +509,9 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   .hero-side { justify-items: start; text-align: left; grid-auto-flow: column; grid-auto-columns: minmax(0, 1fr); }
   .health-row { grid-template-columns: 30px minmax(140px, 1fr) 120px 152px; }
   .health-row > *:nth-child(3) { display: none; }
-  .review-row { grid-template-columns: minmax(140px, 1.2fr) minmax(120px, 1fr) 92px auto; }
+  /* Drop the confidence column first: it is the least load-bearing. */
+  .review-row { grid-template-columns: minmax(140px, 1.2fr) 96px minmax(130px, 1fr) 200px; }
   .review-row > *:nth-child(4) { display: none; }
-  .recurring-row { grid-template-columns: 34px minmax(140px, 1fr) 110px 110px; }
-  .recurring-row > *:nth-child(5) { display: none; }
   .settings-layout { grid-template-columns: 160px minmax(0, 1fr); }
 }
 
@@ -513,11 +533,12 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   .hero-side { grid-auto-flow: row; }
   .hero-chip { min-width: 0; width: 100%; }
   .panel-head { padding: 14px 15px; }
+  .row-head { display: none; }
   .data-row { grid-template-columns: minmax(0, 1fr) auto !important; padding: 12px 15px; gap: 8px; }
   .data-row > *:nth-child(n+3) { display: none; }
-  .health-row > *:first-child, .recurring-row > *:first-child,
+  .health-row > *:first-child,
   .job-row > *:first-child, .decision-row > *:first-child, .rule-row > *:first-child { display: block; }
-  .health-row, .recurring-row, .job-row, .decision-row, .rule-row { grid-template-columns: 30px minmax(0, 1fr) auto !important; }
+  .health-row, .job-row, .decision-row, .rule-row { grid-template-columns: 30px minmax(0, 1fr) auto !important; }
   .page-intro { align-items: flex-start; flex-direction: column; }
   .page-intro .actions { margin-left: 0; }
   .toolbar { overflow-x: auto; }

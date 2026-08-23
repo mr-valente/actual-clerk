@@ -20,8 +20,6 @@ def build_digest(
     report: dict[str, Any],
     health: list[dict[str, Any]],
     review_count: int,
-    recurring_summary: dict[str, Any] | None = None,
-    upcoming: list[dict[str, Any]] | None = None,
     currency: str = "USD",
     today: datetime.date | None = None,
 ) -> dict[str, Any]:
@@ -56,8 +54,11 @@ def build_digest(
         priority = 4
         tags.append("warning")
     else:
-        headline = format_money(remaining, currency)
-        title = f"{headline} free money left ({percent:.0%})"
+        # Past zero there is nothing "left"; there is an amount gone past.
+        if remaining < 0:
+            title = f"{format_money(abs(remaining), currency)} over budget ({abs(percent):.0%})"
+        else:
+            title = f"{format_money(remaining, currency)} free money left ({percent:.0%})"
         lines.append(
             f"Spent {format_money(spent, currency)} of "
             f"{format_money(free, currency)} since the 1st."
@@ -75,9 +76,13 @@ def build_digest(
 
         delta = int(report.get("pace_delta_cents", 0))
         if report.get("on_track"):
-            lines.append(f"You are {format_money(abs(delta), currency)} ahead of the month's pace.")
+            lines.append(
+                f"You are {format_money(abs(delta), currency)} under an even pace for the month."
+            )
         else:
-            lines.append(f"You are {format_money(abs(delta), currency)} past the month's pace.")
+            lines.append(
+                f"You are {format_money(abs(delta), currency)} over an even pace for the month."
+            )
             priority = max(priority, 4)
 
     overspend = int(report.get("committed_overspend_cents", 0))
@@ -105,18 +110,6 @@ def build_digest(
         lines.append(
             f"{uncategorized} transaction(s) this month are still uncategorized "
             f"({format_money(report.get('uncategorized_cents', 0), currency)})."
-        )
-
-    for item in (upcoming or [])[:3]:
-        lines.append(
-            f"Due soon: {item.get('label')} "
-            f"{format_money(item.get('typical_amount_cents', 0), currency)} "
-            f"on {item.get('next_expected')}."
-        )
-
-    if recurring_summary and recurring_summary.get("overdue_count"):
-        lines.append(
-            f"{recurring_summary['overdue_count']} expected recurring charge(s) have not arrived."
         )
 
     return _payload(title, lines, tags, priority, report, health, review_count, today)

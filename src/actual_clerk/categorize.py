@@ -30,7 +30,6 @@ from actual_clerk.config import Settings
 from actual_clerk.domain import tagging
 from actual_clerk.domain.memory import MerchantMemory, similar_examples
 from actual_clerk.domain.merchants import rule_match_value
-from actual_clerk.domain.recurring import Charge, detect_recurring
 from actual_clerk.prompts import SYSTEM_PROMPT, build_user_prompt
 from actual_clerk.schemas import CATEGORY_CHOICE_SCHEMA, CategoryChoice
 
@@ -208,23 +207,6 @@ def group_by_merchant(targets: Sequence[dict[str, Any]]) -> dict[str, list[dict[
     return grouped
 
 
-def recurring_index(snapshot: dict[str, Any], today: datetime.date) -> dict[str, Any]:
-    charges = [
-        Charge(
-            date=item["date"],
-            amount_cents=item["amount_cents"],
-            merchant_key=item["merchant_key"],
-            payee_name=item["payee_name"] or item["merchant_label"],
-            category_id=item.get("category_id"),
-            category_name=item.get("category_name", ""),
-            account_name=item.get("account_name", ""),
-        )
-        for item in snapshot["transactions"]
-        if not item.get("is_transfer") and not item.get("is_starting_balance")
-    ]
-    return {series.merchant_key: series for series in detect_recurring(charges, today=today)}
-
-
 def merchant_amount_stats(snapshot: dict[str, Any]) -> dict[str, tagging.MerchantStats]:
     amounts: dict[str, list[int]] = {}
     for item in snapshot["transactions"]:
@@ -280,7 +262,6 @@ class Categorizer:
         candidates = candidate_categories(snapshot, limit=settings.category_candidate_limit)
         candidate_ids = {candidate["id"] for candidate in candidates}
         names = {candidate["id"]: candidate["name"] for candidate in candidates}
-        recurring = recurring_index(snapshot, today)
         stats = merchant_amount_stats(snapshot)
         history = [
             item
@@ -300,7 +281,6 @@ class Categorizer:
                 candidate_ids=candidate_ids,
                 names=names,
                 history=history,
-                recurring=recurring.get(merchant_key),
                 result=result,
             )
             for item in items:
@@ -308,8 +288,7 @@ class Categorizer:
                     self._build_proposal(
                         item,
                         resolution=resolution,
-                        recurring=recurring.get(merchant_key),
-                        stats=stats.get(merchant_key),
+                                stats=stats.get(merchant_key),
                     )
                 )
 
@@ -336,7 +315,6 @@ class Categorizer:
         candidate_ids: set[str],
         names: dict[str, str],
         history: Sequence[dict[str, Any]],
-        recurring: Any,
         result: CategorizationResult,
     ) -> dict[str, Any]:
         settings = self.settings
@@ -399,7 +377,6 @@ class Categorizer:
             "amounts": [item["amount_cents"] for item in sample],
             "account_name": sample[0].get("account_name", "") if sample else "",
             "count": len(items),
-            "cadence": getattr(recurring, "cadence", "") if recurring else "",
         }
         examples = similar_examples(real_key, history, limit=settings.ai_example_count)
         prompt = build_user_prompt(
@@ -490,7 +467,6 @@ class Categorizer:
         item: dict[str, Any],
         *,
         resolution: dict[str, Any],
-        recurring: Any,
         stats: tagging.MerchantStats | None,
     ) -> Proposal:
         settings = self.settings
@@ -512,12 +488,7 @@ class Categorizer:
             tags = tagging.derive_tags(
                 amount_cents=item["amount_cents"],
                 merchant_key=item.get("merchant_key", ""),
-                recurring_kind=getattr(recurring, "kind", "") if recurring else "",
-                recurring_interval_days=(
-                    getattr(recurring, "interval_days", 0.0) if recurring else 0.0
-                ),
                 stats=stats,
-                tag_cadence=settings.tag_cadence,
                 tag_anomalies=settings.tag_anomalies,
             )
         if status == STATUS_APPLIED and settings.tagging_enabled:

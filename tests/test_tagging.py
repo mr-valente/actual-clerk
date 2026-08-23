@@ -54,10 +54,7 @@ def test_removing_a_tag_leaves_the_note_readable():
     assert remove_tag("note #clerks", "clerk") == "note #clerks"
 
 
-def test_cadence_tags_follow_the_detected_schedule():
-    assert derive_tags(amount_cents=-1599, merchant_key="netflix", recurring_kind="subscription", recurring_interval_days=30) == ["subscription"]
-    assert derive_tags(amount_cents=-9800, merchant_key="pge", recurring_kind="recurring", recurring_interval_days=31) == ["recurring"]
-    assert derive_tags(amount_cents=-9900, merchant_key="domain", recurring_kind="subscription", recurring_interval_days=365) == ["subscription", "annual"]
+def test_an_ordinary_charge_earns_no_tags():
     assert derive_tags(amount_cents=-650, merchant_key="cafe") == []
 
 
@@ -75,7 +72,6 @@ def test_incoming_money_is_a_refund_not_an_outsized_charge():
 
 
 def test_each_family_of_tags_can_be_switched_off():
-    assert derive_tags(amount_cents=-1599, merchant_key="netflix", recurring_kind="subscription", recurring_interval_days=30, tag_cadence=False) == []
     assert derive_tags(amount_cents=1599, merchant_key="netflix", tag_anomalies=False) == []
 
 
@@ -89,6 +85,6 @@ def test_the_catalog_carries_a_colour_for_every_tag_clerk_writes():
     catalog = tag_catalog("clerk")
     names = [entry["tag"] for entry in catalog]
     assert names[0] == "clerk"
-    assert {"subscription", "recurring", "annual", "unusual", "refund"} <= set(names)
+    assert {"unusual", "refund"} <= set(names)
     assert all(entry["color"].startswith("#") and entry["description"] for entry in catalog)
     assert "clerk" not in [entry["tag"] for entry in tag_catalog("")]

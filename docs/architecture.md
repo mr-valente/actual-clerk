@@ -66,9 +66,6 @@ Categories answer *which budget line*; tags answer *what kind of spending this w
 
 Almost every tag Clerk writes is derived from history rather than from a model:
 
-- `#subscription` — a merchant billing on a schedule for a steady amount. A subscription that raised its price is still a subscription, so the judgement is made on the current price level rather than on the whole history.
-- `#recurring` — on a schedule, varying amount (utilities).
-- `#annual` — renews roughly yearly.
 - `#unusual` — far above this merchant's typical charge, with enough history to say so.
 - `#refund` — money coming back rather than going out.
 - `#clerk` — provenance, so everything Clerk touched is findable and reversible from inside Actual.
@@ -124,4 +121,20 @@ Overspending is measured against a committed category's accrued balance, not aga
 
 ## UI information architecture
 
-Five focused views: overview, review, connections, recurring, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Review combines transactions awaiting a decision with rules worth promoting. Connections shows per-account health and the full transition history. Recurring is the working list for the budget setup. Activity holds every run and every filing decision, including the ones withheld and why.
+Four focused views: overview, review, connections, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Review groups transactions awaiting a decision by merchant, so one choice settles every transaction from that merchant, and lists rules worth promoting. Connections shows per-account health and the full transition history. Activity holds every run and every filing decision, including the ones withheld and why.
+
+## Reading Actual through its redirects
+
+Actual does not rewrite transactions when a category is deleted into a
+replacement, or when two payees are merged. It records a redirect in
+`category_mapping` / `payee_mapping` and resolves it on every read -- its own
+`v_transactions` view and its query layer both join through those tables, and a
+freshly created row is mapped to itself. `actualpy` joins the id columns
+directly, so Clerk resolves those redirects itself when it builds a snapshot:
+transactions, payees, and budget rows all follow them, and a budget left behind
+by a merge is inherited only where the surviving category has no row of its own
+that month.
+
+One narrower case of the same family is still open, and
+[its bug report](bug-renamed-categories.md) is written as a brief for whoever
+picks it up.

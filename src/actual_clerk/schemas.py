@@ -14,10 +14,27 @@ class EnqueueRequest(BaseModel):
     # Categorize only: reach back over the whole retained history instead of
     # the recent window, for the first run against an existing budget.
     full: bool = False
+    # Digest only: send it now to see what the morning looks like, without
+    # spending the one delivery today's date is allowed.
+    force: bool = False
 
 
 class SettingsPatch(BaseModel):
     values: dict[str, Any]
+
+
+class BulkResolveRequest(BaseModel):
+    """Resolve a whole merchant at once, which is how a backlog is actually cleared."""
+
+    ids: list[str] = Field(min_length=1, max_length=2000)
+    action: Literal["accept", "dismiss", "recategorize"]
+    category_id: str | None = None
+
+    @model_validator(mode="after")
+    def category_required_for_recategorize(self) -> BulkResolveRequest:
+        if self.action == "recategorize" and not self.category_id:
+            raise ValueError("a category is required when recategorizing")
+        return self
 
 
 class ClaimSetupTokenRequest(BaseModel):

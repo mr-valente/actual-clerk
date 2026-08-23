@@ -34,14 +34,14 @@ def test_a_good_month_leads_with_what_is_left():
     payload = digest()
     assert payload["title"] == "$1,905.00 free money left (92%)"
     assert "$173.18 a day" in payload["message"]
-    assert "ahead of the month's pace" in payload["message"]
+    assert "under an even pace for the month" in payload["message"]
     assert payload["priority"] == 3
     assert payload["local_date"] == "2026-08-21"
 
 
 def test_being_behind_the_pace_raises_the_priority():
     payload = digest({"on_track": False, "pace_delta_cents": -20000})
-    assert "past the month's pace" in payload["message"]
+    assert "over an even pace for the month" in payload["message"]
     assert payload["priority"] == 4
 
 
@@ -94,22 +94,10 @@ def test_overspent_bills_are_called_out():
     assert "over budget by $42.00" in payload["message"]
 
 
-def test_upcoming_charges_and_missing_ones_are_included():
-    payload = digest(
-        upcoming=[
-            {"label": "Netflix", "typical_amount_cents": 1799, "next_expected": "2026-08-24"}
-        ],
-        recurring_summary={"overdue_count": 2},
-    )
-    assert "Due soon: Netflix $17.99 on 2026-08-24" in payload["message"]
-    assert "2 expected recurring charge(s) have not arrived" in payload["message"]
-
-
 def test_the_message_stays_readable_on_a_lock_screen():
     payload = digest(
         review_count=3,
         health=[{"account_name": "Checking", "status": "error", "detail": "x"}],
-        upcoming=[{"label": "Netflix", "typical_amount_cents": 1799, "next_expected": "2026-08-24"}],
     )
     assert len(payload["message"]) < 700
     assert len(payload["message"].splitlines()) <= 8
@@ -186,3 +174,10 @@ def test_unmuting_a_broken_account_does_raise_the_alarm():
     )
     assert alert is not None
     assert alert["priority"] == 5
+
+
+def test_an_overspent_month_leads_with_how_far_past_it_is():
+    """A negative amount "left" is not a quantity anyone has."""
+    payload = digest({"remaining_cents": -99590, "remaining_percent": -0.49})
+    assert payload["title"] == "$995.90 over budget (49%)"
+    assert "left" not in payload["title"]

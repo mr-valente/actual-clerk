@@ -256,7 +256,7 @@ async def test_nothing_to_do_costs_nothing(settings):
 # ------------------------------------------------------------------- tagging
 
 
-async def test_a_recognised_subscription_is_tagged_and_marked_as_clerks(settings):
+async def test_clerks_own_work_is_marked_in_the_note(settings):
     charges = [
         transaction(
             datetime.date(2026, 3, 4) + datetime.timedelta(days=30 * index),
@@ -271,7 +271,6 @@ async def test_a_recognised_subscription_is_tagged_and_marked_as_clerks(settings
     result = await run(settings, snapshot(transactions=charges + [pending]))
 
     applied = result.applied[0]
-    assert "subscription" in applied.tags
     assert settings.clerk_tag in applied.note_tags
     assert result.updates[0]["add_tags"] == applied.note_tags
 

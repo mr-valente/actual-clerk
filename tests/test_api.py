@@ -568,3 +568,76 @@ async def test_the_asset_stamp_follows_the_file_contents():
     for name, stamp in stamps.items():
         expected = hashlib.sha256((STATIC_DIRECTORY / name).read_bytes()).hexdigest()[:12]
         assert stamp == expected
+
+
+# ------------------------------------------------------- bulk review resolve
+
+
+async def test_a_whole_merchant_is_applied_in_one_write(client, gateway):
+    """A backlog is cleared a merchant at a time, in a single batch."""
+    ids = [client.database.add_decision(decision(transaction_id=f"txn-{n}")) for n in range(3)]
+    response = await client.post(
+        "/api/reviews/resolve", json={"ids": ids, "action": "accept"}
+    )
+    assert response.status_code == 200
+    assert response.json() == {"status": "applied", "resolved": 3, "skipped": 0}
+    assert len(gateway.updates) == 3, "one batch, not one call per transaction"
+    assert {item["transaction_id"] for item in gateway.updates} == {"txn-0", "txn-1", "txn-2"}
+    for decision_id in ids:
+        assert client.database.get_decision(decision_id)["status"] == "applied"
+
+
+async def test_bulk_dismiss_resolves_without_touching_actual(client, gateway):
+    ids = [client.database.add_decision(decision(transaction_id=f"txn-{n}")) for n in range(4)]
+    response = await client.post(
+        "/api/reviews/resolve", json={"ids": ids, "action": "dismiss"}
+    )
+    assert response.json() == {"status": "dismissed", "resolved": 4}
+    assert gateway.updates == []
+    assert client.database.get_decision(ids[0])["status"] == "dismissed"
+
+
+async def test_bulk_recategorize_applies_one_category_to_all(client, gateway):
+    ids = [client.database.add_decision(decision(transaction_id=f"txn-{n}")) for n in range(2)]
+    response = await client.post(
+        "/api/reviews/resolve",
+        json={"ids": ids, "action": "recategorize", "category_id": "cat-groceries"},
+    )
+    assert response.status_code == 200
+    assert {item["category_id"] for item in gateway.updates} == {"cat-groceries"}
+
+
+async def test_bulk_recategorize_needs_a_category(client):
+    ids = [client.database.add_decision(decision())]
+    response = await client.post(
+        "/api/reviews/resolve", json={"ids": ids, "action": "recategorize"}
+    )
+    assert response.status_code == 422
+
+
+async def test_an_already_resolved_review_is_skipped_not_rewritten(client, gateway):
+    first = client.database.add_decision(decision(transaction_id="txn-1"))
+    second = client.database.add_decision(decision(transaction_id="txn-2"))
+    client.database.resolve_decision(first, "dismissed")
+    response = await client.post(
+        "/api/reviews/resolve", json={"ids": [first, second], "action": "accept"}
+    )
+    assert response.json()["resolved"] == 1
+    assert [item["transaction_id"] for item in gateway.updates] == ["txn-2"]
+
+
+async def test_a_failed_batch_hands_every_claim_back(client, gateway):
+    """Nothing may be left recorded as applied that Actual never received."""
+    ids = [client.database.add_decision(decision(transaction_id=f"txn-{n}")) for n in range(3)]
+    gateway.error = ActualGatewayError("Actual is unreachable")
+    response = await client.post(
+        "/api/reviews/resolve", json={"ids": ids, "action": "accept"}
+    )
+    assert response.status_code == 502
+    for decision_id in ids:
+        assert client.database.get_decision(decision_id)["status"] == "needs_review"
+
+
+async def test_bulk_resolve_rejects_an_empty_list(client):
+    response = await client.post("/api/reviews/resolve", json={"ids": [], "action": "dismiss"})
+    assert response.status_code == 422

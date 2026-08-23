@@ -103,6 +103,8 @@ Budget your recurring bills in Actual once, and leave everyday categories unbudg
 
 [Budget setup](docs/budget-setup.md) compares the two if you are unsure.
 
+Known issue: [renaming or merging a category](docs/bug-renamed-categories.md) can detach data from Clerk. The main mechanism is handled; a narrower one is still open, and that page is the brief for fixing it.
+
 ### 5. Catch up on your existing transactions
 
 A new install only files the last 45 days. To work through everything already in your budget, open **Review → Catch up on all history**. Clerk goes back over your whole retained history (`CLERK_HISTORY_LOOKBACK_DAYS`, two years by default) and asks the local model once per unfamiliar merchant — not once per transaction — so even a long history is a bounded number of calls. Watch it on the Activity page; the run is labelled *full history*.

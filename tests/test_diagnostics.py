@@ -587,3 +587,46 @@ def test_a_hidden_category_is_marked_in_the_listing(settings):
     )
     text = report(settings, snapshot=snap)
     assert "(hidden)" in text
+
+
+def test_uncategorized_transactions_are_listed_individually(settings):
+    """"4 uncategorized" is unactionable when Actual claims there are none."""
+    snap = snapshot(
+        accounts=[account("Checking")],
+        transactions=[
+            transaction(TODAY, -2934, payee="Mystery Shop", account_id="acct-checking"),
+            transaction(TODAY, -500, payee="", account_id="acct-checking"),
+            transaction(TODAY, -900, payee="Filed", category_id="cat-rent"),
+        ],
+        budgeted={"cat-rent": 120000},
+    )
+    text = report(settings, snapshot=snap)
+    assert "the uncategorized transactions themselves" in text
+    assert "Mystery Shop" in text
+    assert "(no payee)" in text, "a reconciliation adjustment has no payee"
+    assert "Filed" not in text.split("the uncategorized transactions themselves")[1]
+
+
+def test_a_transfer_is_never_listed_as_uncategorized(settings):
+    """Transfers carry no category by construction and are not a problem."""
+    snap = snapshot(
+        transactions=[
+            transaction(TODAY, -2934, payee="Mystery"),
+            transaction(TODAY, -50000, payee="Card payment", is_transfer=True),
+        ],
+        budgeted={"cat-rent": 120000},
+    )
+    listing = report(settings, snapshot=snap).split(
+        "the uncategorized transactions themselves"
+    )[1]
+    assert "Card payment" not in listing
+
+
+def test_payee_names_are_redacted_in_the_listing(settings):
+    snap = snapshot(
+        transactions=[transaction(TODAY, -2934, payee="Mystery Shop")],
+        budgeted={"cat-rent": 120000},
+    )
+    text = report(settings, snapshot=snap, redact=True)
+    assert "Mystery Shop" not in text
+    assert "Payee 1" in text
