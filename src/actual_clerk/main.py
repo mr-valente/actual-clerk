@@ -14,13 +14,14 @@ import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import ValidationError
 
 from actual_clerk import __version__
 from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
 from actual_clerk.clients.ntfy import NotificationError, NtfyClient
 from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleClient
 from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
-from actual_clerk.config import SettingsManager, data_directory
+from actual_clerk.config import TIMEZONE_CHOSEN_KEY, SettingsManager, data_directory
 from actual_clerk.db import Database
 from actual_clerk.diagnostics import build_report, probe_budget_file
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
@@ -56,6 +57,16 @@ def _configure_application_logging(
 
 def _timestamp(value: float | None) -> str | None:
     return datetime.fromtimestamp(value, UTC).isoformat() if value else None
+
+
+def _field_errors(exc: ValidationError) -> str:
+    """One readable line per rejected field, for a toast rather than a log."""
+    parts = []
+    for error in exc.errors():
+        location = ".".join(str(item) for item in error.get("loc", ())) or "settings"
+        message = str(error.get("msg", "")).removeprefix("Value error, ")
+        parts.append(f"{location.replace('_', ' ')}: {message}")
+    return "; ".join(parts) or str(exc)
 
 
 def _serialize_job(job: dict[str, Any]) -> dict[str, Any]:
@@ -273,6 +284,11 @@ async def diagnostics(request: Request, redact: bool = Query(False)) -> dict[str
         health=[_serialize_record(item) for item in database.health_snapshots()],
         unmonitored=database.unmonitored_account_ids(),
         counts=database.counts(),
+        digests=database.list_digests(limit=10),
+        digest_jobs=[
+            _serialize_job(job) for job in database.list_jobs(kind="digest", limit=10)
+        ],
+        timezone_chosen=database.get_setting(TIMEZONE_CHOSEN_KEY) == "1",
         snapshot_error=snapshot_error,
         redact=redact,
     )
@@ -585,6 +601,11 @@ async def update_settings(payload: SettingsPatch, request: Request) -> dict[str,
     before = _settings_manager(request).get()
     try:
         updated = _settings_manager(request).update(payload.values)
+    except ValidationError as exc:
+        # The whole form is rejected when any one field is, so the message has
+        # to name the field: a pydantic dump in a toast tells the reader
+        # nothing about which box to go back and fix.
+        raise HTTPException(status_code=422, detail=_field_errors(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     restart_fields = {"log_level"}

@@ -111,9 +111,24 @@ A new install only files the last 45 days. To work through everything already in
 
 Anything Clerk is not confident about lands in the review queue rather than in your budget.
 
-### 6. Turn on the morning digest
+### 6. Turn on the morning report
 
-In **Settings → Notifications**, enable ntfy and pick a hard-to-guess topic on [ntfy.sh](https://ntfy.sh) (or point at your own server). Subscribe to the same topic on your phone. Set the delivery time and time zone under **Sync & digest**.
+In **Settings → Notifications**, enable ntfy and pick a hard-to-guess topic on [ntfy.sh](https://ntfy.sh) (or point at your own server). Subscribe to the same topic on your phone. Then, under **Settings → Morning report**, set the delivery time and time zone.
+
+The notification header is yours to name — *The Morning Report* by default — and stays the same every morning, so it is recognisable on a lock screen before a word is read. Everything the report actually says goes in the body, as a headline figure and a few short blocks, each of which can be switched off:
+
+| Block | Shows |
+| --- | --- |
+| Free money left | The headline figure and how much of the month remains |
+| Spent so far | What has gone out since the 1st, against what was free |
+| Safe to spend a day | What you can spend daily and still finish level |
+| Pace for the month | Whether you are ahead of or behind an even spend |
+| Projected month end | Where the month lands at the current pace (off by default) |
+| Committed overspend | Named when a bill has gone past its budget |
+| Bank connections | Connections needing attention |
+| Waiting for you | Transactions to review, and anything uncategorized |
+
+A broken bank connection still raises the notification's priority whether or not that block is shown: which parts you want to read is a preference, a dead connection is not.
 
 ---
 
@@ -207,13 +222,18 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_HEALTH_ALERTS_ENABLED` | `true` | Notify on connection changes |
 | `CLERK_DIGEST_ENABLED` | `true` | Send the morning digest |
 | `CLERK_DIGEST_TIME` | `07:30` | Local delivery time |
+| `CLERK_DIGEST_TITLE` | `The Morning Report` | The notification header |
 | `TZ` / `CLERK_TIMEZONE` | `UTC` | Time zone for the digest and the month boundary |
 | `CLERK_NOTIFICATIONS_ENABLED` | `false` | Enable ntfy delivery |
 | `CLERK_NTFY_URL` | `https://ntfy.sh` | ntfy server |
 | `CLERK_NTFY_TOPIC` | — | Topic (required when notifications are on) |
 | `CLERK_NTFY_TOKEN` | — | For a protected topic |
 
-`TZ` seeds the time zone on a fresh install but never overrides one you chose in the UI; `CLERK_TIMEZONE` does.
+`TZ` seeds the time zone until you pick one in **Settings → Sync & digest**, after which your choice stands and `TZ` stops reclaiming it. `CLERK_TIMEZONE` overrides both and locks the field.
+
+If the digest arrives at the wrong hour, or not at all, **Settings → Limits & reliability → Run diagnostics** prints the whole schedule: both clocks, the four conditions the scheduler checks, where the time zone came from, and every digest Clerk has claimed — with the ntfy topic and message id it was accepted onto, which is what separates "never sent" from "sent somewhere you are not listening".
+
+To watch the scheduled path fire on demand, set the digest time a few minutes ahead and save. One delivery is reserved per date *and* time, so moving the time asks for a fresh one rather than waiting for tomorrow; leaving it alone still gives exactly one a day. **Send report now** is a rehearsal that skips the clock entirely and never spends a scheduled delivery.
 
 ### Reliability
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 import time
 
 from actual_clerk.db import Database
@@ -240,25 +241,58 @@ def test_accounts_removed_from_actual_stop_being_reported(database):
 # ------------------------------------------------------------------ digests
 
 
-def test_a_digest_is_claimed_once_a_day(database):
-    assert database.claim_digest("2026-08-21") is True
-    assert database.claim_digest("2026-08-21") is False
-    assert database.claim_digest("2026-08-22") is True
+def test_a_digest_is_claimed_once_per_date_and_time(database):
+    assert database.claim_digest("2026-08-21", "07:30") is True
+    assert database.claim_digest("2026-08-21", "07:30") is False
+    assert database.digest_claimed("2026-08-21", "07:30") is True
+    # A different day, or a different time of day, is a different delivery.
+    assert database.claim_digest("2026-08-22", "07:30") is True
+    assert database.claim_digest("2026-08-21", "18:00") is True
+
+
+def test_a_row_from_before_slots_existed_is_history_not_a_live_claim(database):
+    """It records that something went out, not that a given time is spent.
+
+    Those rows never recorded a time, so treating them as claiming the whole
+    date would forfeit the upgrade day entirely -- no scheduled delivery, and
+    no way to test one. The worst the other reading costs is a single repeat
+    on that one day.
+    """
+
+    database.claim_digest("2026-08-21")
+    assert database.digest_claimed("2026-08-21", "07:30") is False
+    assert database.list_digests()[0]["scheduled_for"] == ""
 
 
 def test_a_failed_digest_releases_its_claim(database):
-    database.claim_digest("2026-08-21")
-    database.release_digest("2026-08-21")
-    assert database.claim_digest("2026-08-21") is True
+    database.claim_digest("2026-08-21", "07:30")
+    database.release_digest("2026-08-21", "07:30")
+    assert database.claim_digest("2026-08-21", "07:30") is True
 
 
 def test_only_delivered_digests_are_shown(database):
-    database.claim_digest("2026-08-20")
-    database.complete_digest("2026-08-20", {"title": "old"}, delivered=False, error="off")
+    database.claim_digest("2026-08-20", "07:30")
+    database.complete_digest("2026-08-20", "07:30", {"title": "old"}, delivered=False, error="off")
     assert database.latest_digest() is None
-    database.claim_digest("2026-08-21")
-    database.complete_digest("2026-08-21", {"title": "today"}, delivered=True)
+    database.claim_digest("2026-08-21", "07:30")
+    database.complete_digest("2026-08-21", "07:30", {"title": "today"}, delivered=True)
     assert database.latest_digest()["payload"]["title"] == "today"
+
+
+def test_the_delivery_receipt_says_where_a_digest_actually_went(database):
+    """"Delivered" alone cannot tell a watched topic from an unwatched one."""
+    database.claim_digest("2026-08-21", "07:30")
+    database.complete_digest(
+        "2026-08-21",
+        "07:30",
+        {"title": "today"},
+        delivered=True,
+        receipt={"server": "https://ntfy.sh", "topic": "budget-abc", "id": "RxIFhE7"},
+    )
+    listed = database.list_digests()[0]
+    assert listed["scheduled_for"] == "07:30"
+    assert listed["receipt"]["topic"] == "budget-abc"
+    assert listed["receipt"]["id"] == "RxIFhE7"
 
 
 # ---------------------------------------------------------------- snapshots
@@ -353,3 +387,34 @@ def test_every_path_that_hands_out_a_job_parses_it_the_same_way(database):
         assert "params_json" not in job
         assert "result_json" not in job
     assert database.get_job(claimed["id"])["params"] == {"full": True}
+
+
+def test_a_digest_ledger_written_before_slots_existed_is_carried_over(data_dir):
+    """The ledger is the only record of what already went out; it must survive."""
+    path = data_dir / "legacy.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE digests (local_date TEXT PRIMARY KEY, "
+        "payload_json TEXT NOT NULL DEFAULT '{}', delivered INTEGER NOT NULL DEFAULT 0, "
+        "error TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO digests(local_date,payload_json,delivered,created_at) "
+        "VALUES('2026-08-21','{\"title\":\"yesterday\"}',1,1000.0)"
+    )
+    connection.commit()
+    connection.close()
+
+    database = Database(path)
+    database.initialize()
+    carried = database.list_digests()
+    assert [row["local_date"] for row in carried] == ["2026-08-21"]
+    assert carried[0]["scheduled_for"] == ""
+    assert database.latest_digest()["payload"]["title"] == "yesterday"
+    # It is history, not a live claim, so the upgrade day can still deliver
+    # and still be tested.
+    assert database.digest_claimed("2026-08-21", "07:30") is False
+
+    # Starting again must not duplicate the rows or lose them.
+    database.initialize()
+    assert len(database.list_digests()) == 1

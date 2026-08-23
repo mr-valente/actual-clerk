@@ -4,6 +4,7 @@ import datetime
 import os
 from pathlib import Path
 
+import httpx
 import pytest
 
 from actual_clerk.config import Settings, SettingsManager
@@ -18,6 +19,24 @@ def clean_environment(monkeypatch):
     for name in list(os.environ):
         if name.startswith(("CLERK_", "ACTUAL_")) or name == "TZ":
             monkeypatch.delenv(name, raising=False)
+
+
+@pytest.fixture(autouse=True)
+def no_outbound_requests(monkeypatch):
+    """The suite must never reach a real server.
+
+    Three digest tests published to a public ntfy.sh topic on every run until
+    the daily quota tripped and the failure read like a bug in Clerk. Only the
+    real network transport is blocked; tests driving an `httpx.MockTransport`
+    are a different class and are untouched.
+    """
+
+    async def refuse(self, request, **kwargs):
+        raise AssertionError(
+            f"This test tried to reach {request.url}. Stub the client instead."
+        )
+
+    monkeypatch.setattr(httpx.AsyncHTTPTransport, "handle_async_request", refuse)
 
 
 @pytest.fixture

@@ -9,7 +9,9 @@ import datetime
 
 import pytest
 
+from actual_clerk import diagnostics
 from actual_clerk.diagnostics import Redactor, build_report, money
+from actual_clerk.processing import DIGEST_WINDOW_HOURS
 from tests.conftest import TODAY
 from tests.factories import account, category, snapshot, transaction
 
@@ -630,3 +632,195 @@ def test_payee_names_are_redacted_in_the_listing(settings):
     text = report(settings, snapshot=snap, redact=True)
     assert "Mystery Shop" not in text
     assert "Payee 1" in text
+
+
+# ------------------------------------------------------- 2b. morning digest
+
+
+def test_the_digest_schedule_is_explained_even_when_actual_is_unreachable(settings):
+    """"It never fired" is a scheduling question, not a budget question."""
+    text = report(settings, snapshot=None, snapshot_error="Actual refused the request")
+    assert "2B. MORNING DIGEST SCHEDULE" in text
+    assert "the gates the scheduler checks, in order" in text
+
+
+def test_the_two_clocks_are_shown_side_by_side(settings):
+    text = report(settings.model_copy(update={"timezone": "America/Chicago"}))
+    assert "Time zone setting                 : America/Chicago" in text
+    assert "Digest time in UTC today" in text
+    # Both clocks, so a digest that arrived at 02:30 explains itself.
+    assert "Local time now" in text
+    assert "UTC time now" in text
+
+
+def test_a_tz_that_should_have_applied_and_did_not_is_an_error(settings, monkeypatch):
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    monkeypatch.delenv("CLERK_TIMEZONE", raising=False)
+    text = report(settings, timezone_chosen=False)
+    assert any("TZ is Europe/Berlin" in item and "[ERROR]" in item for item in findings(text))
+
+
+def test_a_tz_overruled_by_a_deliberate_choice_is_only_a_warning(settings, monkeypatch):
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    monkeypatch.delenv("CLERK_TIMEZONE", raising=False)
+    text = report(settings, timezone_chosen=True)
+    assert any("[WARN]" in item and "chosen in the interface" in item for item in findings(text))
+    assert not any("[ERROR]" in item and "TZ is" in item for item in findings(text))
+
+
+def test_clerk_timezone_outranking_tz_is_not_reported_as_a_fault(settings, monkeypatch):
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    monkeypatch.setenv("CLERK_TIMEZONE", "UTC")
+    text = report(settings)
+    assert "CLERK_TIMEZONE outranks TZ" in text
+    assert not any("TZ is Europe/Berlin" in item for item in findings(text))
+
+
+def test_a_missing_time_zone_database_is_named_as_the_cause(settings, monkeypatch):
+    monkeypatch.setattr(diagnostics, "tz_database_available", lambda: False)
+    text = report(settings)
+    assert any("no time zone database" in item for item in findings(text))
+
+
+def test_a_digest_that_has_never_once_been_claimed_is_a_finding(settings):
+    live = settings.model_copy(update={"notifications_enabled": True, "ntfy_topic": "clerk"})
+    assert any("No digest has ever been claimed" in item for item in findings(report(live)))
+    # One claim on the books, and the scheduler has demonstrably worked.
+    text = report(live, digests=[{"local_date": "2026-08-22", "delivered": 1, "error": ""}])
+    assert not any("No digest has ever been claimed" in item for item in findings(text))
+
+
+def test_digests_that_were_claimed_but_not_delivered_are_visible(settings):
+    sent = datetime.datetime(2026, 8, 22, 7, 30, tzinfo=datetime.UTC).timestamp()
+    text = report(
+        settings,
+        digests=[
+            {
+                "local_date": "2026-08-22",
+                "scheduled_for": "07:30",
+                "delivered": 1,
+                "error": "",
+                "created_at": sent,
+            },
+            {
+                "local_date": "2026-08-21",
+                "scheduled_for": "",
+                "delivered": 0,
+                "error": "ntfy refused the message",
+                "created_at": None,
+            },
+        ],
+    )
+    assert "2026-08-22 07:30      sent 07:30 UTC    delivered" in text
+    assert "2026-08-21 (no time)  sent (no time)    NOT DELIVERED" in text
+    assert "-> ntfy refused the message" in text
+
+
+def test_notifications_switched_off_after_setup_explains_the_silence(settings):
+    quiet = settings.model_copy(update={"ntfy_topic": "clerk"})
+    assert any("notifications are off" in item for item in findings(report(quiet)))
+    # An install that never wanted notifications is not scolded for not having them.
+    assert not any("notifications are off" in item for item in findings(report(settings)))
+
+
+def _inside_the_window(settings):
+    """A digest time five minutes past, and today's date, in the report's zone."""
+    now = datetime.datetime.now(settings.zone)
+    opened = now - datetime.timedelta(minutes=5)
+    return (
+        settings.model_copy(
+            update={
+                "digest_time": opened.strftime("%H:%M"),
+                "notifications_enabled": True,
+                "ntfy_topic": "clerk",
+            }
+        ),
+        now.date().isoformat(),
+        opened.timestamp(),
+    )
+
+
+def test_the_hour_a_digest_arrived_is_shown_not_just_the_date(settings):
+    """A digest delivered at 03:30 was sent on a clock nobody was reading."""
+    live = settings.model_copy(update={"timezone": "America/New_York"})
+    at_0330 = datetime.datetime(2026, 8, 23, 7, 30, 11, tzinfo=datetime.UTC).timestamp()
+    text = report(
+        live,
+        digests=[
+            {
+                "local_date": "2026-08-23",
+                "scheduled_for": "07:30",
+                "delivered": 1,
+                "error": "",
+                "created_at": at_0330,
+                "receipt": {"server": "https://ntfy.sh", "topic": "budget-abc", "id": "RxIF"},
+            }
+        ],
+    )
+    assert "2026-08-23 07:30      sent 03:30 EDT    delivered" in text
+    # And the one fact "delivered" cannot carry: which topic accepted it.
+    assert "-> https://ntfy.sh topic 'budget-abc' message id RxIF" in text
+
+
+def test_a_day_already_spent_explains_why_nothing_more_is_queued(settings):
+    """The one gate with no visible cause: the date is claimed, so it is over."""
+    live, today, claimed_at = _inside_the_window(settings)
+    text = report(
+        live,
+        digests=[
+            {
+                "local_date": today,
+                "scheduled_for": live.digest_time,
+                "delivered": 1,
+                "error": "",
+                "created_at": claimed_at,
+            }
+        ],
+    )
+    note = [item for item in findings(text) if "already spent" in item]
+    assert len(note) == 1
+    assert "went out at" in note[0]
+    assert "The next is" in note[0]
+
+
+def test_a_spent_day_is_only_worth_saying_while_someone_is_waiting(settings):
+    """Outside the window the claim explains nothing: every gate is shut."""
+    now = datetime.datetime.now(settings.zone)
+    closed = now - datetime.timedelta(hours=DIGEST_WINDOW_HOURS + 1)
+    live = settings.model_copy(
+        update={
+            "digest_time": closed.strftime("%H:%M"),
+            "notifications_enabled": True,
+            "ntfy_topic": "clerk",
+        }
+    )
+    text = report(
+        live,
+        digests=[
+            {
+                "local_date": now.date().isoformat(),
+                "scheduled_for": live.digest_time,
+                "delivered": 1,
+                "error": "",
+                "created_at": closed.timestamp(),
+            }
+        ],
+    )
+    assert not any("already spent" in item for item in findings(text))
+
+
+def test_a_day_claimed_without_a_delivery_says_so(settings):
+    live, today, claimed_at = _inside_the_window(settings)
+    text = report(
+        live,
+        digests=[
+            {
+                "local_date": today,
+                "scheduled_for": live.digest_time,
+                "delivered": 0,
+                "error": "ntfy refused the message",
+                "created_at": claimed_at,
+            }
+        ],
+    )
+    assert any("claimed but not delivered" in item for item in findings(text))

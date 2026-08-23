@@ -149,12 +149,19 @@ CREATE TABLE IF NOT EXISTS health_events (
 );
 CREATE INDEX IF NOT EXISTS ix_health_events_created ON health_events(created_at DESC);
 
+-- One delivery per scheduled time, not per day. Both are "once a day" while
+-- the time stands, but moving the time asks for a delivery at the new time
+-- rather than silently spending the day on the old one -- which is also what
+-- makes the scheduled path testable without waiting for tomorrow.
 CREATE TABLE IF NOT EXISTS digests (
-    local_date TEXT PRIMARY KEY,
+    local_date TEXT NOT NULL,
+    scheduled_for TEXT NOT NULL DEFAULT '',
     payload_json TEXT NOT NULL DEFAULT '{}',
+    receipt_json TEXT NOT NULL DEFAULT '{}',
     delivered INTEGER NOT NULL DEFAULT 0,
     error TEXT NOT NULL DEFAULT '',
-    created_at REAL NOT NULL
+    created_at REAL NOT NULL,
+    PRIMARY KEY (local_date, scheduled_for)
 );
 
 CREATE TABLE IF NOT EXISTS snapshots (
@@ -188,7 +195,9 @@ class Database:
 
     def initialize(self) -> None:
         with self._init_lock, self.connect() as connection:
+            self._migrate_digests(connection)
             connection.executescript(SCHEMA)
+            self._restore_digests(connection)
             now = time.time()
             # A job that was running when the process died has no worker to
             # finish it, so hand it back to the queue.
@@ -197,6 +206,36 @@ class Database:
                 "lease_until=NULL, next_run_at=?, updated_at=? WHERE status='running'",
                 (now, now),
             )
+
+    @staticmethod
+    def _migrate_digests(connection: sqlite3.Connection) -> None:
+        """Step aside for the per-scheduled-time digest table.
+
+        The original keyed one delivery to a whole date. Renaming the table
+        before the schema runs lets the schema stay the single definition of
+        the new shape, with the rows carried over afterwards.
+        """
+
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(digests)")}
+        if columns and "scheduled_for" not in columns:
+            connection.execute("ALTER TABLE digests RENAME TO digests_pre_slot")
+
+    @staticmethod
+    def _restore_digests(connection: sqlite3.Connection) -> None:
+        """Carry the old delivery ledger into the new table, once."""
+        present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='digests_pre_slot'"
+        ).fetchone()
+        if not present:
+            return
+        # These rows keep an empty scheduled_for: the time they went out was
+        # never recorded, so they are history rather than a live claim.
+        connection.execute(
+            "INSERT OR IGNORE INTO digests"
+            "(local_date,scheduled_for,payload_json,delivered,error,created_at) "
+            "SELECT local_date,'',payload_json,delivered,error,created_at FROM digests_pre_slot"
+        )
+        connection.execute("DROP TABLE digests_pre_slot")
 
     # ------------------------------------------------------------------ settings
 
@@ -830,35 +869,85 @@ class Database:
 
     # ----------------------------------------------------------------- digests
 
-    def claim_digest(self, local_date: str) -> bool:
-        """Reserve today's digest exactly once, even across restarts."""
+    def claim_digest(self, local_date: str, scheduled_for: str = "") -> bool:
+        """Reserve one delivery for a date and time, even across restarts."""
         with self.connect() as connection:
             try:
                 connection.execute(
-                    "INSERT INTO digests(local_date,created_at) VALUES(?,?)",
-                    (local_date, time.time()),
+                    "INSERT INTO digests(local_date,scheduled_for,created_at) VALUES(?,?,?)",
+                    (local_date, scheduled_for, time.time()),
                 )
             except sqlite3.IntegrityError:
                 return False
         return True
 
+    def digest_claimed(self, local_date: str, scheduled_for: str) -> bool:
+        """Whether this date and time has already been spent.
+
+        Rows carried over from before scheduled times were recorded have no
+        time and so block nothing. They stay in the ledger as history: the
+        worst they can cost is a single repeat on the day of the upgrade,
+        against permanently forfeiting that day's ability to test at all.
+        """
+
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM digests WHERE local_date=? AND scheduled_for=? LIMIT 1",
+                (local_date, scheduled_for),
+            ).fetchone()
+        return row is not None
+
     def complete_digest(
-        self, local_date: str, payload: dict[str, Any], *, delivered: bool, error: str = ""
+        self,
+        local_date: str,
+        scheduled_for: str = "",
+        payload: dict[str, Any] | None = None,
+        *,
+        delivered: bool,
+        error: str = "",
+        receipt: dict[str, Any] | None = None,
     ) -> None:
         with self.connect() as connection:
             connection.execute(
-                "UPDATE digests SET payload_json=?, delivered=?, error=? WHERE local_date=?",
-                (_json(payload), 1 if delivered else 0, error[:500], local_date),
+                "UPDATE digests SET payload_json=?, receipt_json=?, delivered=?, error=? "
+                "WHERE local_date=? AND scheduled_for=?",
+                (
+                    _json(payload or {}),
+                    _json(receipt or {}),
+                    1 if delivered else 0,
+                    error[:500],
+                    local_date,
+                    scheduled_for,
+                ),
             )
 
-    def release_digest(self, local_date: str) -> None:
+    def release_digest(self, local_date: str, scheduled_for: str = "") -> None:
         with self.connect() as connection:
-            connection.execute("DELETE FROM digests WHERE local_date=?", (local_date,))
+            connection.execute(
+                "DELETE FROM digests WHERE local_date=? AND scheduled_for=?",
+                (local_date, scheduled_for),
+            )
+
+    def list_digests(self, limit: int = 10) -> list[dict[str, Any]]:
+        """Recent digest claims, delivered or not, newest first.
+
+        A claim exists for every delivery Clerk has reserved, which is what
+        makes a digest that never arrived distinguishable from one that never
+        ran -- and the receipt says where a delivered one actually went.
+        """
+
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT local_date, scheduled_for, delivered, error, receipt_json, created_at "
+                "FROM digests ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [{**dict(row), "receipt": json.loads(row["receipt_json"] or "{}")} for row in rows]
 
     def latest_digest(self) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
-                "SELECT * FROM digests WHERE delivered=1 ORDER BY local_date DESC LIMIT 1"
+                "SELECT * FROM digests WHERE delivered=1 ORDER BY created_at DESC LIMIT 1"
             ).fetchone()
         if not row:
             return None

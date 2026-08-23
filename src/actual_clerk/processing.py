@@ -142,9 +142,10 @@ class JobManager:
             except Exception as exc:  # noqa: BLE001 - the scheduler must never die
                 log.warning("Scheduler tick failed: %s", exc)
             with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(
-                    asyncio.shield(self._stopping.wait()), timeout=SCHEDULER_TICK_SECONDS
-                )
+                # Not shielded: cancelling a wait on an Event only discards the
+                # waiter, never the flag, and a shielded wait would strand one
+                # task on `_stopping` for every tick the container ever runs.
+                await asyncio.wait_for(self._stopping.wait(), timeout=SCHEDULER_TICK_SECONDS)
 
     def _schedule_due_work(self) -> None:
         settings = self.settings_manager.get()
@@ -162,9 +163,15 @@ class JobManager:
             self._enqueue_nowait("health", trigger="schedule")
         if settings.digest_enabled and settings.notifications_enabled:
             local_now = datetime.datetime.now(settings.zone)
-            if digest_is_due(local_now, settings.digest_clock) and not self._digest_sent(
-                local_now.date().isoformat()
+            if digest_is_due(local_now, settings.digest_clock) and not self.database.digest_claimed(
+                local_now.date().isoformat(), settings.digest_time
             ):
+                log.info(
+                    "Morning digest is due (%s local, %s, scheduled for %s); queueing it",
+                    local_now.strftime("%H:%M"),
+                    settings.timezone,
+                    settings.digest_time,
+                )
                 self._enqueue_nowait("digest", trigger="schedule")
 
     def enqueue_sync_nowait(self, *, trigger: str) -> None:
@@ -184,13 +191,6 @@ class JobManager:
             return False
         reference = last.get("completed_at") or last.get("created_at") or 0
         return now.timestamp() - float(reference) >= interval_seconds
-
-    def _digest_sent(self, local_date: str) -> bool:
-        with self.database.connect() as connection:
-            row = connection.execute(
-                "SELECT 1 FROM digests WHERE local_date=? LIMIT 1", (local_date,)
-            ).fetchone()
-        return row is not None
 
     # ------------------------------------------------------------ dispatch
 
@@ -421,8 +421,9 @@ class JobManager:
         forced = bool((job.get("params") or {}).get("force"))
         local_now = datetime.datetime.now(settings.zone)
         local_date = local_now.date().isoformat()
-        if not forced and not self.database.claim_digest(local_date):
-            return {"skipped": "already sent today"}
+        slot = settings.digest_time
+        if not forced and not self.database.claim_digest(local_date, slot):
+            return {"skipped": f"already sent for {local_date} {slot}"}
         try:
             today = local_now.date()
             snapshot = await self.gateway.snapshot(today=today)
@@ -433,11 +434,17 @@ class JobManager:
                 review_count=self.database.counts()["needs_review"],
                 currency=settings.budget_currency,
                 today=today,
+                title=settings.digest_title,
+                sections=settings.digest_sections,
             )
             if not settings.notifications_enabled:
                 if not forced:
                     self.database.complete_digest(
-                        local_date, payload, delivered=False, error="notifications are disabled"
+                        local_date,
+                        slot,
+                        payload,
+                        delivered=False,
+                        error="notifications are disabled",
                     )
                 return {
                     "delivered": False,
@@ -446,7 +453,7 @@ class JobManager:
                 }
             client = NtfyClient(settings)
             try:
-                await client.publish(
+                acknowledgement = await client.publish(
                     title=payload["title"],
                     message=payload["message"],
                     priority=payload["priority"],
@@ -454,14 +461,37 @@ class JobManager:
                 )
             finally:
                 await client.close()
+            # Where it went, in ntfy's own words. "Delivered" on its own cannot
+            # distinguish a message that reached the topic being watched from
+            # one accepted onto a topic nobody is subscribed to.
+            receipt = {
+                "server": settings.ntfy_url,
+                "topic": settings.ntfy_topic,
+                "id": str(acknowledgement.get("id") or ""),
+                "at": acknowledgement.get("time"),
+            }
             if not forced:
-                self.database.complete_digest(local_date, payload, delivered=True)
-            return {"delivered": True, "forced": forced, "title": payload["title"]}
+                self.database.complete_digest(
+                    local_date, slot, payload, delivered=True, receipt=receipt
+                )
+            log.info(
+                "Morning digest delivered to %s topic %r as message %s",
+                receipt["server"],
+                receipt["topic"],
+                receipt["id"] or "(no id returned)",
+            )
+            return {
+                "delivered": True,
+                "forced": forced,
+                "title": payload["title"],
+                "topic": receipt["topic"],
+                "message_id": receipt["id"],
+            }
         except Exception:
-            # Release the claim so a retry, or tomorrow's run, is not blocked
-            # by a digest that never actually went out.
+            # Release the claim so a retry, or a later time today, is not
+            # blocked by a digest that never actually went out.
             if not forced:
-                self.database.release_digest(local_date)
+                self.database.release_digest(local_date, slot)
             raise
 
     # ------------------------------------------------------------- overview

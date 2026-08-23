@@ -703,7 +703,8 @@ async function renderSettings() {
         <a href="#settings-model">Local model</a>
         <a href="#settings-filing">Filing</a>
         <a href="#settings-tags">Tags</a>
-        <a href="#settings-schedule">Sync &amp; digest</a>
+        <a href="#settings-sync">Sync</a>
+        <a href="#settings-digest">Morning report</a>
         <a href="#settings-notifications">Notifications</a>
         <a href="#settings-appearance">Appearance</a>
         <a href="#settings-advanced">Limits &amp; reliability</a>
@@ -753,19 +754,36 @@ async function renderSettings() {
           <div class="form-grid">${settingInput("clerk_tag", "Clerk tag", s.clerk_tag, { full: true, note: "Written without the leading #." })}</div>
         </div></section>
 
-        <section class="panel settings-section" id="settings-schedule"><header class="panel-head"><div><h3>Sync &amp; digest</h3><p class="section-description">How often Clerk pulls from Actual and when it sends the morning report.</p></div></header><div class="panel-body">
+        <section class="panel settings-section" id="settings-sync"><header class="panel-head"><div><h3>Sync</h3><p class="section-description">How often Clerk pulls from Actual and checks your bank connections.</p></div></header><div class="panel-body">
           ${settingToggle("sync_enabled", "Sync on a schedule", "Pulls the budget, asks Actual to run bank sync, then files what arrived.", s.sync_enabled)}
           ${settingToggle("bank_sync_enabled", "Run Actual's bank sync", "Turn this off if something else already triggers bank sync on a schedule.", s.bank_sync_enabled)}
-          ${settingToggle("digest_enabled", "Send a morning digest", "One notification a day with your budget report and anything that needs attention.", s.digest_enabled)}
           <div class="form-grid">
             ${settingInput("sync_interval_minutes", "Sync every (minutes)", s.sync_interval_minutes, { type: "number", min: 5, max: 1440 })}
             ${settingInput("health_interval_minutes", "Check connections every (minutes)", s.health_interval_minutes, { type: "number", min: 5, max: 1440 })}
-            ${settingInput("digest_time", "Digest time", s.digest_time, { note: "24-hour local time, for example 07:30." })}
-            ${settingInput("timezone", "Time zone", s.timezone, { note: "An IANA name such as America/New_York." })}
           </div>
         </div></section>
 
-        <section class="panel settings-section" id="settings-notifications"><header class="panel-head"><div><h3>Notifications</h3><p class="section-description">ntfy delivers the morning digest and connection alerts.</p></div><div class="actions"><button class="button ghost small" type="button" data-action="test-connection" data-target="notifications">Send test</button><button class="button ghost small" type="button" data-action="send-digest">Send report now</button></div></header><div class="panel-body">
+        <section class="panel settings-section" id="settings-digest"><header class="panel-head"><div><h3>Morning report</h3><p class="section-description">One notification a day. The header stays the same; everything below goes in the body.</p></div><button class="button ghost small" type="button" data-action="send-digest">Send report now</button></header><div class="panel-body">
+          ${settingToggle("digest_enabled", "Send a morning report", "Delivered through ntfy at the time below. One per day, unless you move the time.", s.digest_enabled)}
+          <div class="form-grid">
+            ${settingInput("digest_title", "Notification header", s.digest_title, { full: true, note: "Shown as the notification title every morning, so it is recognisable at a glance." })}
+            ${settingInput("digest_time", "Delivery time", s.digest_time, { note: "24-hour local time, for example 07:30." })}
+            ${settingInput("timezone", "Time zone", s.timezone, { note: "An IANA name such as America/New_York." })}
+          </div>
+          <h4 class="field-group-title">What the report includes</h4>
+          <div class="check-grid">
+            ${settingCheck("digest_show_headline", "Free money left", "The headline figure and how much of the month's free money remains.", s.digest_show_headline)}
+            ${settingCheck("digest_show_spending", "Spent so far", "How much has gone out since the 1st, against what was free to spend.", s.digest_show_spending)}
+            ${settingCheck("digest_show_safe_to_spend", "Safe to spend a day", "What you can spend daily and still finish the month level.", s.digest_show_safe_to_spend)}
+            ${settingCheck("digest_show_pace", "Pace for the month", "Whether you are ahead of or behind an even spend across the month.", s.digest_show_pace)}
+            ${settingCheck("digest_show_projection", "Projected month end", "Where this month lands if the current pace holds.", s.digest_show_projection)}
+            ${settingCheck("digest_show_commitments", "Committed overspend", "Named when a bill or subscription has gone past what you budgeted.", s.digest_show_commitments)}
+            ${settingCheck("digest_show_connections", "Bank connections", "Lists connections needing attention. A broken connection still raises the alert priority either way.", s.digest_show_connections)}
+            ${settingCheck("digest_show_attention", "Waiting for you", "Transactions to review and anything still uncategorized this month.", s.digest_show_attention)}
+          </div>
+        </div></section>
+
+        <section class="panel settings-section" id="settings-notifications"><header class="panel-head"><div><h3>Notifications</h3><p class="section-description">ntfy delivers the morning digest and connection alerts.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="notifications">Send test</button></header><div class="panel-body">
           ${settingToggle("notifications_enabled", "Enable ntfy notifications", "Without this, Clerk still builds the digest and shows it on the overview.", s.notifications_enabled)}
           ${settingToggle("health_alerts_enabled", "Alert when a bank connection changes", "One message when a connection breaks and one when it recovers, never a repeat every hour.", s.health_alerts_enabled)}
           <div class="form-grid">
@@ -982,7 +1000,7 @@ content.addEventListener("submit", async (event) => {
   const locked = new Set(state.settings?.environment_overrides || []);
   const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "notifications_enabled", "health_alerts_enabled"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;

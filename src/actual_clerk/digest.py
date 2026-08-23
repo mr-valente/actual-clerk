@@ -1,9 +1,11 @@
 """The morning budget message.
 
-One notification a day, built to be read on a lock screen in five seconds: how
-much free money is left, whether that is ahead of or behind the month's pace,
-what is safe to spend today, and anything that needs a human. Nothing else
-belongs in it -- a digest that reports everything is a digest nobody reads.
+One notification a day. The header never changes -- it is the name you gave
+the report, so it is recognisable on a lock screen before a word is read --
+and everything the morning actually holds goes in the body, as a headline
+figure followed by short blocks. Each block can be switched off, because a
+report that says everything is a report nobody reads, and which parts matter
+is a matter of taste rather than something Clerk can work out.
 """
 
 from __future__ import annotations
@@ -14,6 +16,46 @@ from typing import Any
 from actual_clerk.domain.budget import format_money
 from actual_clerk.domain.health import ALERTING_STATUSES, STATUS_LABELS
 
+# A middle dot separates a figure from its qualifier and marks list items. It
+# renders on every platform ntfy reaches, which "-" and box drawing do not do
+# as cleanly on a phone.
+BULLET = "\u00b7"
+DASH = "\u2014"
+
+
+def plural(count: int, noun: str) -> str:
+    """"1 transaction", "3 transactions" -- a report reads, it does not log."""
+    return f"{count} {noun}" if count == 1 else f"{count} {noun}s"
+
+
+class _Sections:
+    """Which blocks to include, defaulting to on for anything unnamed."""
+
+    def __init__(self, sections: dict[str, bool] | None):
+        self.sections = sections or {}
+
+    def __call__(self, name: str) -> bool:
+        return bool(self.sections.get(name, True))
+
+
+class _Body:
+    """Blocks separated by a blank line, each a heading and its detail."""
+
+    def __init__(self) -> None:
+        self.blocks: list[list[str]] = []
+
+    def block(self, *lines: str) -> None:
+        kept = [line for line in lines if line]
+        if kept:
+            self.blocks.append(kept)
+
+    def listing(self, heading: str, items: list[str]) -> None:
+        if items:
+            self.blocks.append([heading] + [f"  {BULLET} {item}" for item in items])
+
+    def render(self) -> str:
+        return "\n\n".join("\n".join(block) for block in self.blocks)
+
 
 def build_digest(
     *,
@@ -22,11 +64,14 @@ def build_digest(
     review_count: int,
     currency: str = "USD",
     today: datetime.date | None = None,
+    title: str = "The Morning Report",
+    sections: dict[str, bool] | None = None,
 ) -> dict[str, Any]:
-    """Compose the digest payload, its ntfy title, body, and priority."""
+    """Compose the digest payload: its fixed title, body, tags, and priority."""
 
     today = today or datetime.date.today()
-    lines: list[str] = []
+    show = _Sections(sections)
+    body = _Body()
     tags: list[str] = ["moneybag"]
     priority = 3
 
@@ -36,88 +81,109 @@ def build_digest(
     percent = float(report.get("remaining_percent", 0.0))
     days_remaining = int(report.get("days_remaining", 1)) or 1
 
+    body.block(f"{today:%A} {today.day} {today:%B}")
+
     if not report.get("configured"):
-        title = "Set up your budget in Clerk"
-        lines.append(
-            "Clerk cannot work out your monthly income yet. Enter it in Settings, or record "
-            "this month's income in Actual, and the report starts tomorrow."
+        body.block(
+            "Clerk cannot work out your monthly income yet.",
+            "Enter it in Settings, or record this month's income in Actual, "
+            "and the report starts tomorrow.",
         )
-        return _payload(title, lines, tags + ["warning"], 3, report, health, review_count, today)
+        return _payload(title, body, tags + ["warning"], 3, report, health, review_count, today)
 
     if free <= 0:
-        title = f"No free money budgeted for {today.strftime('%B')}"
-        lines.append(
+        # Nothing is free, so there is no headline figure to lead with.
+        body.block(
+            f"No free money budgeted for {today.strftime('%B')}.",
             f"Committed spending of {format_money(report.get('committed_cents', 0), currency)} "
             f"is at or above expected income of "
-            f"{format_money(report.get('expected_income_cents', 0), currency)}."
+            f"{format_money(report.get('expected_income_cents', 0), currency)}.",
         )
         priority = 4
         tags.append("warning")
     else:
-        # Past zero there is nothing "left"; there is an amount gone past.
-        if remaining < 0:
-            title = f"{format_money(abs(remaining), currency)} over budget ({abs(percent):.0%})"
-        else:
-            title = f"{format_money(remaining, currency)} free money left ({percent:.0%})"
-        lines.append(
-            f"Spent {format_money(spent, currency)} of "
-            f"{format_money(free, currency)} since the 1st."
-        )
-        safe = int(report.get("daily_safe_to_spend_cents", 0))
-        if remaining > 0:
-            lines.append(
-                f"{format_money(safe, currency)} a day keeps you level for the "
-                f"{days_remaining} day(s) left."
+        if show("headline"):
+            # Past zero there is nothing "left"; there is an amount gone past.
+            if remaining < 0:
+                headline = f"{format_money(abs(remaining), currency)} over budget"
+            else:
+                headline = f"{format_money(remaining, currency)} free money left"
+            body.block(f"{headline}  {BULLET}  {abs(percent):.0%}")
+
+        detail = []
+        if show("spending"):
+            detail.append(
+                f"Spent {format_money(spent, currency)} of "
+                f"{format_money(free, currency)} since the 1st"
             )
-        else:
-            lines.append("Free money for this month is already spent.")
+        if show("safe_to_spend") and remaining > 0:
+            safe = int(report.get("daily_safe_to_spend_cents", 0))
+            detail.append(
+                f"{format_money(safe, currency)} a day keeps you level for the "
+                f"{plural(days_remaining, 'day')} left"
+            )
+        if show("pace"):
+            delta = format_money(abs(int(report.get("pace_delta_cents", 0))), currency)
+            side = "under" if report.get("on_track") else "over"
+            detail.append(f"{delta} {side} an even pace for the month")
+        if show("projection"):
+            projected = int(report.get("projected_remaining_cents", 0))
+            ending = "with" if projected >= 0 else "over by"
+            detail.append(
+                f"On this pace the month ends {ending} "
+                f"{format_money(abs(projected), currency)}"
+            )
+        body.block(*detail)
+
+        if remaining <= 0:
+            body.block("Free money for this month is already spent.")
             priority = 4
             tags.append("warning")
-
-        delta = int(report.get("pace_delta_cents", 0))
-        if report.get("on_track"):
-            lines.append(
-                f"You are {format_money(abs(delta), currency)} under an even pace for the month."
-            )
-        else:
-            lines.append(
-                f"You are {format_money(abs(delta), currency)} over an even pace for the month."
-            )
+        if not report.get("on_track"):
             priority = max(priority, 4)
 
-    overspend = int(report.get("committed_overspend_cents", 0))
-    if overspend > 0:
-        lines.append(
-            f"Committed categories are over budget by {format_money(overspend, currency)}."
-        )
+    if show("commitments"):
+        overspend = int(report.get("committed_overspend_cents", 0))
+        if overspend > 0:
+            body.block(
+                f"Committed categories are over budget by "
+                f"{format_money(overspend, currency)}"
+            )
 
     degraded = [item for item in health if item.get("status") in ALERTING_STATUSES]
     if degraded:
+        # The alarm is raised whether or not the block is shown: a broken bank
+        # connection is not a formatting preference.
         priority = 5
         tags.append("rotating_light")
-        names = ", ".join(
-            f"{item.get('account_name')} ({STATUS_LABELS.get(item.get('status'), item.get('status'))})"
-            for item in degraded[:3]
-        )
-        extra = f" and {len(degraded) - 3} more" if len(degraded) > 3 else ""
-        lines.append(f"Bank connections needing attention: {names}{extra}.")
+        if show("connections"):
+            named = [
+                f"{item.get('account_name')} {DASH} "
+                f"{STATUS_LABELS.get(item.get('status'), item.get('status'))}"
+                for item in degraded[:4]
+            ]
+            if len(degraded) > 4:
+                named.append(f"and {len(degraded) - 4} more")
+            body.listing("Connections needing attention", named)
 
-    if review_count:
-        lines.append(f"{review_count} transaction(s) waiting for your review in Clerk.")
+    if show("attention"):
+        waiting = []
+        if review_count:
+            waiting.append(f"{plural(review_count, 'transaction')} to review in Clerk")
+        uncategorized = int(report.get("uncategorized_count", 0))
+        if uncategorized:
+            waiting.append(
+                f"{plural(uncategorized, 'transaction')} still uncategorized this month "
+                f"({format_money(report.get('uncategorized_cents', 0), currency)})"
+            )
+        body.listing("Waiting for you", waiting)
 
-    uncategorized = int(report.get("uncategorized_count", 0))
-    if uncategorized:
-        lines.append(
-            f"{uncategorized} transaction(s) this month are still uncategorized "
-            f"({format_money(report.get('uncategorized_cents', 0), currency)})."
-        )
-
-    return _payload(title, lines, tags, priority, report, health, review_count, today)
+    return _payload(title, body, tags, priority, report, health, review_count, today)
 
 
 def _payload(
     title: str,
-    lines: list[str],
+    body: _Body,
     tags: list[str],
     priority: int,
     report: dict[str, Any],
@@ -128,7 +194,7 @@ def _payload(
     return {
         "local_date": today.isoformat(),
         "title": title,
-        "message": "\n".join(lines),
+        "message": body.render(),
         "tags": tags,
         "priority": priority,
         "report": report,

@@ -92,6 +92,17 @@ class Settings(BaseModel):
     digest_enabled: bool = True
     digest_time: str = "07:30"
     timezone: str = "UTC"
+    # The notification's header. Everything the report says lives in the body,
+    # so this stays the same every morning and is recognisable at a glance.
+    digest_title: str = Field(default="The Morning Report", max_length=80)
+    digest_show_headline: bool = True
+    digest_show_spending: bool = True
+    digest_show_safe_to_spend: bool = True
+    digest_show_pace: bool = True
+    digest_show_projection: bool = False
+    digest_show_commitments: bool = True
+    digest_show_connections: bool = True
+    digest_show_attention: bool = True
 
     # --- Notifications ----------------------------------------------------
     notifications_enabled: bool = False
@@ -152,6 +163,12 @@ class Settings(BaseModel):
     def upper_currency(cls, value: str) -> str:
         return value.strip().upper()
 
+    @field_validator("digest_title")
+    @classmethod
+    def normalize_digest_title(cls, value: str) -> str:
+        # A blank header would leave ntfy showing the topic name instead.
+        return " ".join(value.split()) or "The Morning Report"
+
     @field_validator("digest_time")
     @classmethod
     def validate_digest_time(cls, value: str) -> str:
@@ -173,7 +190,17 @@ class Settings(BaseModel):
         value = value.strip() or "UTC"
         try:
             zoneinfo.ZoneInfo(value)
-        except (zoneinfo.ZoneInfoNotFoundError, ValueError) as exc:
+        except zoneinfo.ZoneInfoNotFoundError as exc:
+            # A slim base image with no tz database rejects every name alike,
+            # so "unknown time zone" would send the reader hunting for a typo
+            # that is not there. Say which of the two it actually is.
+            if not tz_database_available():
+                raise ValueError(
+                    "this container has no time zone database, so only UTC resolves; "
+                    "install the tzdata package"
+                ) from exc
+            raise ValueError(f"unknown time zone: {value}") from exc
+        except ValueError as exc:
             raise ValueError(f"unknown time zone: {value}") from exc
         return value
 
@@ -205,6 +232,16 @@ class Settings(BaseModel):
     @property
     def digest_clock(self) -> clock_time:
         return clock_time.fromisoformat(self.digest_time)
+
+    @property
+    def digest_sections(self) -> dict[str, bool]:
+        """The `digest_show_*` switches, keyed by the block they control."""
+        prefix = "digest_show_"
+        return {
+            name.removeprefix(prefix): bool(getattr(self, name))
+            for name in Settings.model_fields
+            if name.startswith(prefix)
+        }
 
     @property
     def zone(self) -> zoneinfo.ZoneInfo:
@@ -294,6 +331,7 @@ ENVIRONMENT_FIELDS = {
     "CLERK_HEALTH_ALERTS_ENABLED": "health_alerts_enabled",
     "CLERK_DIGEST_ENABLED": "digest_enabled",
     "CLERK_DIGEST_TIME": "digest_time",
+    "CLERK_DIGEST_TITLE": "digest_title",
     "CLERK_TIMEZONE": "timezone",
     "TZ": "timezone",
     "CLERK_NOTIFICATIONS_ENABLED": "notifications_enabled",
@@ -309,6 +347,10 @@ ENVIRONMENT_FIELDS = {
 # TZ is a container convention rather than a Clerk setting, so it seeds the
 # time zone but never locks the field in the UI.
 SOFT_ENVIRONMENT_NAMES = frozenset({"TZ"})
+
+# Set once the time zone is chosen through the interface, which is what stops
+# TZ from reclaiming it on the next restart.
+TIMEZONE_CHOSEN_KEY = "timezone_chosen"
 
 
 def environment_values(*, include_soft: bool = True) -> dict[str, str]:
@@ -334,15 +376,43 @@ def data_directory() -> Path:
     return Path(os.environ.get("CLERK_DATA_DIR", "./data")).expanduser().resolve()
 
 
-def load_persisted_settings(raw_json: str | None) -> Settings:
+def tz_database_available() -> bool:
+    """Whether this interpreter can resolve any IANA zone at all.
+
+    `python:*-slim` images ship without /usr/share/zoneinfo, and nothing says
+    so until a zone name fails to resolve. The `tzdata` distribution is a
+    declared dependency precisely so this stays True, but a hand-built image
+    can still lack it, and that is worth reporting rather than guessing at.
+    """
+
+    try:
+        zoneinfo.ZoneInfo("America/New_York")
+    except (zoneinfo.ZoneInfoNotFoundError, ValueError):
+        return False
+    return True
+
+
+def load_persisted_settings(raw_json: str | None, *, timezone_chosen: bool = False) -> Settings:
+    """Rebuild the stored settings, letting the container environment win.
+
+    `timezone_chosen` records that someone picked a time zone in the interface.
+    TZ seeds an install that has never been told otherwise, but it must not
+    keep overwriting a choice made in the UI -- and, just as importantly, the
+    absence of a choice must not be inferred from the stored value, which is
+    always populated (with "UTC") whether or not anyone ever chose it.
+    """
+
     if not raw_json:
         return settings_from_environment()
     raw = json.loads(raw_json)
     # Explicit container environment remains authoritative on restart. Values
     # absent from the environment continue to use UI-persisted configuration.
-    # TZ is the one exception: it seeds a fresh install, but a time zone the
-    # user later chose in the UI outlives the container's own default.
-    raw.update(environment_values(include_soft=not raw.get("timezone")))
+    # TZ is the one exception: it seeds an install, but a time zone the user
+    # chose in the UI outlives the container's own default. An install that
+    # predates the marker is grandfathered by its own value: anything other
+    # than the "UTC" default can only have come from a deliberate choice.
+    chosen = timezone_chosen or raw.get("timezone", "UTC") != "UTC"
+    raw.update(environment_values(include_soft=not chosen))
     return Settings.model_validate(raw)
 
 
@@ -351,7 +421,9 @@ class SettingsManager:
         self.database = database
         self._lock = threading.RLock()
         persisted = database.get_setting("runtime")
-        self._settings = load_persisted_settings(persisted)
+        self._settings = load_persisted_settings(
+            persisted, timezone_chosen=database.get_setting(TIMEZONE_CHOSEN_KEY) == "1"
+        )
         if persisted is None:
             database.set_setting("runtime", json.dumps(self._settings.persisted_dict()))
 
@@ -372,5 +444,9 @@ class SettingsManager:
             merged.update(environment_values(include_soft=False))
             updated = Settings.model_validate(merged)
             self.database.set_setting("runtime", json.dumps(updated.persisted_dict()))
+            if "timezone" in values:
+                # Remember that this was a deliberate choice, so a restart does
+                # not hand the zone back to whatever TZ the container carries.
+                self.database.set_setting(TIMEZONE_CHOSEN_KEY, "1")
             self._settings = updated
             return updated.model_copy(deep=True)

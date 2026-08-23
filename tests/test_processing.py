@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 import datetime
 from typing import Any
 
 import pytest
 
+from actual_clerk import processing
 from actual_clerk.clients.actual import ActualGatewayError
 from actual_clerk.clients.simplefin import SimpleFinError
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, digest_is_due
@@ -89,6 +91,19 @@ def manager(database, settings_manager):
     manager = JobManager(database, settings_manager, gateway)
     manager.gateway = gateway
     return manager
+
+
+@pytest.fixture
+def delivers(monkeypatch):
+    """Accept every notification without leaving the machine."""
+    sent: list[dict[str, Any]] = []
+
+    async def publish(self, **kwargs):
+        sent.append(kwargs)
+        return {"id": f"msg-{len(sent)}", "time": 1755940211}
+
+    monkeypatch.setattr("actual_clerk.clients.ntfy.NtfyClient.publish", publish)
+    return sent
 
 
 async def run_job(manager, kind, params=None):
@@ -273,9 +288,37 @@ async def test_a_digest_is_sent_at_most_once_a_day(manager, settings_manager, mo
     second = await run_job(manager, "digest")
 
     assert first["result"]["delivered"] is True
-    assert second["result"] == {"skipped": "already sent today"}
+    assert second["result"]["skipped"].startswith("already sent for")
     assert len(sent) == 1
     assert manager.database.latest_digest()["payload"]["title"] == sent[0]["title"]
+
+
+async def test_a_delivered_digest_records_where_it_actually_went(
+    manager, settings_manager, monkeypatch
+):
+    """"Delivered" cannot distinguish a watched topic from an unwatched one."""
+    settings_manager.update(
+        {
+            "notifications_enabled": True,
+            "ntfy_topic": "clerk-test",
+            "ntfy_url": "https://ntfy.sh",
+        }
+    )
+
+    async def publish(self, **kwargs):
+        return {"id": "RxIFhE7bqQ0k", "time": 1755940211}
+
+    monkeypatch.setattr("actual_clerk.clients.ntfy.NtfyClient.publish", publish)
+    job = await run_job(manager, "digest")
+
+    assert job["result"]["topic"] == "clerk-test"
+    assert job["result"]["message_id"] == "RxIFhE7bqQ0k"
+    assert manager.database.list_digests()[0]["receipt"] == {
+        "server": "https://ntfy.sh",
+        "topic": "clerk-test",
+        "id": "RxIFhE7bqQ0k",
+        "at": 1755940211,
+    }
 
 
 async def test_a_digest_that_could_not_be_delivered_may_be_retried(
@@ -289,8 +332,9 @@ async def test_a_digest_that_could_not_be_delivered_may_be_retried(
     monkeypatch.setattr("actual_clerk.clients.ntfy.NtfyClient.publish", broken)
     job = await run_job(manager, "digest")
     assert job["status"] == "retry_wait"
-    # The claim was released, so tomorrow's schedule is not blocked either.
-    assert manager.database.claim_digest(datetime.date.today().isoformat()) is True
+    # The claim was released, so a retry at the same time is not blocked either.
+    slot = settings_manager.get().digest_time
+    assert manager.database.claim_digest(datetime.date.today().isoformat(), slot) is True
 
 
 # ----------------------------------------------------------------- scheduler
@@ -343,6 +387,34 @@ async def test_a_digest_is_only_scheduled_after_its_time_of_day(manager, setting
     assert len(manager.database.list_jobs(kind="digest")) == 1
 
 
+async def test_moving_the_digest_time_asks_for_a_delivery_at_the_new_time(
+    manager, settings_manager
+):
+    """One per date and time, so the scheduled path is testable today.
+
+    A date that allowed exactly one delivery could only be tried again
+    tomorrow, which made a digest that never arrived impossible to chase.
+    """
+
+    settings_manager.update(
+        {"notifications_enabled": True, "ntfy_topic": "clerk-test", "digest_enabled": True}
+    )
+    first = _local_offset(settings_manager, -5)
+    settings_manager.update({"digest_time": first})
+    today = datetime.datetime.now(settings_manager.get().zone).date().isoformat()
+    manager.database.claim_digest(today, first)
+
+    # That delivery is spent, and no amount of ticking produces another.
+    manager._schedule_due_work()
+    manager._schedule_due_work()
+    assert manager.database.list_jobs(kind="digest") == []
+
+    # Moving the time asks for a fresh one, on the same day.
+    settings_manager.update({"digest_time": _local_offset(settings_manager, -2)})
+    manager._schedule_due_work()
+    assert len(manager.database.list_jobs(kind="digest")) == 1
+
+
 @pytest.mark.parametrize(
     ("hour", "minute", "due"),
     [
@@ -358,6 +430,28 @@ async def test_a_digest_is_only_scheduled_after_its_time_of_day(manager, setting
 def test_the_digest_window_opens_and_closes(hour, minute, due):
     now = datetime.datetime(2026, 8, 21, hour, minute, tzinfo=datetime.UTC)
     assert digest_is_due(now, datetime.time(7, 30), window_hours=6) is due
+
+
+async def test_the_scheduler_leaves_nothing_behind_on_each_tick(manager, monkeypatch):
+    """A container runs this loop three times a minute for months.
+
+    Waiting on the stop flag under a shield left one task parked on it per
+    tick, none of which could ever be collected, so the leak grew for as long
+    as the container stayed up. Cancelling an Event wait is safe: it discards
+    the waiter and never the flag.
+    """
+
+    monkeypatch.setattr(processing, "SCHEDULER_TICK_SECONDS", 0.01)
+    monkeypatch.setattr(manager, "_schedule_due_work", lambda: None)
+    settled = len(asyncio.all_tasks())
+
+    loop = asyncio.create_task(manager._scheduler_loop())
+    await asyncio.sleep(0.3)  # roughly thirty ticks
+    stranded = len(asyncio.all_tasks()) - settled - 1  # less the loop itself
+
+    manager._stopping.set()
+    await asyncio.wait_for(loop, timeout=1)
+    assert stranded == 0
 
 
 async def test_an_unknown_job_kind_fails_without_stopping_the_worker(manager):
@@ -457,7 +551,7 @@ async def test_an_unmonitored_account_is_never_called_stale(manager):
     assert overview["accounts"][0]["monitored"] is False
 
 
-async def test_a_forced_digest_does_not_spend_todays_delivery(manager, settings_manager):
+async def test_a_forced_digest_does_not_spend_todays_delivery(manager, settings_manager, delivers):
     """The rehearsal must leave the real morning report still to come."""
     settings_manager.update(
         {"notifications_enabled": True, "ntfy_topic": "clerk-test", "ntfy_url": "https://ntfy.sh"}
@@ -470,7 +564,7 @@ async def test_a_forced_digest_does_not_spend_todays_delivery(manager, settings_
     assert morning["result"]["forced"] is False
 
 
-async def test_a_forced_digest_can_be_repeated(manager, settings_manager):
+async def test_a_forced_digest_can_be_repeated(manager, settings_manager, delivers):
     settings_manager.update(
         {"notifications_enabled": True, "ntfy_topic": "clerk-test", "ntfy_url": "https://ntfy.sh"}
     )
@@ -479,10 +573,10 @@ async def test_a_forced_digest_can_be_repeated(manager, settings_manager):
         assert "skipped" not in job["result"]
 
 
-async def test_an_unforced_digest_is_still_once_a_day(manager, settings_manager):
+async def test_an_unforced_digest_is_still_once_a_day(manager, settings_manager, delivers):
     settings_manager.update(
         {"notifications_enabled": True, "ntfy_topic": "clerk-test", "ntfy_url": "https://ntfy.sh"}
     )
     await run_job(manager, "digest")
     again = await run_job(manager, "digest")
-    assert again["result"] == {"skipped": "already sent today"}
+    assert again["result"]["skipped"].startswith("already sent for")

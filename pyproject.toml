@@ -15,6 +15,10 @@ dependencies = [
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "pydantic>=2.11,<3",
+  # Slim base images ship no /usr/share/zoneinfo, and zoneinfo falls back to
+  # this distribution. Without it every IANA name fails to resolve and the
+  # digest silently keeps UTC time.
+  "tzdata>=2025.1",
   "uvicorn[standard]>=0.35,<1",
 ]
 

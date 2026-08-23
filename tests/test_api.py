@@ -372,6 +372,50 @@ async def test_settings_can_be_changed_and_validated(client):
     assert bad.status_code == 422
 
 
+async def test_a_rejected_field_is_named_so_the_form_can_be_fixed(client):
+    """One bad box rejects the whole form, so the message must say which box.
+
+    Every value in the settings page is saved in one request. A raw pydantic
+    dump in a toast leaves the reader with a wall of text and no idea that,
+    say, the time zone they typed is why their new digest time did not save.
+    """
+
+    bad = await client.patch(
+        "/api/settings",
+        json={"values": {"timezone": "Mars/Olympus", "digest_time": "07:30"}},
+    )
+    assert bad.status_code == 422
+    detail = bad.json()["detail"]
+    assert "timezone" in detail
+    assert "unknown time zone: Mars/Olympus" in detail
+    assert "\n" not in detail
+
+    # And nothing was saved, including the value that was perfectly valid.
+    assert (await client.get("/api/settings")).json()["timezone"] == "UTC"
+
+
+async def test_the_report_options_round_trip_through_the_api(client):
+    """Unchecking a box has to reach the server as false, not go missing."""
+    before = (await client.get("/api/settings")).json()
+    assert before["digest_title"] == "The Morning Report"
+    assert before["digest_show_pace"] is True
+
+    response = await client.patch(
+        "/api/settings",
+        json={
+            "values": {
+                "digest_title": "Budget o'clock",
+                "digest_show_pace": False,
+                "digest_show_projection": True,
+            }
+        },
+    )
+    saved = response.json()["settings"]
+    assert saved["digest_title"] == "Budget o'clock"
+    assert saved["digest_show_pace"] is False
+    assert saved["digest_show_projection"] is True
+
+
 async def test_a_setting_that_needs_a_restart_says_so(client):
     response = await client.patch("/api/settings", json={"values": {"log_level": "DEBUG"}})
     assert response.json()["restart_required"] == ["log_level"]

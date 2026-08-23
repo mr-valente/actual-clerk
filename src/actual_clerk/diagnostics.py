@@ -14,6 +14,7 @@ pseudonyms so the report can be shared without disclosing the budget.
 from __future__ import annotations
 
 import datetime
+import os
 from typing import Any
 
 from actual import Actual
@@ -22,8 +23,9 @@ from actual.queries import get_categories, get_preference
 from sqlmodel import select
 
 from actual_clerk import __version__
-from actual_clerk.config import Settings
+from actual_clerk.config import Settings, tz_database_available
 from actual_clerk.domain.budget import build_budget_report, month_bounds
+from actual_clerk.processing import DIGEST_WINDOW_HOURS
 from actual_clerk.reporting import to_category_infos, to_transaction_infos
 
 WIDTH = 78
@@ -173,6 +175,193 @@ class _Report:
         return "\n".join(header + summary + self.lines) + "\n"
 
 
+def _local_clock(timestamp: Any, zone: datetime.tzinfo) -> str:
+    """A stored epoch as a local wall clock, or "" if there is none."""
+    if not timestamp:
+        return ""
+    moment = datetime.datetime.fromtimestamp(float(timestamp), datetime.UTC).astimezone(zone)
+    return f"{moment:%H:%M} {moment.tzname()}"
+
+
+def _digest_section(
+    r: _Report,
+    *,
+    settings: Settings,
+    digests: list[dict[str, Any]],
+    digest_jobs: list[dict[str, Any]],
+    timezone_chosen: bool,
+    hide: Redactor,
+) -> None:
+    """Why the morning digest did or did not go out.
+
+    Every gate the scheduler passes through, in the order it checks them, with
+    the two clocks side by side. "It did not fire" is almost always one of:
+    a zone that did not resolve, a window measured against the wrong clock, a
+    claim already taken for the day, or a job that failed after being queued.
+    """
+
+    r.head("2b. morning digest schedule")
+
+    zone_ok = True
+    try:
+        zone = settings.zone
+    except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail to render
+        zone_ok = False
+        zone = datetime.UTC
+        r.finding("ERROR", f"The configured time zone could not be loaded: {exc}")
+
+    utc_now = datetime.datetime.now(datetime.UTC)
+    local_now = utc_now.astimezone(zone)
+    offset = local_now.utcoffset() or datetime.timedelta(0)
+    scheduled = settings.digest_clock
+    start = datetime.datetime.combine(local_now.date(), scheduled, tzinfo=zone)
+    close = start + datetime.timedelta(hours=DIGEST_WINDOW_HOURS)
+    due = start <= local_now < close
+    today = local_now.date().isoformat()
+    today_row = next(
+        (
+            row
+            for row in digests
+            if row.get("local_date") == today
+            and row.get("scheduled_for") == settings.digest_time
+        ),
+        None,
+    )
+    today_claimed = today_row is not None
+
+    r.sub("the gates the scheduler checks, in order")
+    r.row("1. Digest enabled", settings.digest_enabled)
+    r.row("2. Notifications enabled", settings.notifications_enabled)
+    r.row("3. Inside today's window", f"{due}  ({start:%H:%M} .. {close:%H:%M} local)")
+    r.row(
+        "4. This delivery not yet claimed",
+        f"{not today_claimed}  (one per date and time, so {today} {settings.digest_time})",
+    )
+    r.text(
+        "    All four must hold on the same 20-second tick for a digest to be queued."
+    )
+
+    r.sub("clocks")
+    r.row("Digest time (local)", settings.digest_time)
+    r.row("Time zone setting", settings.timezone)
+    if zone_ok:
+        sign = "+" if offset >= datetime.timedelta(0) else "-"
+        hours, minutes = divmod(abs(int(offset.total_seconds())) // 60, 60)
+        r.row("Resolves to", f"{local_now.tzname()}  UTC{sign}{hours:02d}:{minutes:02d}")
+    else:
+        r.row("Resolves to", "(failed to load)")
+    r.row("Local time now", local_now.isoformat(timespec="seconds"))
+    r.row("UTC time now", utc_now.isoformat(timespec="seconds"))
+    r.row(
+        "Digest time in UTC today",
+        f"{start.astimezone(datetime.UTC):%H:%M} UTC"
+        + ("   (the same clock: this container runs on UTC)" if not offset else ""),
+    )
+    upcoming = start if local_now < start else start + datetime.timedelta(days=1)
+    remaining = upcoming - local_now
+    ahead = f"in {int(remaining.total_seconds()) // 3600}h "
+    ahead += f"{int(remaining.total_seconds()) % 3600 // 60}m"
+    if not due:
+        r.row("Next window opens", f"{upcoming.isoformat(timespec='minutes')}   ({ahead})")
+
+    # A day is spent once it is claimed, so a digest time moved to later the
+    # same day cannot fire until tomorrow. That is by design and invisible
+    # from the outside, which makes it the likeliest reason a digest people
+    # are actively waiting on does not arrive.
+    if today_claimed and settings.digest_enabled and settings.notifications_enabled and due:
+        went_out = _local_clock(today_row.get("created_at"), zone)
+        state = "went out" if today_row.get("delivered") else "was claimed but not delivered"
+        r.finding(
+            "NOTE",
+            f"The digest for {today} {today_row.get('scheduled_for')} "
+            f"{state}{f' at {went_out}' if went_out else ''}, so this delivery is already "
+            f"spent. The next is {upcoming.isoformat(timespec='minutes')} ({ahead}); "
+            "moving the digest time asks for a fresh one at the new time.",
+        )
+
+    r.sub("time zone database")
+    available = tz_database_available()
+    r.row("IANA zones resolvable", "yes" if available else "NO")
+    if not available:
+        r.finding(
+            "ERROR",
+            "This container has no time zone database, so every IANA name is "
+            "rejected and the digest can only keep UTC time. Install the tzdata "
+            "package (Clerk declares it as a dependency; a hand-built image may "
+            "have dropped it).",
+        )
+
+    r.sub("where the time zone came from")
+    environment_tz = os.environ.get("TZ", "")
+    r.row("TZ in the environment", environment_tz or "(not set)")
+    r.row("CLERK_TIMEZONE in the environment", os.environ.get("CLERK_TIMEZONE") or "(not set)")
+    r.row("Chosen in the interface", timezone_chosen)
+    if environment_tz and environment_tz != settings.timezone:
+        if os.environ.get("CLERK_TIMEZONE"):
+            r.text("    CLERK_TIMEZONE outranks TZ, which is why TZ is not in effect.")
+        elif timezone_chosen:
+            r.finding(
+                "WARN",
+                f"TZ is {environment_tz} but the time zone is {settings.timezone}, chosen in "
+                "the interface. A choice made in the interface outranks TZ; clear it there "
+                "if you want the container's TZ back.",
+            )
+        else:
+            r.finding(
+                "ERROR",
+                f"TZ is {environment_tz} but Clerk is running on {settings.timezone}. "
+                "TZ should have been applied and was not.",
+            )
+    # An ntfy topic without notifications means they were set up and then went
+    # off, which is worth saying. No topic at all just means this install does
+    # not use notifications, and a fresh one should not be scolded for it.
+    if settings.digest_enabled and not settings.notifications_enabled and settings.ntfy_topic:
+        r.finding(
+            "WARN",
+            "The digest is enabled but notifications are off, so nothing is ever "
+            "queued or delivered. Both switches are required.",
+        )
+
+    r.sub("recent digests")
+    if not digests:
+        r.text("    (Clerk has never claimed a digest date)")
+        if settings.digest_enabled and settings.notifications_enabled:
+            r.finding(
+                "WARN",
+                "No digest has ever been claimed, so the scheduler has not once "
+                "found all four gates open at the same time.",
+            )
+    for row in digests:
+        state = "delivered" if row.get("delivered") else "NOT DELIVERED"
+        # The hour is the point: a digest that arrived at 03:30 rather than
+        # 07:30 was delivered on a clock nobody was reading.
+        clock = _local_clock(row.get("created_at"), zone) or "(no time)"
+        slot = row.get("scheduled_for") or "(no time)"
+        r.text(f"    {row['local_date']} {slot:<10} sent {clock:<12} {state}")
+        receipt = row.get("receipt") or {}
+        if receipt.get("topic"):
+            # The one fact "delivered" cannot carry: which topic accepted it.
+            r.text(
+                f"       -> {receipt.get('server') or '?'} topic "
+                f"{hide('Topic', receipt['topic'])!r} message id "
+                f"{receipt.get('id') or '(none returned)'}"
+            )
+        elif row.get("delivered"):
+            r.text("       -> (delivered before Clerk began recording where)")
+        if row.get("error"):
+            r.text(f"       -> {str(row['error'])[:64]}")
+
+    r.sub("recent digest jobs")
+    if not digest_jobs:
+        r.text("    (no digest job has ever been queued)")
+    for job in digest_jobs:
+        r.text(
+            f"    {str(job.get('status')):<12} {str(job.get('trigger')):<10} "
+            f"{str(job.get('completed_at') or job.get('created_at') or '')[:19]:<20}"
+            f" {str(job.get('error_message') or '')[:40]}"
+        )
+
+
 def build_report(
     *,
     settings: Settings,
@@ -186,6 +375,9 @@ def build_report(
     health: list[dict[str, Any]],
     unmonitored: set[str],
     counts: dict[str, int],
+    digests: list[dict[str, Any]] | None = None,
+    digest_jobs: list[dict[str, Any]] | None = None,
+    timezone_chosen: bool = False,
     snapshot_error: str = "",
     redact: bool = False,
 ) -> str:
@@ -246,6 +438,18 @@ def build_report(
             f"{str(job.get('completed_at') or job.get('started_at') or '')[:19]:<20}"
             f" {str(job.get('error_message') or '')[:60]}"
         )
+    # ---------------------------------------------------------------- 2b
+    # Placed before the live read is required: a digest that never fired is a
+    # scheduling question, and it must stay answerable when Actual is down.
+    _digest_section(
+        r,
+        settings=settings,
+        digests=digests or [],
+        digest_jobs=digest_jobs or [],
+        timezone_chosen=timezone_chosen,
+        hide=hide,
+    )
+
     if snapshot is None:
         r.head("live read failed")
         r.finding("ERROR", f"Could not read Actual live: {snapshot_error}")

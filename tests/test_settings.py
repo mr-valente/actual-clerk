@@ -1,11 +1,17 @@
 from __future__ import annotations
 
 import json
+import zoneinfo
 
 import pytest
 from pydantic import ValidationError
 
-from actual_clerk.config import Settings, SettingsManager, load_persisted_settings
+from actual_clerk import config
+from actual_clerk.config import (
+    Settings,
+    SettingsManager,
+    load_persisted_settings,
+)
 
 
 def test_secrets_never_leave_through_the_settings_api():
@@ -158,3 +164,93 @@ def test_the_manager_hands_out_copies(database):
     first = manager.get()
     first.sync_interval_minutes = 999
     assert manager.get().sync_interval_minutes != 999
+
+
+# ------------------------------------------------------------- the time zone
+
+
+def test_tz_still_applies_when_no_zone_was_ever_chosen(monkeypatch):
+    """The saved blob always carries a time zone, chosen or not.
+
+    Every field is persisted, so "timezone" is present from the first save with
+    the "UTC" default in it. Reading that as a deliberate choice made TZ a
+    no-op on every restart after the first, which is what silently kept the
+    morning digest on UTC time.
+    """
+
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    saved = json.dumps(Settings().persisted_dict())
+    assert json.loads(saved)["timezone"] == "UTC"
+    assert load_persisted_settings(saved).timezone == "Europe/Berlin"
+    # Once someone picks a zone in the interface, TZ stops reclaiming it.
+    assert load_persisted_settings(saved, timezone_chosen=True).timezone == "UTC"
+
+
+def test_a_zone_saved_before_the_marker_existed_is_grandfathered(monkeypatch):
+    """An upgrade must not hand a working zone back to the container's TZ."""
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    saved = json.dumps(Settings(timezone="America/Chicago").persisted_dict())
+    assert load_persisted_settings(saved).timezone == "America/Chicago"
+
+
+def test_adding_tz_to_an_existing_install_takes_effect(database, monkeypatch):
+    """Install first, discover the digest is on UTC, add TZ, restart."""
+    monkeypatch.delenv("TZ", raising=False)
+    manager = SettingsManager(database)
+    assert manager.get().timezone == "UTC"
+    manager.update({"digest_time": "07:30"})  # an unrelated save still happens
+
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    assert SettingsManager(database).get().timezone == "Europe/Berlin"
+
+
+def test_a_zone_chosen_in_the_interface_survives_a_restart(database, monkeypatch):
+    monkeypatch.setenv("TZ", "Europe/Berlin")
+    manager = SettingsManager(database)
+    assert manager.get().timezone == "Europe/Berlin"
+    manager.update({"timezone": "America/Chicago"})
+    assert SettingsManager(database).get().timezone == "America/Chicago"
+
+
+def test_clerk_timezone_outranks_a_zone_chosen_in_the_interface(database, monkeypatch):
+    monkeypatch.setenv("CLERK_TIMEZONE", "Europe/Berlin")
+    manager = SettingsManager(database)
+    manager.update({"timezone": "America/Chicago"})
+    assert SettingsManager(database).get().timezone == "Europe/Berlin"
+
+
+def test_a_container_with_no_tz_database_says_so_instead_of_blaming_the_name(monkeypatch):
+    def missing(key):
+        raise zoneinfo.ZoneInfoNotFoundError(key)
+
+    monkeypatch.setattr(config.zoneinfo, "ZoneInfo", missing)
+    assert config.tz_database_available() is False
+    with pytest.raises(ValidationError, match="no time zone database"):
+        Settings(timezone="America/Chicago")
+
+
+def test_a_real_typo_is_still_reported_as_a_typo():
+    assert config.tz_database_available() is True
+    with pytest.raises(ValidationError, match="unknown time zone"):
+        Settings(timezone="Mars/Olympus")
+
+
+# --------------------------------------------------------- the morning report
+
+
+def test_the_report_header_is_named_and_never_left_blank(database):
+    assert Settings().digest_title == "The Morning Report"
+    assert Settings(digest_title="  Budget   o'clock ").digest_title == "Budget o'clock"
+    # A blank header would leave ntfy showing the topic name instead.
+    assert Settings(digest_title="   ").digest_title == "The Morning Report"
+
+
+def test_the_include_switches_reach_the_builder_by_block_name(database):
+    manager = SettingsManager(database)
+    manager.update({"digest_show_pace": False, "digest_show_projection": True})
+    sections = manager.get().digest_sections
+    assert sections["pace"] is False
+    assert sections["projection"] is True
+    assert sections["headline"] is True
+    # Every switch is offered, and none is named after its field.
+    assert not any(name.startswith("digest_show_") for name in sections)

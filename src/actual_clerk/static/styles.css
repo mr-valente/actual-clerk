@@ -383,6 +383,9 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .check-row strong { display: block; font-size: 11px; }
 .check-row small { display: block; margin-top: 3px; color: var(--ink-faint); font-size: 9px; line-height: 1.5; }
 .check-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+/* Names a group of checks inside a section that already has its own heading,
+   so the settings page keeps one level of hierarchy rather than two panels. */
+.field-group-title { margin: 3px 0 -4px; color: var(--ink-soft); font-size: 10px; font-weight: 800; letter-spacing: .04em; text-transform: uppercase; }
 .toggle-row { padding: 12px 13px; display: flex; align-items: center; gap: 18px; border: 1px solid var(--line-soft); border-radius: 9px; background: var(--surface-subtle); cursor: pointer; }
 .toggle-row > span:first-child { min-width: 0; }
 .toggle-row strong { display: block; font-size: 11px; }
