@@ -44,6 +44,10 @@ OVERVIEW_SNAPSHOT = "overview"
 # A container that was down until the evening should wait for tomorrow rather
 # than wish its owner good morning at eleven at night.
 DIGEST_WINDOW_HOURS = 6
+# SimpleFIN's balance and transaction set can briefly lead one another. Three
+# hourly observations turn a one-cycle race into silence while still surfacing
+# a real mismatch the same morning or afternoon.
+BALANCE_DRIFT_CONFIRMATION_CHECKS = 3
 
 
 def digest_is_due(
@@ -386,13 +390,16 @@ class JobManager:
         )
         snapshots = [item.as_dict() for item in results]
         self.database.prune_health([item["account_id"] for item in snapshots])
-        transitions = self.database.record_health(snapshots)
+        transitions = self.database.record_health(
+            snapshots,
+            drift_confirmation_checks=BALANCE_DRIFT_CONFIRMATION_CHECKS,
+        )
 
         if settings.health_alerts_enabled and transitions:
             await self._notify_health(transitions)
 
         await self._refresh_overview(snapshot, settings, today, health=snapshots)
-        summary = summarize(results)
+        summary = summarize(snapshots)
         summary["simplefin_error"] = simplefin_error
         summary["transitions"] = len(transitions)
         return summary
@@ -428,6 +435,7 @@ class JobManager:
             today = local_now.date()
             snapshot = await self.gateway.snapshot(today=today)
             overview = await self._refresh_overview(snapshot, settings, today)
+            previous_digest = self.database.latest_digest()
             payload = build_digest(
                 report=overview["budget"],
                 health=self.database.health_snapshots(),
@@ -436,6 +444,7 @@ class JobManager:
                 today=today,
                 title=settings.digest_title,
                 sections=settings.digest_sections,
+                previous=(previous_digest or {}).get("payload"),
             )
             if not settings.notifications_enabled:
                 if not forced:

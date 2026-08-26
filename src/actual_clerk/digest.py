@@ -22,6 +22,11 @@ from actual_clerk.domain.health import ALERTING_STATUSES, STATUS_LABELS
 BULLET = "\u00b7"
 DASH = "\u2014"
 
+# These are the parts of the report that represent the budget itself. Daily
+# pace and safe-to-spend figures move with the calendar even when no money did,
+# so they must not turn a quiet morning into a supposed budget change.
+_BUDGET_STATE_FIELDS = ("free_cents", "spent_cents", "remaining_cents")
+
 
 def plural(count: int, noun: str) -> str:
     """"1 transaction", "3 transactions" -- a report reads, it does not log."""
@@ -57,6 +62,78 @@ class _Body:
         return "\n\n".join("\n".join(block) for block in self.blocks)
 
 
+def _bank_snapshot_dates(health: list[dict[str, Any]]) -> dict[str, str]:
+    """The latest bank-side balance timestamp retained for each watched account."""
+
+    return {
+        str(item.get("account_id")): str(item.get("remote_balance_date"))
+        for item in health
+        if item.get("account_id")
+        and item.get("remote_balance_date")
+        and item.get("monitored", True)
+        and item.get("status") != "not_linked"
+    }
+
+
+def _as_datetime(value: Any) -> datetime.datetime | None:
+    try:
+        parsed = datetime.datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=datetime.UTC)
+
+
+def report_change(
+    *,
+    report: dict[str, Any],
+    previous: dict[str, Any] | None,
+    health: list[dict[str, Any]],
+    today: datetime.date,
+) -> dict[str, Any]:
+    """Describe whether the spendable budget changed since the last digest.
+
+    SimpleFIN's ``balance-date`` is the timestamp attached to the balance by
+    the data source. An advance proves that newer bank data arrived. A date
+    that did not advance proves only that SimpleFIN exposed no newer balance
+    timestamp; it cannot prove whether the bank was polled again and found the
+    same value.
+    """
+
+    result: dict[str, Any] = {"unchanged": False, "reason": "no_baseline"}
+    if not previous or not isinstance(previous.get("report"), dict):
+        return result
+    prior_report = previous["report"]
+    try:
+        prior_date = datetime.date.fromisoformat(str(previous.get("local_date") or ""))
+    except ValueError:
+        return result
+    if prior_date >= today or prior_report.get("month") != report.get("month"):
+        return result
+    if any(prior_report.get(field) != report.get(field) for field in _BUDGET_STATE_FIELDS):
+        return {"unchanged": False, "reason": "budget_changed", "since": prior_date.isoformat()}
+
+    result = {"unchanged": True, "reason": "unknown", "since": prior_date.isoformat()}
+    current_dates = _bank_snapshot_dates(health)
+    previous_dates = previous.get("bank_snapshot_dates")
+    if not current_dates or not isinstance(previous_dates, dict) or not previous_dates:
+        return result
+
+    comparable = []
+    for account_id, current_value in current_dates.items():
+        current = _as_datetime(current_value)
+        prior = _as_datetime(previous_dates.get(account_id))
+        if current is not None and prior is not None:
+            comparable.append((current, prior))
+    if not comparable:
+        return result
+    result["reason"] = (
+        "newer_bank_data"
+        if any(current > prior for current, prior in comparable)
+        else "no_newer_bank_snapshot"
+    )
+    return result
+
+
 def build_digest(
     *,
     report: dict[str, Any],
@@ -66,6 +143,7 @@ def build_digest(
     today: datetime.date | None = None,
     title: str = "The Morning Report",
     sections: dict[str, bool] | None = None,
+    previous: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Compose the digest payload: its fixed title, body, tags, and priority."""
 
@@ -80,6 +158,7 @@ def build_digest(
     spent = int(report.get("spent_cents", 0))
     percent = float(report.get("remaining_percent", 0.0))
     days_remaining = int(report.get("days_remaining", 1)) or 1
+    change = report_change(report=report, previous=previous, health=health, today=today)
 
     body.block(f"{today:%A} {today.day} {today:%B}")
 
@@ -89,9 +168,27 @@ def build_digest(
             "Enter it in Settings, or record this month's income in Actual, "
             "and the report starts tomorrow.",
         )
-        return _payload(title, body, tags + ["warning"], 3, report, health, review_count, today)
+        return _payload(
+            title, body, tags + ["warning"], 3, report, health, review_count, today, change
+        )
 
-    if free <= 0:
+    if change["unchanged"]:
+        if change["reason"] == "newer_bank_data":
+            quiet_message = (
+                "Nothing to report — SimpleFIN has newer bank data, but no new "
+                "discretionary spending changed your budget."
+            )
+        elif change["reason"] == "no_newer_bank_snapshot":
+            quiet_message = (
+                "Nothing to report — SimpleFIN has not exposed a newer bank balance "
+                "timestamp since the last report."
+            )
+        else:
+            quiet_message = (
+                "Nothing to report — your discretionary budget is unchanged since the last report."
+            )
+        body.block(quiet_message)
+    elif free <= 0:
         # Nothing is free, so there is no headline figure to lead with.
         body.block(
             f"No free money budgeted for {today.strftime('%B')}.",
@@ -142,7 +239,7 @@ def build_digest(
         if not report.get("on_track"):
             priority = max(priority, 4)
 
-    if show("commitments"):
+    if not change["unchanged"] and show("commitments"):
         overspend = int(report.get("committed_overspend_cents", 0))
         if overspend > 0:
             body.block(
@@ -178,7 +275,7 @@ def build_digest(
             )
         body.listing("Waiting for you", waiting)
 
-    return _payload(title, body, tags, priority, report, health, review_count, today)
+    return _payload(title, body, tags, priority, report, health, review_count, today, change)
 
 
 def _payload(
@@ -190,6 +287,7 @@ def _payload(
     health: list[dict[str, Any]],
     review_count: int,
     today: datetime.date,
+    change: dict[str, Any],
 ) -> dict[str, Any]:
     return {
         "local_date": today.isoformat(),
@@ -198,6 +296,8 @@ def _payload(
         "tags": tags,
         "priority": priority,
         "report": report,
+        "budget_change": change,
+        "bank_snapshot_dates": _bank_snapshot_dates(health),
         "degraded_accounts": [
             {"account_name": item.get("account_name"), "status": item.get("status")}
             for item in health

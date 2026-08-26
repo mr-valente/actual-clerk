@@ -230,6 +230,58 @@ def test_health_snapshots_and_events_are_retained(database):
     assert len(database.list_health_events()) == 2
 
 
+def test_a_balance_mismatch_must_survive_three_consecutive_checks(database):
+    database.record_health([snapshot()])
+
+    def mismatch():
+        return {
+            **snapshot(status="drifted", detail="balances differ"),
+            "status_label": "Balance mismatch",
+            "alerting": True,
+            "status_without_drift": "ok",
+            "status_without_drift_label": "Connected",
+            "alerting_without_drift": False,
+            "detail_without_drift": "Balances agree and data is current.",
+            "signals": ["balances differ"],
+            "signals_without_drift": [],
+        }
+
+    first = mismatch()
+    assert database.record_health([first], drift_confirmation_checks=3) == []
+    assert first["status"] == "ok"
+    assert first["balance_mismatch_pending"] is True
+    assert first["balance_mismatch_checks"] == 1
+
+    second = mismatch()
+    assert database.record_health([second], drift_confirmation_checks=3) == []
+    assert second["status"] == "ok"
+    assert second["balance_mismatch_checks"] == 2
+
+    third = mismatch()
+    [transition] = database.record_health([third], drift_confirmation_checks=3)
+    assert transition["previous_status"] == "ok"
+    assert transition["status"] == "drifted"
+    assert database.health_snapshots()[0]["status"] == "drifted"
+
+
+def test_a_transient_balance_mismatch_clears_without_any_transition(database):
+    database.record_health([snapshot()])
+    candidate = {
+        **snapshot(status="drifted"),
+        "status_without_drift": "ok",
+        "status_without_drift_label": "Connected",
+        "signals_without_drift": [],
+    }
+    database.record_health([candidate], drift_confirmation_checks=3)
+    assert database.record_health([snapshot()], drift_confirmation_checks=3) == []
+
+    # A later mismatch starts from one again; the cleared observation broke
+    # the consecutive streak.
+    later = dict(candidate, status="drifted")
+    database.record_health([later], drift_confirmation_checks=3)
+    assert later["balance_mismatch_checks"] == 1
+
+
 def test_accounts_removed_from_actual_stop_being_reported(database):
     database.record_health([snapshot("acct-1"), snapshot("acct-2")])
     database.prune_health(["acct-1"])

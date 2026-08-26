@@ -259,6 +259,42 @@ async def test_a_status_change_is_recorded_once(manager):
     assert len(manager.database.list_health_events()) == len(first)
 
 
+async def test_the_health_job_confirms_a_balance_mismatch_over_three_runs(
+    manager, settings_manager, monkeypatch
+):
+    settings_manager.update({"simplefin_access_url": "https://user:pass@bridge/simplefin"})
+    remote_balance = {"cents": 250000}
+
+    async def fetch(self, **kwargs):
+        return {
+            "accounts": [
+                {
+                    "id": "sf-acct-checking",
+                    "name": "Checking",
+                    "balance_cents": remote_balance["cents"],
+                    "balance_date": datetime.datetime.now(datetime.UTC),
+                }
+            ],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("actual_clerk.clients.simplefin.SimpleFinClient.fetch", fetch)
+    await run_job(manager, "health")
+    assert manager.database.health_snapshots()[0]["status"] == "ok"
+
+    remote_balance["cents"] = 240000
+    first = await run_job(manager, "health")
+    second = await run_job(manager, "health")
+    assert first["result"]["degraded"] == 0
+    assert second["result"]["degraded"] == 0
+    assert manager.database.health_snapshots()[0]["balance_mismatch_checks"] == 2
+
+    third = await run_job(manager, "health")
+    assert third["result"]["degraded"] == 1
+    assert third["result"]["transitions"] == 1
+    assert manager.database.health_snapshots()[0]["status"] == "drifted"
+
+
 # ---------------------------------------------------------------- digest job
 
 

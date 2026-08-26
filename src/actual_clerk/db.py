@@ -149,6 +149,17 @@ CREATE TABLE IF NOT EXISTS health_events (
 );
 CREATE INDEX IF NOT EXISTS ix_health_events_created ON health_events(created_at DESC);
 
+-- A balance response can lead its matching transaction list for one polling
+-- cycle. Keep the observation here until repeated checks prove it is a real
+-- mismatch; account_health remains the stable, user-visible state.
+CREATE TABLE IF NOT EXISTS health_candidates (
+    account_id TEXT PRIMARY KEY,
+    status TEXT NOT NULL,
+    checks INTEGER NOT NULL DEFAULT 1,
+    first_seen REAL NOT NULL,
+    checked_at REAL NOT NULL
+);
+
 -- One delivery per scheduled time, not per day. Both are "once a day" while
 -- the time stands, but moving the time asks for a delivery at the new time
 -- rather than silently spending the day on the old one -- which is also what
@@ -750,18 +761,103 @@ class Database:
 
     # ------------------------------------------------------------------ health
 
-    def record_health(self, snapshots: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Persist the latest per-account health and return genuine transitions."""
+    def record_health(
+        self,
+        snapshots: list[dict[str, Any]],
+        *,
+        drift_confirmation_checks: int = 1,
+    ) -> list[dict[str, Any]]:
+        """Persist stable per-account health and return genuine transitions.
+
+        SimpleFIN can expose a new balance just before the corresponding
+        transaction set is coherent. When ``drift_confirmation_checks`` is
+        greater than one, a mismatch stays a non-alerting candidate until it
+        has appeared that many checks in a row. ``snapshots`` is updated in
+        place so every caller shows the same stabilized status that was saved.
+        """
         now = time.time()
+        required = max(1, int(drift_confirmation_checks))
         transitions: list[dict[str, Any]] = []
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             for snapshot in snapshots:
                 account_id = snapshot["account_id"]
-                status = snapshot["status"]
                 previous = connection.execute(
                     "SELECT status,since FROM account_health WHERE account_id=?", (account_id,)
                 ).fetchone()
+                effective = dict(snapshot)
+                observed_status = str(snapshot.get("status") or "unknown")
+                if (
+                    observed_status == "drifted"
+                    and required > 1
+                    and (previous is None or previous["status"] != "drifted")
+                ):
+                    candidate = connection.execute(
+                        "SELECT status,checks,first_seen FROM health_candidates "
+                        "WHERE account_id=?",
+                        (account_id,),
+                    ).fetchone()
+                    checks = (
+                        int(candidate["checks"]) + 1
+                        if candidate is not None and candidate["status"] == observed_status
+                        else 1
+                    )
+                    first_seen = (
+                        float(candidate["first_seen"])
+                        if candidate is not None and candidate["status"] == observed_status
+                        else now
+                    )
+                    if checks < required:
+                        connection.execute(
+                            "INSERT INTO health_candidates(account_id,status,checks,first_seen,checked_at) "
+                            "VALUES(?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET "
+                            "status=excluded.status,checks=excluded.checks,"
+                            "first_seen=excluded.first_seen,checked_at=excluded.checked_at",
+                            (account_id, observed_status, checks, first_seen, now),
+                        )
+                        fallback = str(snapshot.get("status_without_drift") or "ok")
+                        effective.update(
+                            {
+                                "observed_status": observed_status,
+                                "status": fallback,
+                                "status_label": snapshot.get("status_without_drift_label")
+                                or fallback.replace("_", " ").title(),
+                                "alerting": bool(snapshot.get("alerting_without_drift", False)),
+                                "detail": (
+                                    snapshot.get("detail_without_drift")
+                                    if fallback != "ok"
+                                    else "Clerk saw a possible balance mismatch and is waiting "
+                                    f"for {required} consecutive checks before declaring it."
+                                ),
+                                "signals": list(snapshot.get("signals_without_drift") or [])
+                                + [
+                                    f"Possible balance mismatch seen on check {checks} of "
+                                    f"{required}; no alert will be sent unless it persists."
+                                ],
+                                "balance_mismatch_pending": True,
+                                "balance_mismatch_checks": checks,
+                                "balance_mismatch_required": required,
+                            }
+                        )
+                    else:
+                        connection.execute(
+                            "DELETE FROM health_candidates WHERE account_id=?", (account_id,)
+                        )
+                        effective.update(
+                            {
+                                "balance_mismatch_pending": False,
+                                "balance_mismatch_checks": checks,
+                                "balance_mismatch_required": required,
+                            }
+                        )
+                else:
+                    connection.execute(
+                        "DELETE FROM health_candidates WHERE account_id=?", (account_id,)
+                    )
+
+                snapshot.clear()
+                snapshot.update(effective)
+                status = effective["status"]
                 changed = previous is None or previous["status"] != status
                 since = now if changed else previous["since"]
                 connection.execute(
@@ -845,10 +941,14 @@ class Database:
         with self.connect() as connection:
             if not account_ids:
                 connection.execute("DELETE FROM account_health")
+                connection.execute("DELETE FROM health_candidates")
                 return
             placeholders = ",".join("?" for _ in account_ids)
             connection.execute(
                 f"DELETE FROM account_health WHERE account_id NOT IN ({placeholders})", account_ids
+            )
+            connection.execute(
+                f"DELETE FROM health_candidates WHERE account_id NOT IN ({placeholders})", account_ids
             )
 
     def list_health_events(self, limit: int = 50) -> list[dict[str, Any]]:

@@ -178,6 +178,85 @@ def test_a_projection_that_lands_short_says_so():
     assert "the month ends over by $125.00" in body
 
 
+# ----------------------------------------------------- unchanged mornings
+
+
+def prior_report(*, bank_date: str | None = None):
+    payload = {
+        "local_date": "2026-08-20",
+        "report": {**HEALTHY_REPORT, "month": "2026-08"},
+    }
+    if bank_date:
+        payload["bank_snapshot_dates"] = {"acct-checking": bank_date}
+    return payload
+
+
+def bank_health(balance_date: str):
+    return [
+        {
+            "account_id": "acct-checking",
+            "account_name": "Checking",
+            "status": "ok",
+            "monitored": True,
+            "remote_balance_date": balance_date,
+        }
+    ]
+
+
+def test_an_unchanged_budget_with_newer_bank_data_says_why_it_is_quiet():
+    payload = digest(
+        report={"month": "2026-08"},
+        previous=prior_report(bank_date="2026-08-20T06:00:00+00:00"),
+        health=bank_health("2026-08-21T06:00:00+00:00"),
+    )
+    assert "Nothing to report" in payload["message"]
+    assert "newer bank data" in payload["message"]
+    assert "no new discretionary spending" in payload["message"]
+    assert "free money left" not in payload["message"]
+    assert payload["budget_change"]["reason"] == "newer_bank_data"
+
+
+def test_an_unchanged_bank_timestamp_is_reported_without_claiming_staleness():
+    timestamp = "2026-08-20T06:00:00+00:00"
+    payload = digest(
+        report={"month": "2026-08"},
+        previous=prior_report(bank_date=timestamp),
+        health=bank_health(timestamp),
+    )
+    assert "Nothing to report" in payload["message"]
+    assert "has not exposed a newer bank balance timestamp" in payload["message"]
+    assert payload["bank_snapshot_dates"] == {"acct-checking": timestamp}
+
+
+def test_missing_freshness_metadata_still_reports_an_unchanged_budget():
+    payload = digest(report={"month": "2026-08"}, previous=prior_report())
+    assert payload["message"].endswith(
+        "Nothing to report — your discretionary budget is unchanged since the last report."
+    )
+    assert payload["budget_change"]["reason"] == "unknown"
+
+
+def test_a_changed_budget_keeps_the_normal_morning_report():
+    payload = digest(
+        report={"month": "2026-08", "spent_cents": HEALTHY_REPORT["spent_cents"] + 500},
+        previous=prior_report(),
+    )
+    assert "Nothing to report" not in payload["message"]
+    assert "free money left" in payload["message"]
+    assert payload["budget_change"]["reason"] == "budget_changed"
+
+
+def test_a_quiet_budget_does_not_hide_a_broken_connection():
+    payload = digest(
+        report={"month": "2026-08"},
+        previous=prior_report(),
+        health=[{"account_name": "Checking", "status": "error", "detail": "Reauthorize"}],
+    )
+    assert "Nothing to report" in payload["message"]
+    assert "Connections needing attention" in payload["message"]
+    assert payload["priority"] == 5
+
+
 def test_hiding_the_connections_block_does_not_silence_the_alarm():
     """A broken bank connection is not a formatting preference."""
     payload = digest(

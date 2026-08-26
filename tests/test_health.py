@@ -51,6 +51,7 @@ def test_a_matching_current_account_is_healthy():
     assert result.status == "ok"
     assert result.drift_cents == 0
     assert result.balance_age_hours == 2.0
+    assert result.remote_balance_date == (NOW - datetime.timedelta(hours=2)).isoformat()
 
 
 def test_an_account_level_error_is_reported_verbatim():
@@ -208,6 +209,8 @@ def test_a_real_mismatch_is_still_caught_behind_uncleared_money():
     assert result.status == "drifted"
     assert result.drift_cents == -3000
     assert any("cleared balance" in signal for signal in result.signals)
+    assert result.status_without_drift == "ok"
+    assert all("cleared balance" not in signal for signal in result.signals_without_drift)
 
 
 def test_without_a_cleared_figure_the_total_is_used():

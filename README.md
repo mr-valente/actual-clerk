@@ -34,6 +34,8 @@ Clerk asks SimpleFIN directly and compares three independent signals per account
 
 Balances are compared cleared-against-posted, so money still waiting to clear the bank is never reported as a mismatch. It is shown separately instead, and it still counts as spent in your budget, because a committed charge is committed whether or not the bank has caught up.
 
+A balance mismatch must appear on three consecutive connection checks before Clerk declares it or sends an alert. SimpleFIN can publish a new balance one poll before the matching posted transaction set settles; keeping that observation pending prevents the familiar false “mismatch” followed by “restored” an hour later, while a real disagreement still becomes visible after it persists.
+
 Every account has a **monitoring switch** on the Connections page. Turn it off for a dormant or legacy account and Clerk keeps reading it and showing its numbers, but stops scoring it, stops alerting on it, and stops calling it stale. Nothing changes in Actual — the account stays linked and keeps importing.
 
 An account that has merely gone quiet is never treated as broken. It gets a nudge naming it and how long it has been silent, not a red banner, so the dashboard, the sidebar badge, and the morning digest always agree on what actually needs attention.
@@ -57,7 +59,7 @@ Clerk detects anything billing on a schedule three or more times, tells you what
 
 ### Sends one message every morning
 
-An ntfy notification with your free money, the pace, what is safe to spend today, any bank connection that needs attention, and anything waiting for your review. One a day, short enough to read on a lock screen.
+An ntfy notification with your free money, the pace, what is safe to spend today, any bank connection that needs attention, and anything waiting for your review. When the spendable budget is unchanged from the previous delivered report, those repeated figures collapse to “Nothing to report” instead. If SimpleFIN's per-account balance timestamp moved, Clerk can say newer bank data arrived with no new discretionary spending; if it did not, Clerk says SimpleFIN exposed no newer balance timestamp. One a day, short enough to read on a lock screen.
 
 ---
 
@@ -129,6 +131,8 @@ The notification header is yours to name — *The Morning Report* by default —
 | Waiting for you | Transactions to review, and anything uncategorized |
 
 A broken bank connection still raises the notification's priority whether or not that block is shown: which parts you want to read is a preference, a dead connection is not.
+
+On an unchanged morning, connection problems and work waiting for you are still shown. SimpleFIN defines `balance-date` as the timestamp attached to the balance value, so an advancing timestamp proves newer bank data arrived; an unchanged timestamp cannot prove whether the bank was polled and found the same value. Clerk therefore says only that SimpleFIN exposed no newer balance timestamp rather than claiming the connection is stale.
 
 ---
 

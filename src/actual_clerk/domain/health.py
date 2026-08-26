@@ -112,10 +112,17 @@ class AccountHealth:
     # What the account would have been scored as if it were being monitored.
     underlying_status: str = ""
     balance_age_hours: float | None = None
+    remote_balance_date: str | None = None
     last_sync: str | None = None
     last_transaction_date: str | None = None
     days_since_transaction: int | None = None
     off_budget: bool = False
+    # A balance mismatch is confirmed over several health checks before it is
+    # allowed to become the account's public status. These fields preserve the
+    # fair status and explanation to use while that confirmation is pending.
+    status_without_drift: str = "ok"
+    detail_without_drift: str = "Balances agree and data is current."
+    signals_without_drift: list[str] = field(default_factory=list)
 
     def as_dict(self) -> dict[str, Any]:
         data = {key: getattr(self, key) for key in self.__dataclass_fields__}
@@ -124,6 +131,10 @@ class AccountHealth:
         # the dashboard, the sidebar badge, and the digest cannot disagree
         # about what counts as a problem.
         data["alerting"] = self.status in ALERTING_STATUSES
+        data["status_without_drift_label"] = STATUS_LABELS.get(
+            self.status_without_drift, self.status_without_drift
+        )
+        data["alerting_without_drift"] = self.status_without_drift in ALERTING_STATUSES
         return data
 
 
@@ -234,7 +245,21 @@ def _evaluate_one(
     transaction_stale_days: int,
 ) -> AccountHealth:
     signals: list[str] = []
+    signals_without_drift: list[str] = []
     statuses: list[str] = []
+    status_details: dict[str, str] = {}
+
+    def flag(status: str, message: str) -> None:
+        statuses.append(status)
+        signals.append(message)
+        status_details.setdefault(status, message)
+        if status != "drifted":
+            signals_without_drift.append(message)
+
+    def note(message: str) -> None:
+        signals.append(message)
+        signals_without_drift.append(message)
+
     days_since = (
         (today - account.last_transaction_date).days if account.last_transaction_date else None
     )
@@ -271,27 +296,28 @@ def _evaluate_one(
     )
     reported = account_errors + connection_errors
     if reported:
-        statuses.append("error")
-        signals.extend(reported)
+        for message in reported:
+            flag("error", message)
     elif general_errors and not remote:
-        statuses.append("error")
-        signals.extend(general_errors)
+        for message in general_errors:
+            flag("error", message)
 
     if not simplefin_configured:
-        signals.append("SimpleFIN is not configured in Clerk, so only Actual's own data is checked.")
+        note("SimpleFIN is not configured in Clerk, so only Actual's own data is checked.")
     elif remote is None and have_remote_payload and not reported:
-        statuses.append("missing")
-        signals.append(
+        flag(
+            "missing",
             "SimpleFIN did not return this account. The bank link was most likely removed or revoked."
         )
 
     if remote is not None:
         if remote.balance_date is not None:
+            health.remote_balance_date = remote.balance_date.isoformat()
             age_hours = max(0.0, (now - remote.balance_date).total_seconds() / 3600)
             health.balance_age_hours = round(age_hours, 1)
             if age_hours > balance_stale_hours:
-                statuses.append("stale")
-                signals.append(
+                flag(
+                    "stale",
                     f"SimpleFIN's balance is {age_hours / 24:.1f} days old; the bank has stopped "
                     "refreshing this account."
                 )
@@ -302,41 +328,51 @@ def _evaluate_one(
         drift = account.cleared_cents - remote.balance_cents
         health.drift_cents = drift
         if account.uncleared_cents:
-            signals.append(
+            note(
                 f"{_money(abs(account.uncleared_cents))} of this account's balance has not "
                 "cleared the bank yet. Clerk counts it as spent for the budget and leaves it "
                 "out of this comparison."
             )
         if abs(drift) > balance_tolerance_cents:
-            statuses.append("drifted")
-            signals.append(
+            flag(
+                "drifted",
                 "Actual's cleared balance and the bank's balance disagree, so a posted "
                 "transaction is missing on one side."
             )
 
     if days_since is not None and days_since > transaction_stale_days:
-        statuses.append("no_transactions")
-        signals.append(f"No transaction has arrived in Actual for {days_since} days.")
+        flag("no_transactions", f"No transaction has arrived in Actual for {days_since} days.")
     elif account.last_transaction_date is None:
-        statuses.append("no_transactions")
-        signals.append("Actual holds no transactions for this account yet.")
+        flag("no_transactions", "Actual holds no transactions for this account yet.")
 
     health.status = worst_status(statuses) if statuses else "ok"
     health.signals = signals
-    health.detail = signals[0] if signals else "Balances agree and data is current."
+    health.detail = status_details.get(health.status, "Balances agree and data is current.")
+    without_drift = [status for status in statuses if status != "drifted"]
+    health.status_without_drift = worst_status(without_drift) if without_drift else "ok"
+    health.detail_without_drift = status_details.get(
+        health.status_without_drift, "Balances agree and data is current."
+    )
+    health.signals_without_drift = signals_without_drift
     return health
 
 
-def summarize(results: Sequence[AccountHealth]) -> dict[str, Any]:
-    linked = [item for item in results if item.status not in ("not_linked", MUTED)]
+def summarize(results: Sequence[AccountHealth | dict[str, Any]]) -> dict[str, Any]:
+    """Summarize either freshly evaluated objects or stabilized snapshots."""
+
+    def status_of(item: AccountHealth | dict[str, Any]) -> str:
+        return item.status if isinstance(item, AccountHealth) else str(item.get("status") or "unknown")
+
+    statuses = [status_of(item) for item in results]
+    linked = [status for status in statuses if status not in ("not_linked", MUTED)]
     counts: dict[str, int] = {}
-    for item in results:
-        counts[item.status] = counts.get(item.status, 0) + 1
+    for status in statuses:
+        counts[status] = counts.get(status, 0) + 1
     return {
-        "overall": worst_status([item.status for item in linked]) if linked else "unknown",
+        "overall": worst_status(linked) if linked else "unknown",
         "counts": counts,
         "total": len(results),
         "linked": len(linked),
-        "muted": sum(1 for item in results if item.status == MUTED),
-        "degraded": sum(1 for item in linked if item.status in ALERTING_STATUSES),
+        "muted": sum(1 for status in statuses if status == MUTED),
+        "degraded": sum(1 for status in linked if status in ALERTING_STATUSES),
     }
