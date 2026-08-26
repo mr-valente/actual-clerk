@@ -224,6 +224,9 @@ function budgetHero() {
 
 function healthRow(item, { actions = true, toggle = false } = {}) {
   const drift = item.drift_cents;
+  const balanceComparison = item.transfer_adjusted
+    ? "matches after inferred transfer"
+    : (drift ? `${money(drift, { sign: true })} vs cleared` : "matches cleared");
   const linked = item.status !== "not_linked";
   const monitorControl = toggle && linked
     ? `<label class="toggle-control compact" title="${item.monitored === false ? "Monitoring is off" : "Monitoring is on"}" data-stop>
@@ -237,7 +240,7 @@ function healthRow(item, { actions = true, toggle = false } = {}) {
     <div class="row-meta">${escapeHtml((item.detail || "").slice(0, 90))}</div>
     <div class="row-meta">${item.remote_balance_cents === null || item.remote_balance_cents === undefined
       ? "—"
-      : `<strong>${money(item.remote_balance_cents)}</strong><br /><span>${drift ? `${money(drift, { sign: true })} vs cleared` : "matches cleared"}</span>`}</div>
+      : `<strong>${money(item.remote_balance_cents)}</strong><br /><span>${balanceComparison}</span>`}</div>
     <div class="health-state">${statusChip(item.status, item.status_label)}${monitorControl}</div>
   </article>`;
 }
@@ -577,8 +580,10 @@ function showAccount(accountId) {
       <div class="detail-stat"><span>Actual balance</span><strong class="money">${money(item.actual_balance_cents)}</strong></div>
       <div class="detail-stat"><span>Of that, cleared</span><strong class="money">${money(item.actual_cleared_balance_cents ?? item.actual_balance_cents)}</strong></div>
       <div class="detail-stat"><span>Not yet cleared</span><strong class="money">${money(item.uncleared_balance_cents || 0)}</strong></div>
+      ${item.transfer_adjusted ? `<div class="detail-stat"><span>Inferred transfer held out</span><strong class="money">${money(item.unconfirmed_transfer_cents || 0, { sign: true })}</strong></div>
+      <div class="detail-stat"><span>Bank-comparable balance</span><strong class="money">${money(item.comparison_balance_cents)}</strong></div>` : ""}
       <div class="detail-stat"><span>Bank balance</span><strong class="money">${item.remote_balance_cents === null || item.remote_balance_cents === undefined ? "—" : money(item.remote_balance_cents)}</strong></div>
-      <div class="detail-stat"><span>Cleared vs bank</span><strong class="money ${item.drift_cents ? "negative" : ""}">${item.drift_cents === null || item.drift_cents === undefined ? "—" : money(item.drift_cents, { sign: true })}</strong></div>
+      <div class="detail-stat"><span>${item.transfer_adjusted ? "Compared vs bank" : "Cleared vs bank"}</span><strong class="money ${item.drift_cents ? "negative" : ""}">${item.drift_cents === null || item.drift_cents === undefined ? "—" : money(item.drift_cents, { sign: true })}</strong></div>
       <div class="detail-stat"><span>Bank data age</span><strong>${item.balance_age_hours === null || item.balance_age_hours === undefined ? "—" : `${Math.round(item.balance_age_hours)}h`}</strong></div>
       <div class="detail-stat"><span>Last transaction</span><strong>${escapeHtml(item.last_transaction_date || "—")}</strong></div>
       <div class="detail-stat"><span>Actual last sync</span><strong>${item.last_sync ? relativeTime(item.last_sync) : "—"}</strong></div>

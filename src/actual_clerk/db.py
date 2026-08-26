@@ -156,6 +156,7 @@ CREATE TABLE IF NOT EXISTS health_candidates (
     account_id TEXT PRIMARY KEY,
     status TEXT NOT NULL,
     checks INTEGER NOT NULL DEFAULT 1,
+    remote_balance_date TEXT NOT NULL DEFAULT '',
     first_seen REAL NOT NULL,
     checked_at REAL NOT NULL
 );
@@ -208,6 +209,7 @@ class Database:
         with self._init_lock, self.connect() as connection:
             self._migrate_digests(connection)
             connection.executescript(SCHEMA)
+            self._migrate_health_candidates(connection)
             self._restore_digests(connection)
             now = time.time()
             # A job that was running when the process died has no worker to
@@ -247,6 +249,23 @@ class Database:
             "SELECT local_date,'',payload_json,delivered,error,created_at FROM digests_pre_slot"
         )
         connection.execute("DROP TABLE digests_pre_slot")
+
+    @staticmethod
+    def _migrate_health_candidates(connection: sqlite3.Connection) -> None:
+        """Add the upstream observation key to databases from v0.2.3."""
+
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(health_candidates)")
+        }
+        if columns and "remote_balance_date" not in columns:
+            connection.execute(
+                "ALTER TABLE health_candidates ADD COLUMN "
+                "remote_balance_date TEXT NOT NULL DEFAULT ''"
+            )
+            # Legacy counts represent repeated polls, not distinct upstream
+            # observations. Candidates are deliberately non-public, so restart
+            # their confirmation rather than carrying suspect evidence forward.
+            connection.execute("DELETE FROM health_candidates")
 
     # ------------------------------------------------------------------ settings
 
@@ -772,8 +791,10 @@ class Database:
         SimpleFIN can expose a new balance just before the corresponding
         transaction set is coherent. When ``drift_confirmation_checks`` is
         greater than one, a mismatch stays a non-alerting candidate until it
-        has appeared that many checks in a row. ``snapshots`` is updated in
-        place so every caller shows the same stabilized status that was saved.
+        has appeared in that many successively newer bank balance snapshots. Re-reading
+        one unchanged ``balance-date`` does not manufacture new evidence.
+        ``snapshots`` is updated in place so every caller shows the same
+        stabilized status that was saved.
         """
         now = time.time()
         required = max(1, int(drift_confirmation_checks))
@@ -793,27 +814,56 @@ class Database:
                     and (previous is None or previous["status"] != "drifted")
                 ):
                     candidate = connection.execute(
-                        "SELECT status,checks,first_seen FROM health_candidates "
-                        "WHERE account_id=?",
+                        "SELECT status,checks,remote_balance_date,first_seen "
+                        "FROM health_candidates WHERE account_id=?",
                         (account_id,),
                     ).fetchone()
-                    checks = (
-                        int(candidate["checks"]) + 1
-                        if candidate is not None and candidate["status"] == observed_status
-                        else 1
+                    remote_balance_date = str(snapshot.get("remote_balance_date") or "")
+                    candidate_balance_date = remote_balance_date
+                    same_candidate = (
+                        candidate is not None and candidate["status"] == observed_status
                     )
+                    if same_candidate:
+                        previous_balance_date = str(candidate["remote_balance_date"] or "")
+                        # SimpleFIN requires balance-date. Preserve the old
+                        # consecutive-check behavior only for an unusable or
+                        # absent timestamp; otherwise count each upstream
+                        # snapshot once, however often Clerk polls it.
+                        if remote_balance_date and previous_balance_date:
+                            newer_bank_snapshot = remote_balance_date > previous_balance_date
+                            checks = int(candidate["checks"]) + int(newer_bank_snapshot)
+                            if not newer_bank_snapshot:
+                                candidate_balance_date = previous_balance_date
+                        elif remote_balance_date:
+                            # The prior observation had no usable timestamp. It
+                            # cannot count as distinct evidence, but this one can
+                            # become the baseline for the next comparison.
+                            checks = int(candidate["checks"])
+                        else:
+                            checks = int(candidate["checks"]) + 1
+                    else:
+                        checks = 1
                     first_seen = (
                         float(candidate["first_seen"])
-                        if candidate is not None and candidate["status"] == observed_status
+                        if same_candidate
                         else now
                     )
                     if checks < required:
                         connection.execute(
-                            "INSERT INTO health_candidates(account_id,status,checks,first_seen,checked_at) "
-                            "VALUES(?,?,?,?,?) ON CONFLICT(account_id) DO UPDATE SET "
+                            "INSERT INTO health_candidates(account_id,status,checks,remote_balance_date,"
+                            "first_seen,checked_at) VALUES(?,?,?,?,?,?) "
+                            "ON CONFLICT(account_id) DO UPDATE SET "
                             "status=excluded.status,checks=excluded.checks,"
+                            "remote_balance_date=excluded.remote_balance_date,"
                             "first_seen=excluded.first_seen,checked_at=excluded.checked_at",
-                            (account_id, observed_status, checks, first_seen, now),
+                            (
+                                account_id,
+                                observed_status,
+                                checks,
+                                candidate_balance_date,
+                                first_seen,
+                                now,
+                            ),
                         )
                         fallback = str(snapshot.get("status_without_drift") or "ok")
                         effective.update(
@@ -827,12 +877,14 @@ class Database:
                                     snapshot.get("detail_without_drift")
                                     if fallback != "ok"
                                     else "Clerk saw a possible balance mismatch and is waiting "
-                                    f"for {required} consecutive checks before declaring it."
+                                    f"for {required} successively newer SimpleFIN balance snapshots "
+                                    "before declaring it."
                                 ),
                                 "signals": list(snapshot.get("signals_without_drift") or [])
                                 + [
-                                    f"Possible balance mismatch seen on check {checks} of "
-                                    f"{required}; no alert will be sent unless it persists."
+                                    f"Possible balance mismatch seen in {checks} of {required} "
+                                    "successively newer SimpleFIN balance snapshots; repeated checks of "
+                                    "the same snapshot do not count."
                                 ],
                                 "balance_mismatch_pending": True,
                                 "balance_mismatch_checks": checks,

@@ -7,6 +7,7 @@ involved.
 
 from __future__ import annotations
 
+import datetime
 import itertools
 
 import pytest
@@ -14,7 +15,7 @@ from actual.database import Accounts, Transactions
 from sqlalchemy import text
 from sqlmodel import Session, SQLModel, create_engine
 
-from actual_clerk.clients.actual import account_balances
+from actual_clerk.clients.actual import account_balances, unconfirmed_transfers
 
 _ids = itertools.count(1)
 
@@ -136,3 +137,86 @@ def test_the_split_matches_actuals_own_balance_property(session):
     account = session.get(Accounts, "a1")
     total, _ = account_balances(session)["a1"]
     assert total == round(account.balance * 100)
+
+
+# ------------------------------------------------------- generated transfers
+
+
+def test_a_generated_transfer_half_is_not_independent_bank_evidence(session):
+    add_account(session, "wf", "Wells Fargo")
+    add_account(session, "co", "Capital One")
+    add_transaction(
+        session,
+        "wf",
+        id="source",
+        amount=-263508,
+        financial_id="TRN-wells-fargo",
+        transferred_id="generated",
+    )
+    add_transaction(
+        session,
+        "co",
+        id="generated",
+        amount=263508,
+        financial_id=None,
+        transferred_id="source",
+    )
+    session.flush()
+
+    assert unconfirmed_transfers(session) == {
+        "co": [
+            {
+                "id": "generated",
+                "date": datetime.date(2026, 8, 1),
+                "amount_cents": 263508,
+            }
+        ]
+    }
+
+
+def test_the_destination_import_confirms_its_transfer_half(session):
+    add_account(session, "wf", "Wells Fargo")
+    add_account(session, "co", "Capital One")
+    add_transaction(
+        session,
+        "wf",
+        id="source",
+        amount=-263508,
+        financial_id="TRN-wells-fargo",
+        transferred_id="generated",
+    )
+    add_transaction(
+        session,
+        "co",
+        id="generated",
+        amount=263508,
+        financial_id="TRN-capital-one",
+        transferred_id="source",
+    )
+    session.flush()
+
+    assert unconfirmed_transfers(session) == {}
+
+
+def test_a_manual_transfer_is_not_assumed_to_be_unconfirmed(session):
+    add_account(session, "a1", "Checking")
+    add_account(session, "a2", "Savings")
+    add_transaction(
+        session,
+        "a1",
+        id="manual-source",
+        amount=-10000,
+        financial_id=None,
+        transferred_id="manual-dest",
+    )
+    add_transaction(
+        session,
+        "a2",
+        id="manual-dest",
+        amount=10000,
+        financial_id=None,
+        transferred_id="manual-source",
+    )
+    session.flush()
+
+    assert unconfirmed_transfers(session) == {}

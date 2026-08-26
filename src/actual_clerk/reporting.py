@@ -17,7 +17,11 @@ from actual_clerk.domain.budget import (
     build_budget_report,
     month_bounds,
 )
-from actual_clerk.domain.health import ActualAccountInfo, SimpleFinAccountInfo
+from actual_clerk.domain.health import (
+    ActualAccountInfo,
+    SimpleFinAccountInfo,
+    UnconfirmedTransferInfo,
+)
 
 
 def to_category_infos(snapshot: dict[str, Any]) -> list[CategoryInfo]:
@@ -64,6 +68,14 @@ def to_actual_accounts(snapshot: dict[str, Any]) -> list[ActualAccountInfo]:
             bank_name=account["bank_name"],
             balance_cents=account["balance_cents"],
             cleared_balance_cents=account.get("cleared_balance_cents"),
+            unconfirmed_transfers=tuple(
+                UnconfirmedTransferInfo(
+                    amount_cents=int(item.get("amount_cents", 0)),
+                    date=item["date"],
+                    transaction_id=str(item.get("id") or ""),
+                )
+                for item in account.get("unconfirmed_transfers", [])
+            ),
             last_sync=account["last_sync"],
             last_transaction_date=account.get("last_transaction_date"),
             off_budget=account["off_budget"],
@@ -161,5 +173,3 @@ def freshness(
         "stale_accounts": len(stale),
         "up_to_date": not stale,
     }
-
-

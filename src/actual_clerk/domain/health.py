@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 from collections.abc import Sequence
 from dataclasses import dataclass, field
+from itertools import combinations
 from typing import Any
 
 # Worst first: an account's overall status is the most serious signal it has,
@@ -51,6 +52,13 @@ MUTED = "muted"
 
 
 @dataclass(frozen=True)
+class UnconfirmedTransferInfo:
+    amount_cents: int
+    date: datetime.date
+    transaction_id: str = ""
+
+
+@dataclass(frozen=True)
 class ActualAccountInfo:
     id: str
     name: str
@@ -62,6 +70,9 @@ class ActualAccountInfo:
     # a bank's own balance. Defaults to the total for callers that do not
     # distinguish the two.
     cleared_balance_cents: int | None = None
+    # Cleared activity that Actual generated as the other half of an imported
+    # transfer, before this account imported its own matching row.
+    unconfirmed_transfers: tuple[UnconfirmedTransferInfo, ...] = ()
     last_sync: datetime.datetime | None = None
     last_transaction_date: datetime.date | None = None
     off_budget: bool = False
@@ -106,6 +117,11 @@ class AccountHealth:
     actual_balance_cents: int = 0
     actual_cleared_balance_cents: int = 0
     uncleared_balance_cents: int = 0
+    unconfirmed_transfer_cents: int = 0
+    unconfirmed_transfer_count: int = 0
+    comparison_balance_cents: int = 0
+    raw_drift_cents: int | None = None
+    transfer_adjusted: bool = False
     remote_balance_cents: int | None = None
     drift_cents: int | None = None
     monitored: bool = True
@@ -145,6 +161,35 @@ def _money(cents: int) -> str:
 
 def severity(status: str) -> int:
     return _SEVERITY.get(status, len(STATUS_ORDER))
+
+
+def _transfer_adjustment(
+    transfers: Sequence[UnconfirmedTransferInfo],
+    *,
+    drift_cents: int,
+    today: datetime.date,
+    tolerance_cents: int,
+) -> tuple[int, int]:
+    """Find a small recent subset that fully explains a bank balance gap.
+
+    Old generated payment rows can remain without destination-side import ids,
+    so a lifetime aggregate is not safe. Bank-feed races are recent; search at
+    most twelve candidates from the last fourteen days and prefer the smallest
+    explaining set. The bound keeps corrupt or unusually busy ledgers cheap.
+    """
+
+    cutoff = today - datetime.timedelta(days=14)
+    recent = sorted(
+        (item for item in transfers if cutoff <= item.date <= today),
+        key=lambda item: item.date,
+        reverse=True,
+    )[:12]
+    for size in range(1, len(recent) + 1):
+        for selected in combinations(recent, size):
+            amount = sum(item.amount_cents for item in selected)
+            if abs(drift_cents - amount) <= tolerance_cents:
+                return amount, size
+    return 0, 0
 
 
 def worst_status(statuses: Sequence[str]) -> str:
@@ -275,6 +320,7 @@ def _evaluate_one(
         actual_balance_cents=account.balance_cents,
         actual_cleared_balance_cents=account.cleared_cents,
         uncleared_balance_cents=account.uncleared_cents,
+        comparison_balance_cents=account.cleared_cents,
         remote_balance_cents=remote.balance_cents if remote else None,
         last_sync=account.last_sync.isoformat() if account.last_sync else None,
         last_transaction_date=(
@@ -325,7 +371,36 @@ def _evaluate_one(
         # cleared side of Actual is the only fair comparison. Anything still
         # waiting to clear is normal and is reported separately rather than
         # counted as a fault.
-        drift = account.cleared_cents - remote.balance_cents
+        raw_drift = account.cleared_cents - remote.balance_cents
+        comparison_balance = account.cleared_cents
+        transfer_adjustment, transfer_count = _transfer_adjustment(
+            account.unconfirmed_transfers,
+            drift_cents=raw_drift,
+            today=today,
+            tolerance_cents=balance_tolerance_cents,
+        )
+        adjusted_balance = account.cleared_cents - transfer_adjustment
+        # Do not broadly distrust transfers or Actual's cleared flag. Apply the
+        # provenance adjustment only when it explains the entire mismatch: the
+        # linked source was imported from its bank, this account's generated
+        # half was not, and SimpleFIN agrees with the ledger without that half.
+        if (
+            transfer_count > 0
+            and abs(raw_drift) > balance_tolerance_cents
+            and abs(adjusted_balance - remote.balance_cents) <= balance_tolerance_cents
+        ):
+            comparison_balance = adjusted_balance
+            health.transfer_adjusted = True
+            health.unconfirmed_transfer_cents = transfer_adjustment
+            health.unconfirmed_transfer_count = transfer_count
+            note(
+                f"Actual generated {_money(abs(transfer_adjustment))} of "
+                "cleared transfer activity from another account before this account imported "
+                "its own side. Clerk leaves that inferred amount out of the bank comparison."
+            )
+        health.comparison_balance_cents = comparison_balance
+        health.raw_drift_cents = raw_drift
+        drift = comparison_balance - remote.balance_cents
         health.drift_cents = drift
         if account.uncleared_cents:
             note(
@@ -345,13 +420,19 @@ def _evaluate_one(
     elif account.last_transaction_date is None:
         flag("no_transactions", "Actual holds no transactions for this account yet.")
 
+    healthy_detail = (
+        "The bank balance agrees after holding out a transfer Actual generated from another "
+        "account but this account has not imported yet."
+        if health.transfer_adjusted
+        else "Balances agree and data is current."
+    )
     health.status = worst_status(statuses) if statuses else "ok"
     health.signals = signals
-    health.detail = status_details.get(health.status, "Balances agree and data is current.")
+    health.detail = status_details.get(health.status, healthy_detail)
     without_drift = [status for status in statuses if status != "drifted"]
     health.status_without_drift = worst_status(without_drift) if without_drift else "ok"
     health.detail_without_drift = status_details.get(
-        health.status_without_drift, "Balances agree and data is current."
+        health.status_without_drift, healthy_detail
     )
     health.signals_without_drift = signals_without_drift
     return health

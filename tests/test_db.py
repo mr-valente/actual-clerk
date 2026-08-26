@@ -264,6 +264,46 @@ def test_a_balance_mismatch_must_survive_three_consecutive_checks(database):
     assert database.health_snapshots()[0]["status"] == "drifted"
 
 
+def test_repolling_one_simplefin_snapshot_does_not_confirm_a_mismatch(database):
+    database.record_health([snapshot()])
+
+    def mismatch(balance_date):
+        return {
+            **snapshot(status="drifted", detail="balances differ"),
+            "status_label": "Balance mismatch",
+            "alerting": True,
+            "status_without_drift": "ok",
+            "status_without_drift_label": "Connected",
+            "alerting_without_drift": False,
+            "detail_without_drift": "Balances agree and data is current.",
+            "signals": ["balances differ"],
+            "signals_without_drift": [],
+            "remote_balance_date": balance_date,
+        }
+
+    first = mismatch("2026-08-25T17:13:50+00:00")
+    database.record_health([first], drift_confirmation_checks=3)
+    assert first["balance_mismatch_checks"] == 1
+
+    for _ in range(4):
+        repeated = mismatch("2026-08-25T17:13:50+00:00")
+        assert database.record_health([repeated], drift_confirmation_checks=3) == []
+        assert repeated["status"] == "ok"
+        assert repeated["balance_mismatch_checks"] == 1
+
+    regressed = mismatch("2026-08-24T17:13:50+00:00")
+    database.record_health([regressed], drift_confirmation_checks=3)
+    assert regressed["balance_mismatch_checks"] == 1
+
+    second = mismatch("2026-08-26T09:00:00+00:00")
+    database.record_health([second], drift_confirmation_checks=3)
+    assert second["balance_mismatch_checks"] == 2
+
+    third = mismatch("2026-08-27T09:00:00+00:00")
+    [transition] = database.record_health([third], drift_confirmation_checks=3)
+    assert transition["status"] == "drifted"
+
+
 def test_a_transient_balance_mismatch_clears_without_any_transition(database):
     database.record_health([snapshot()])
     candidate = {
@@ -280,6 +320,30 @@ def test_a_transient_balance_mismatch_clears_without_any_transition(database):
     later = dict(candidate, status="drifted")
     database.record_health([later], drift_confirmation_checks=3)
     assert later["balance_mismatch_checks"] == 1
+
+
+def test_existing_candidate_tables_gain_the_balance_snapshot_column(data_dir):
+    path = data_dir / "old-health.db"
+    connection = sqlite3.connect(path)
+    connection.execute(
+        "CREATE TABLE health_candidates ("
+        "account_id TEXT PRIMARY KEY,status TEXT NOT NULL,checks INTEGER NOT NULL DEFAULT 1,"
+        "first_seen REAL NOT NULL,checked_at REAL NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO health_candidates VALUES('acct-1','drifted',2,1.0,2.0)"
+    )
+    connection.commit()
+    connection.close()
+
+    Database(path).initialize()
+
+    connection = sqlite3.connect(path)
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(health_candidates)")}
+    remaining = connection.execute("SELECT COUNT(*) FROM health_candidates").fetchone()[0]
+    connection.close()
+    assert "remote_balance_date" in columns
+    assert remaining == 0
 
 
 def test_accounts_removed_from_actual_stop_being_reported(database):

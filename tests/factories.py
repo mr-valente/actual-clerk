@@ -54,6 +54,8 @@ def account(
         "external_id": external_id if external_id is not None else (f"sf-{identifier}" if sync_source else ""),
         "bank_name": bank_name,
         "balance_cents": balance_cents,
+        "cleared_balance_cents": balance_cents,
+        "unconfirmed_transfers": [],
         "last_sync": last_sync,
         "off_budget": off_budget,
         "closed": closed,

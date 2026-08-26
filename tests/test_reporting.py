@@ -91,11 +91,17 @@ def test_closed_accounts_are_left_out_of_freshness(settings):
 
 
 def test_snapshot_accounts_convert_for_the_health_check():
-    snap = snapshot(accounts=[account("Checking", balance_cents=12345)])
+    checking = account("Checking", balance_cents=12345)
+    checking["unconfirmed_transfers"] = [
+        {"id": "transfer-1", "date": TODAY, "amount_cents": 2500}
+    ]
+    snap = snapshot(accounts=[checking])
     [converted] = to_actual_accounts(snap)
     assert converted.name == "Checking"
     assert converted.balance_cents == 12345
     assert converted.external_id == "sf-acct-checking"
+    assert converted.unconfirmed_transfers[0].amount_cents == 2500
+    assert converted.unconfirmed_transfers[0].transaction_id == "transfer-1"
 
 
 def test_missing_simplefin_data_converts_to_nothing():

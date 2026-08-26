@@ -43,7 +43,9 @@ from actual.queries import (
     get_transactions,
 )
 from actual.rules import Action, Condition, ConditionType, Rule
+from actual.utils.conversions import int_to_date
 from sqlalchemy import case, func
+from sqlalchemy.orm import aliased
 from sqlmodel import select
 
 from actual_clerk.config import Settings
@@ -213,6 +215,55 @@ def account_balances(session: Any) -> dict[str, tuple[int, int]]:
     return {row[0]: (int(row[1] or 0), int(row[2] or 0)) for row in rows}
 
 
+def unconfirmed_transfers(session: Any) -> dict[str, list[dict[str, Any]]]:
+    """Cleared transfer halves inferred from a different bank account.
+
+    When a rule turns an imported transaction into a transfer, Actual creates
+    the opposite half immediately. actualpy copies the imported side's cleared
+    flag to that generated row, even though the second account has not supplied
+    a transaction of its own yet. The generated row has no ``financial_id``;
+    its linked source does. Once the second bank import arrives, reconciliation
+    attaches its own id and the row stops matching this query.
+
+    Return each candidate rather than one lifetime total. An older generated
+    payment can legitimately remain without a destination import id long after
+    the bank balance caught up; the health layer therefore considers only
+    recent candidates and selects the subset that explains the current gap.
+    """
+
+    counterpart = aliased(Transactions)
+    rows = session.exec(
+        select(
+            Transactions.acct,
+            Transactions.id,
+            Transactions.date,
+            Transactions.amount,
+        )
+        .join(counterpart, Transactions.transferred_id == counterpart.id)
+        .where(
+            Transactions.is_parent == 0,
+            Transactions.tombstone == 0,
+            Transactions.cleared == 1,
+            func.coalesce(Transactions.financial_id, "") == "",
+            counterpart.tombstone == 0,
+            func.coalesce(counterpart.financial_id, "") != "",
+        )
+        .order_by(Transactions.date.desc(), Transactions.id)
+    ).all()
+    result: dict[str, list[dict[str, Any]]] = {}
+    for account_id, transaction_id, date, amount in rows:
+        if not account_id or not date:
+            continue
+        result.setdefault(account_id, []).append(
+            {
+                "id": str(transaction_id or ""),
+                "date": int_to_date(date),
+                "amount_cents": int(amount or 0),
+            }
+        )
+    return result
+
+
 def transaction_fingerprints(session: Any) -> dict[str, tuple[str | None, str | None]]:
     """The fields a re-delivered import overwrites in place, before it runs."""
     return {
@@ -321,6 +372,7 @@ def collect_snapshot(actual: Actual, *, settings: Settings, today: datetime.date
 
     redirects = read_redirects(session)
     balances = account_balances(session)
+    transfer_candidates = unconfirmed_transfers(session)
     accounts = []
     for account in get_accounts(session):
         bank = getattr(account, "bank", None)
@@ -335,6 +387,7 @@ def collect_snapshot(actual: Actual, *, settings: Settings, today: datetime.date
                 "balance_cents": total,
                 "cleared_balance_cents": cleared,
                 "uncleared_balance_cents": total - cleared,
+                "unconfirmed_transfers": transfer_candidates.get(account.id, []),
                 "last_sync": _parse_timestamp(account.last_sync),
                 "off_budget": bool(account.offbudget),
                 "closed": bool(account.closed),

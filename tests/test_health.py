@@ -5,6 +5,7 @@ import datetime
 from actual_clerk.domain.health import (
     ActualAccountInfo,
     SimpleFinAccountInfo,
+    UnconfirmedTransferInfo,
     evaluate_accounts,
     summarize,
     worst_status,
@@ -220,6 +221,117 @@ def test_without_a_cleared_figure_the_total_is_used():
     )
     assert result.status == "ok"
     assert result.uncleared_balance_cents == 0
+
+
+# ------------------------------------------------ generated transfer halves
+
+
+def test_an_inferred_transfer_that_exactly_explains_the_gap_is_held_out():
+    """The Wells Fargo -> Capital One incident, expressed in cents."""
+
+    [result] = evaluate(
+        [
+            actual_account(
+                "Capital One",
+                balance_cents=-166490,
+                cleared_balance_cents=-166490,
+                unconfirmed_transfers=(
+                    UnconfirmedTransferInfo(263508, TODAY - datetime.timedelta(days=1)),
+                ),
+            )
+        ],
+        [remote_account("Capital One", balance_cents=-429998)],
+    )
+
+    assert result.status == "ok"
+    assert result.raw_drift_cents == 263508
+    assert result.comparison_balance_cents == -429998
+    assert result.drift_cents == 0
+    assert result.transfer_adjusted is True
+    assert "generated 2,635.08" in result.signals[0]
+    assert "holding out a transfer" in result.detail
+
+
+def test_an_unconfirmed_transfer_cannot_hide_an_unrelated_mismatch():
+    [result] = evaluate(
+        [
+            actual_account(
+                "Capital One",
+                balance_cents=-166490,
+                cleared_balance_cents=-166490,
+                unconfirmed_transfers=(
+                    UnconfirmedTransferInfo(263508, TODAY - datetime.timedelta(days=1)),
+                ),
+            )
+        ],
+        [remote_account("Capital One", balance_cents=-400000)],
+    )
+
+    assert result.status == "drifted"
+    assert result.comparison_balance_cents == -166490
+    assert result.drift_cents == 233510
+    assert result.transfer_adjusted is False
+
+
+def test_no_transfer_adjustment_is_needed_once_the_bank_balance_catches_up():
+    [result] = evaluate(
+        [
+            actual_account(
+                "Capital One",
+                balance_cents=-166490,
+                cleared_balance_cents=-166490,
+                unconfirmed_transfers=(
+                    UnconfirmedTransferInfo(263508, TODAY - datetime.timedelta(days=1)),
+                ),
+            )
+        ],
+        [remote_account("Capital One", balance_cents=-166490)],
+    )
+
+    assert result.status == "ok"
+    assert result.comparison_balance_cents == -166490
+    assert result.transfer_adjusted is False
+
+
+def test_an_old_unmatched_transfer_cannot_explain_a_new_balance_gap():
+    [result] = evaluate(
+        [
+            actual_account(
+                "Capital One",
+                balance_cents=-166490,
+                cleared_balance_cents=-166490,
+                unconfirmed_transfers=(
+                    UnconfirmedTransferInfo(263508, TODAY - datetime.timedelta(days=90)),
+                ),
+            )
+        ],
+        [remote_account("Capital One", balance_cents=-429998)],
+    )
+
+    assert result.status == "drifted"
+    assert result.transfer_adjusted is False
+
+
+def test_two_recent_generated_transfers_can_jointly_explain_the_gap():
+    [result] = evaluate(
+        [
+            actual_account(
+                "Capital One",
+                balance_cents=-166490,
+                cleared_balance_cents=-166490,
+                unconfirmed_transfers=(
+                    UnconfirmedTransferInfo(200000, TODAY - datetime.timedelta(days=1)),
+                    UnconfirmedTransferInfo(63508, TODAY - datetime.timedelta(days=2)),
+                ),
+            )
+        ],
+        [remote_account("Capital One", balance_cents=-429998)],
+    )
+
+    assert result.status == "ok"
+    assert result.unconfirmed_transfer_cents == 263508
+    assert result.unconfirmed_transfer_count == 2
+    assert result.transfer_adjusted is True
 
 
 # ------------------------------------------------------------------- muting
