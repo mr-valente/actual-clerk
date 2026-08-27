@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import datetime
+from pathlib import Path
 from typing import Any
 
 import httpx
@@ -9,7 +10,11 @@ import pytest
 from actual_clerk.clients.actual import ActualGatewayError
 from actual_clerk.config import SettingsManager
 from actual_clerk.db import Database
-from actual_clerk.main import app
+from actual_clerk.main import (
+    STATIC_ASSET_VERSION,
+    _static_asset_version,
+    app,
+)
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager
 
 
@@ -569,17 +574,9 @@ async def test_diagnostics_redaction_is_opt_in(client, gateway):
 
 
 async def test_index_stamps_asset_urls_with_a_content_hash(client):
-    """A wheel dates every file to 2020, which browsers read as licence to
-    cache for months. The stamp changes with the bytes, so a rebuilt container
-    is never served from a stale cache."""
-    import hashlib
-
-    from actual_clerk.main import STATIC_DIRECTORY
-
     html = (await client.get("/")).text
-    for name in ("app.js", "styles.css"):
-        digest = hashlib.sha256((STATIC_DIRECTORY / name).read_bytes()).hexdigest()[:12]
-        assert f"/assets/{name}?v={digest}" in html
+    for name in ("app.js", "styles.css", "favicon.svg"):
+        assert f"/assets/{name}?v={STATIC_ASSET_VERSION}" in html
         assert f'"/assets/{name}"' not in html, "an unstamped URL would keep the old cache alive"
 
 
@@ -588,11 +585,18 @@ async def test_index_is_never_cached_without_revalidating(client):
     assert response.headers["cache-control"] == "no-cache"
 
 
-async def test_assets_are_revalidated_rather_than_heuristically_cached(client):
-    response = await client.get("/assets/app.js")
+@pytest.mark.parametrize("name", ("app.js", "styles.css", "favicon.svg"))
+async def test_current_fingerprinted_assets_are_cached_immutably(client, name):
+    response = await client.get(f"/assets/{name}?v={STATIC_ASSET_VERSION}")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "public, max-age=31536000, immutable"
+
+
+@pytest.mark.parametrize("query", ("", "?v=incorrect"))
+async def test_unversioned_or_incorrectly_versioned_assets_are_revalidated(client, query):
+    response = await client.get(f"/assets/app.js{query}")
     assert response.status_code == 200
     assert response.headers["cache-control"] == "no-cache"
-    assert response.headers.get("etag")
 
 
 async def test_revalidating_an_unchanged_asset_costs_no_body(client):
@@ -602,16 +606,27 @@ async def test_revalidating_an_unchanged_asset_costs_no_body(client):
     assert not again.content
 
 
-async def test_the_asset_stamp_follows_the_file_contents():
-    """Rebuilding without changing an asset must not change its URL."""
-    import hashlib
+@pytest.mark.parametrize("changed_name", ("app.js", "styles.css", "favicon.svg"))
+def test_asset_version_changes_when_any_asset_changes(tmp_path: Path, changed_name: str):
+    for name in ("app.js", "styles.css", "favicon.svg"):
+        (tmp_path / name).write_text(f"initial {name}")
+    initial = _static_asset_version(tmp_path)
+    assert _static_asset_version(tmp_path) == initial
 
-    from actual_clerk.main import STATIC_DIRECTORY, _asset_query
+    (tmp_path / changed_name).write_text(f"changed {changed_name}")
 
-    stamps = _asset_query()
-    for name, stamp in stamps.items():
-        expected = hashlib.sha256((STATIC_DIRECTORY / name).read_bytes()).hexdigest()[:12]
-        assert stamp == expected
+    assert len(initial) == 16
+    assert _static_asset_version(tmp_path) != initial
+
+
+def test_asset_version_includes_asset_names(tmp_path: Path):
+    original = tmp_path / "app.js"
+    original.write_text("same content")
+    initial = _static_asset_version(tmp_path)
+
+    original.rename(tmp_path / "renamed.js")
+
+    assert _static_asset_version(tmp_path) != initial
 
 
 # ------------------------------------------------------- bulk review resolve

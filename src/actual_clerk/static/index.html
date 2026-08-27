@@ -6,7 +6,7 @@
     <meta name="theme-color" content="#102a43" />
     <meta name="description" content="A budgeting assistant sidecar for Actual Budget" />
     <title>Actual Clerk</title>
-    <link rel="icon" href="/assets/favicon.svg" type="image/svg+xml" />
+    <link rel="icon" href="/assets/favicon.svg?v=__STATIC_ASSET_VERSION__" type="image/svg+xml" />
     <script>
       try {
         const saved = JSON.parse(localStorage.getItem("actual-clerk-appearance") || "null");
@@ -15,7 +15,7 @@
         if (saved?.motion) document.documentElement.dataset.motion = saved.motion;
       } catch { /* use server defaults */ }
     </script>
-    <link rel="stylesheet" href="/assets/styles.css" />
+    <link rel="stylesheet" href="/assets/styles.css?v=__STATIC_ASSET_VERSION__" />
   </head>
   <body>
     <div class="app-shell">
@@ -109,6 +109,6 @@
     </dialog>
 
     <div class="toast-region" id="toasts" aria-live="polite"></div>
-    <script type="module" src="/assets/app.js"></script>
+    <script type="module" src="/assets/app.js?v=__STATIC_ASSET_VERSION__"></script>
   </body>
 </html>

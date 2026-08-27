@@ -132,6 +132,13 @@ Overspending is measured against a committed category's accrued balance, not aga
 
 Four focused views: overview, review, connections, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Review groups transactions awaiting a decision by merchant, so one choice settles every transaction from that merchant, and lists rules worth promoting. Connections shows per-account health and the full transition history. Activity holds every run and every filing decision, including the ones withheld and why.
 
+The build-free web client serves its HTML with revalidation and references its
+JavaScript, CSS, and favicon with one SHA-256 fingerprint derived from every
+asset's relative name and contents. A changed asset therefore gives the whole
+bundle new URLs; assets carrying the current fingerprint are immutable, while
+unversioned or incorrectly fingerprinted requests must revalidate. Private API
+responses retain their stricter `no-store` policy.
+
 ## Reading Actual through its redirects
 
 Actual does not rewrite transactions when a category is deleted into a

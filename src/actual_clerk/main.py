@@ -2,18 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import mimetypes
 import os
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
-from functools import lru_cache
 from pathlib import Path
 from typing import Any, TextIO
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
 from pydantic import ValidationError
 
 from actual_clerk import __version__
@@ -38,6 +37,41 @@ from actual_clerk.schemas import (
 
 log = logging.getLogger(__name__)
 STATIC_DIRECTORY = Path(__file__).parent / "static"
+
+
+def _static_assets(directory: Path) -> dict[str, bytes]:
+    """Read the immutable assets; the revalidated HTML shell is not part of its own hash."""
+    return {
+        path.relative_to(directory).as_posix(): path.read_bytes()
+        for path in sorted(directory.rglob("*"))
+        if path.is_file() and path != directory / "index.html"
+    }
+
+
+def _fingerprint_static_assets(assets: dict[str, bytes]) -> str:
+    digest = hashlib.sha256()
+    for asset_name in sorted(assets):
+        content = assets[asset_name]
+        name = asset_name.encode()
+        digest.update(len(name).to_bytes(8, "big"))
+        digest.update(name)
+        digest.update(len(content).to_bytes(8, "big"))
+        digest.update(content)
+    return digest.hexdigest()[:16]
+
+
+def _static_asset_version(directory: Path) -> str:
+    """Fingerprint every browser asset by relative name and content."""
+    return _fingerprint_static_assets(_static_assets(directory))
+
+
+STATIC_ASSETS = _static_assets(STATIC_DIRECTORY)
+STATIC_ASSET_VERSION = _fingerprint_static_assets(STATIC_ASSETS)
+INDEX_HTML = (
+    (STATIC_DIRECTORY / "index.html")
+    .read_text(encoding="utf-8")
+    .replace("__STATIC_ASSET_VERSION__", STATIC_ASSET_VERSION)
+)
 
 
 def _configure_application_logging(
@@ -157,10 +191,18 @@ app = FastAPI(
 
 
 @app.middleware("http")
-async def private_api_cache_control(request: Request, call_next: Any) -> Response:
+async def response_cache_control(request: Request, call_next: Any) -> Response:
     response = await call_next(request)
     if request.url.path.startswith("/api/") and "cache-control" not in response.headers:
         response.headers["Cache-Control"] = "no-store"
+    elif request.url.path.startswith("/assets/"):
+        if (
+            response.status_code in (200, 304)
+            and request.query_params.get("v") == STATIC_ASSET_VERSION
+        ):
+            response.headers["Cache-Control"] = "public, max-age=31536000, immutable"
+        else:
+            response.headers["Cache-Control"] = "no-cache"
     return response
 
 
@@ -656,56 +698,25 @@ async def test_settings(target: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 
-class RevalidatedStatics(StaticFiles):
-    """Assets that must be revalidated rather than trusted to look fresh.
-
-    A wheel normalises every file timestamp to a fixed date so builds are
-    reproducible, which leaves the installed assets claiming to be years old.
-    Starlette sends that date as Last-Modified and no Cache-Control at all, and
-    a browser reading those two facts together is entitled to cache the file
-    heuristically for months. That is how a freshly deployed container can go
-    on serving the previous interface. Revalidation costs one conditional
-    request per asset, answered with a bodiless 304.
-    """
-
-    def file_response(self, *args: Any, **kwargs: Any) -> Response:
-        response = super().file_response(*args, **kwargs)
-        response.headers["Cache-Control"] = "no-cache"
-        return response
-
-
-def _asset_query() -> dict[str, str]:
-    """A content hash per asset, so changed bytes always mean a changed URL.
-
-    This is what rescues a browser that has already cached the old asset: the
-    stamped URL is a different cache key, so nothing has to expire first.
-    """
-    stamps: dict[str, str] = {}
-    for name in ("app.js", "styles.css", "favicon.svg"):
-        try:
-            digest = hashlib.sha256((STATIC_DIRECTORY / name).read_bytes()).hexdigest()
-        except OSError:  # pragma: no cover - a missing asset is its own error
-            digest = __version__
-        stamps[name] = digest[:12]
-    return stamps
-
-
-@lru_cache(maxsize=1)
-def _index_html() -> str:
-    html = (STATIC_DIRECTORY / "index.html").read_text(encoding="utf-8")
-    for name, stamp in _asset_query().items():
-        html = html.replace(f"/assets/{name}", f"/assets/{name}?v={stamp}")
-    return html
-
-
-app.mount("/assets", RevalidatedStatics(directory=STATIC_DIRECTORY), name="assets")
+@app.get("/assets/{asset_path:path}", include_in_schema=False)
+async def browser_asset(asset_path: str, request: Request) -> Response:
+    content = STATIC_ASSETS.get(asset_path)
+    if content is None:
+        raise HTTPException(status_code=404, detail="Asset not found")
+    etag = f'"{hashlib.sha256(content).hexdigest()}"'
+    requested_etags = request.headers.get("if-none-match", "").split(",")
+    headers = {"Cache-Control": "no-cache", "ETag": etag}
+    if any(tag.strip().removeprefix("W/") == etag for tag in requested_etags):
+        return Response(status_code=304, headers=headers)
+    media_type = mimetypes.guess_type(asset_path)[0] or "application/octet-stream"
+    return Response(content=content, media_type=media_type, headers=headers)
 
 
 @app.get("/{path:path}", include_in_schema=False)
 async def single_page_app(path: str) -> Response:
     if path.startswith("api/"):
         raise HTTPException(status_code=404, detail="API endpoint not found")
-    return HTMLResponse(_index_html(), headers={"Cache-Control": "no-cache"})
+    return HTMLResponse(INDEX_HTML, headers={"Cache-Control": "no-cache"})
 
 
 def run() -> None:
