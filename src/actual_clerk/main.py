@@ -425,8 +425,11 @@ async def get_job(job_id: str, request: Request) -> dict[str, Any]:
 @app.post("/api/jobs", status_code=status.HTTP_202_ACCEPTED)
 async def enqueue_job(payload: EnqueueRequest, request: Request) -> dict[str, Any]:
     params: dict[str, Any] | None = None
-    if payload.full and payload.kind == "categorize":
-        params = {"full": True}
+    if payload.kind == "categorize":
+        if payload.full:
+            params = {"full": True}
+        elif payload.reviews:
+            params = {"reviews": True}
     elif payload.force and payload.kind == "digest":
         params = {"force": True}
     job, created = await _jobs(request).enqueue(payload.kind, trigger="manual", params=params)

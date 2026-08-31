@@ -563,6 +563,31 @@ async def test_a_catch_up_run_reaches_the_whole_retained_history(database, setti
     ]
 
 
+async def test_a_review_retry_revisits_only_open_reviews_even_when_old(
+    database, settings_manager
+):
+    settings_manager.update(
+        {"actual_password": "x", "actual_budget_id": "b", "ai_enabled": False}
+    )
+    gateway = StubGateway(await old_and_new_snapshot())
+    manager = JobManager(database, settings_manager, gateway)
+    database.add_decision(
+        {
+            "transaction_id": "txn-ancient",
+            "merchant_key": "blue bottle coffee",
+            "status": "needs_review",
+            "source": "unresolved",
+        }
+    )
+
+    job = await run_job(manager, "categorize", params={"reviews": True})
+
+    assert job["result"]["review_retry"] is True
+    assert job["result"]["full_history"] is False
+    assert [update["transaction_id"] for update in gateway.updates] == ["txn-ancient"]
+    assert database.get_decision(database.list_decisions()[-1]["id"])["status"] == "superseded"
+
+
 # ---------------------------------------------------------------- monitoring
 
 

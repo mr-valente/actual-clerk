@@ -154,10 +154,18 @@ class OpenAICompatibleClient:
                 "json_schema": {"name": name, "strict": True, "schema": schema},
             },
         }
-        body = await self._post(payload, allow_format_fallback=True)
-        if self._finish_reason(body) in {"length", "max_tokens"}:
-            raise ModelError("Structured output reached the configured token limit")
-        return parse_structured(self._content(body))
+        content_attempt = 0
+        while True:
+            body = await self._post(payload, allow_format_fallback=True)
+            if self._finish_reason(body) in {"length", "max_tokens"}:
+                raise ModelError("Structured output reached the configured token limit")
+            try:
+                return parse_structured(self._content(body))
+            except ModelError as exc:
+                if not exc.retryable or content_attempt >= self.max_retries:
+                    raise
+                await asyncio.sleep(min(4, 0.5 * (2**content_attempt)))
+                content_attempt += 1
 
     async def test_connection(self) -> dict[str, Any]:
         body = await self._post(
@@ -186,6 +194,19 @@ def parse_structured(content: str) -> dict[str, Any]:
             raise ModelError(
                 f"Model did not return valid structured JSON: {exc}", retryable=True
             ) from exc
+    # Some local models wrap the requested object in a one-item array or
+    # JSON-encode it a second time even when the server accepted json_schema.
+    # Those wrappers are unambiguous to remove; larger arrays remain errors so
+    # Clerk never guesses which answer the model meant.
+    if isinstance(result, list) and len(result) == 1 and isinstance(result[0], dict):
+        result = result[0]
+    elif isinstance(result, str):
+        try:
+            nested = json.loads(result)
+        except json.JSONDecodeError:
+            nested = None
+        if isinstance(nested, dict):
+            result = nested
     if not isinstance(result, dict):
         raise ModelError("Structured model response must be a JSON object", retryable=True)
     return result

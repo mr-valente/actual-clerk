@@ -14,9 +14,18 @@ class EnqueueRequest(BaseModel):
     # Categorize only: reach back over the whole retained history instead of
     # the recent window, for the first run against an existing budget.
     full: bool = False
+    # Categorize only: reconsider exactly the transactions already waiting in
+    # Review. Ordinary scheduled runs leave these exceptions stable.
+    reviews: bool = False
     # Digest only: send it now to see what the morning looks like, without
     # spending the one delivery today's date is allowed.
     force: bool = False
+
+    @model_validator(mode="after")
+    def one_categorization_scope(self) -> EnqueueRequest:
+        if self.kind == "categorize" and self.full and self.reviews:
+            raise ValueError("choose either full history or the review queue, not both")
+        return self
 
 
 class SettingsPatch(BaseModel):
@@ -85,10 +94,16 @@ class CategoryChoice(StrictModel):
     reason: str = Field(default="", max_length=400)
     suggested_new_category: str = Field(default="", max_length=100)
 
+    @field_validator("reason", "suggested_new_category", mode="before")
+    @classmethod
+    def empty_optional_text(cls, value: Any) -> Any:
+        """Treat model JSON null like an omitted optional explanation."""
+        return "" if value is None else value
+
     @field_validator("reason", "suggested_new_category")
     @classmethod
     def collapse_whitespace(cls, value: str) -> str:
-        return " ".join(str(value).split())
+        return " ".join(value.split())
 
     @field_validator("confidence", mode="before")
     @classmethod
@@ -116,8 +131,11 @@ CATEGORY_CHOICE_SCHEMA: dict[str, Any] = {
         },
         "reason": {"type": "string", "description": "One short sentence explaining the choice."},
         "suggested_new_category": {
-            "type": "string",
-            "description": "Only when category_number is 0: a category name this budget lacks.",
+            "type": ["string", "null"],
+            "description": (
+                "Only when category_number is 0: a category name this budget lacks; "
+                "otherwise an empty string or null."
+            ),
         },
     },
     "required": ["category_number", "confidence", "reason", "suggested_new_category"],

@@ -160,7 +160,9 @@ def candidate_categories(
     candidates = [
         category
         for category in snapshot["categories"]
-        if not category["hidden"] and (include_income or not category["is_income"])
+        if str(category.get("name") or "").strip()
+        and not category["hidden"]
+        and (include_income or not category["is_income"])
     ]
     candidates.sort(key=lambda item: (-usage.get(item["id"], 0), item["name"].casefold()))
     return candidates[:limit]
@@ -172,6 +174,7 @@ def select_targets(
     today: datetime.date,
     lookback_days: int,
     exclude_transaction_ids: set[str] | None = None,
+    only_transaction_ids: set[str] | None = None,
 ) -> list[dict[str, Any]]:
     """Uncategorized on-budget spending recent enough to still matter."""
     exclude = exclude_transaction_ids or set()
@@ -180,7 +183,11 @@ def select_targets(
         item
         for item in snapshot["transactions"]
         if not item.get("category_id")
-        and item["date"] >= cutoff
+        and (
+            item["id"] in only_transaction_ids
+            if only_transaction_ids is not None
+            else item["date"] >= cutoff
+        )
         and not item.get("off_budget")
         and not item.get("is_transfer")
         and not item.get("is_starting_balance")
@@ -243,6 +250,7 @@ class Categorizer:
         lookback_days: int | None = None,
         stored_memory: Sequence[dict[str, Any]] = (),
         exclude_transaction_ids: set[str] | None = None,
+        only_transaction_ids: set[str] | None = None,
     ) -> CategorizationResult:
         result = CategorizationResult()
         settings = self.settings
@@ -254,6 +262,7 @@ class Categorizer:
                 settings.categorize_lookback_days if lookback_days is None else lookback_days
             ),
             exclude_transaction_ids=exclude_transaction_ids,
+            only_transaction_ids=only_transaction_ids,
         )
         if not targets:
             return result
@@ -342,6 +351,28 @@ class Categorizer:
                 },
             }
 
+        suggestion = (
+            memory.exact_suggestion(real_key, allowed_categories=candidate_ids or None)
+            if real_key
+            else None
+        )
+        if suggestion is not None:
+            return {
+                "source": SOURCE_MEMORY,
+                "category_id": suggestion.category_id,
+                "category_name": names.get(suggestion.category_id, suggestion.category_name),
+                "confidence": suggestion.confidence,
+                # One exact prior filing is useful enough to propose, but not
+                # enough to bypass the configured automatic-memory thresholds.
+                "automatic_eligible": False,
+                "rationale": {
+                    "memory": suggestion.as_dict(),
+                    "evidence": memory.evidence(real_key)[:5],
+                    "provisional": True,
+                    "reason": "One exact prior filing suggests this category; approval is required.",
+                },
+            }
+
         model = None if result.model_abandoned else self._ensure_model()
         if model is None or not candidates:
             return {
@@ -386,29 +417,26 @@ class Categorizer:
             currency=settings.budget_currency,
         )
         try:
+            # This counts classification requests, including requests whose
+            # response proves unusable. Transport retries remain an internal
+            # detail of the model client.
+            result.model_calls += 1
             raw = await model.structured(
                 name="category_choice",
                 schema=CATEGORY_CHOICE_SCHEMA,
                 system=SYSTEM_PROMPT,
                 user=prompt,
             )
-            result.model_calls += 1
-            self._model_failures = 0
             choice = CategoryChoice.model_validate(raw)
         except ModelError as exc:
             result.errors.append(f"{merchant['label']}: {exc}")
-            self._model_failures += 1
-            if self._model_failures >= MODEL_FAILURE_LIMIT:
-                result.model_abandoned = True
-                result.errors.append(
-                    "Gave up on the model for this run after "
-                    f"{self._model_failures} consecutive failures; "
-                    "the remaining merchants are queued for review."
-                )
+            self._record_model_failure(result)
             return self._unresolved(f"The model could not classify this merchant: {exc}")
         except ValueError as exc:
             result.errors.append(f"{merchant['label']}: invalid model output ({exc})")
+            self._record_model_failure(result)
             return self._unresolved(f"The model returned an unusable answer: {exc}")
+        self._model_failures = 0
 
         if choice.category_number <= 0 or choice.category_number > len(candidates):
             # A missing category is only worth raising when the user has said
@@ -462,6 +490,16 @@ class Categorizer:
             "rationale": {"reason": reason},
         }
 
+    def _record_model_failure(self, result: CategorizationResult) -> None:
+        self._model_failures += 1
+        if self._model_failures >= MODEL_FAILURE_LIMIT:
+            result.model_abandoned = True
+            result.errors.append(
+                "Gave up on the model for this run after "
+                f"{self._model_failures} consecutive failures; "
+                "the remaining merchants are queued for review."
+            )
+
     def _build_proposal(
         self,
         item: dict[str, Any],
@@ -478,8 +516,17 @@ class Categorizer:
             else settings.ai_min_confidence
         )
         confident = bool(category_id) and confidence >= threshold
+        # A model answer is a proposal, never permission to alter the budget.
+        # Only this person's established filing history can auto-apply. Once a
+        # model proposal is approved, that decision becomes memory for future
+        # transactions from the same merchant.
+        automatic_eligible = resolution.get(
+            "automatic_eligible", resolution["source"] == SOURCE_MEMORY
+        )
         status = (
-            STATUS_APPLIED if confident and settings.apply_mode == "automatic" else STATUS_REVIEW
+            STATUS_APPLIED
+            if confident and automatic_eligible and settings.apply_mode == "automatic"
+            else STATUS_REVIEW
         )
 
         tags: list[str] = []
@@ -519,6 +566,7 @@ class Categorizer:
                 **resolution.get("rationale", {}),
                 "threshold": threshold,
                 "apply_mode": settings.apply_mode,
+                "approval_required": status == STATUS_REVIEW,
             },
         )
 

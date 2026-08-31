@@ -240,6 +240,30 @@ class MerchantMemory:
             )
         ]
 
+    def exact_suggestion(
+        self, merchant_key: str, *, allowed_categories: set[str] | None = None
+    ) -> MemoryMatch | None:
+        """Return one consistent exact sighting as a review-only suggestion.
+
+        The ordinary lookup thresholds decide what may be automatic. This
+        weaker path exists only so one exact prior filing is not discarded and
+        replaced with a model guess. Conflicting history and related/prefix
+        merchants are deliberately ineligible.
+        """
+
+        bucket = self._buckets.get(merchant_key)
+        if bucket is None:
+            return None
+        match = self._resolve(
+            bucket,
+            merchant_key,
+            exact=True,
+            min_observations=1,
+            min_confidence=0,
+            allowed_categories=allowed_categories,
+        )
+        return match if match is not None and match.share == 1.0 else None
+
 
 def saturation(sightings: float) -> float:
     """How much a body of evidence deserves to be trusted on its size alone.

@@ -42,6 +42,32 @@ def test_one_sighting_is_not_enough_evidence():
     assert memory.lookup("shell", min_observations=2, min_confidence=0.75) is None
 
 
+def test_one_consistent_exact_sighting_can_be_suggested_but_not_matched():
+    memory = MerchantMemory().add_transactions(
+        history(("86st", "c-known", "Known category", datetime.date(2026, 8, 8))), TODAY
+    )
+
+    assert memory.lookup("86st", min_observations=2, min_confidence=0.75) is None
+    suggestion = memory.exact_suggestion("86st")
+    assert suggestion is not None
+    assert suggestion.category_id == "c-known"
+    assert suggestion.exact is True
+
+
+def test_a_conflict_or_related_key_is_not_an_exact_suggestion():
+    memory = MerchantMemory().add_transactions(
+        history(
+            ("target", "c-house", "Household", datetime.date(2026, 8, 3)),
+            ("target", "c-food", "Groceries", datetime.date(2026, 8, 4)),
+            ("starbucks", "c-coffee", "Coffee", datetime.date(2026, 8, 5)),
+        ),
+        TODAY,
+    )
+
+    assert memory.exact_suggestion("target") is None
+    assert memory.exact_suggestion("starbucks portland") is None
+
+
 def test_a_split_history_abstains_rather_than_guessing():
     memory = MerchantMemory().add_transactions(
         history(

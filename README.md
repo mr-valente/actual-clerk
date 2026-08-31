@@ -17,8 +17,8 @@ It supports OpenAI-compatible **local** endpoints only. There are no hosted AI p
 Clerk answers the cheapest reliable question first:
 
 1. **Memory.** Noisy descriptors are normalized to a stable merchant key — `SQ *BLUE BOTTLE 4471`, `TST* Blue Bottle Coffee`, and `BLUE BOTTLE COFFEE #4471 OAKLAND CA` are one merchant. If your own history has filed that merchant consistently, Clerk files it the same way. No model call.
-2. **The local model**, once per *merchant* rather than once per transaction, shown your existing categories as a numbered list and your own comparable filings as examples. A category tree is a personal document: Costco belongs under Groceries in one budget and Household in another, and only your history says which.
-3. **You**, for anything the first two cannot settle confidently. Clerk queues it with its best guess rather than guessing on your behalf.
+2. **The local model**, once per *merchant* rather than once per transaction, shown your existing categories as a numbered list and your own comparable filings as examples. Its answer is always a proposal for review, never permission to alter a first-time merchant quietly.
+3. **You**, for every first-time merchant and anything else Clerk cannot settle from reliable history. Clerk queues its best guess rather than guessing on your behalf.
 
 Once Clerk has filed the same merchant the same way a few times, it offers to write a **native Actual rule**. From then on Actual applies it during import and the answer costs nothing at all.
 
@@ -113,6 +113,13 @@ A new install only files the last 45 days. To work through everything already in
 
 Anything Clerk is not confident about lands in the review queue rather than in your budget.
 
+The two manual actions have separate scopes. **Retry review queue** asks Clerk to
+reconsider only the transactions already waiting, which is useful after changing
+the model, settings, or classification code. **Catch up older history** searches
+for other uncategorized transactions beyond the normal 45-day filing window.
+Scheduled filing deliberately leaves open reviews alone so an unresolved
+exception does not churn after every sync.
+
 ### 6. Turn on the morning report
 
 In **Settings → Notifications**, enable ntfy and pick a hard-to-guess topic on [ntfy.sh](https://ntfy.sh) (or point at your own server). Subscribe to the same topic on your phone. Then, under **Settings → Morning report**, set the delivery time and time zone.
@@ -143,10 +150,11 @@ Clerk is deliberately conservative:
 - **It never overwrites a category you set.** If you categorize something between Clerk proposing and Clerk writing, your choice wins and Clerk records that it stood down.
 - **It never creates a category on its own.** When a merchant fits nowhere, it says so and offers a suggestion you can accept in one click.
 - **It never writes a rule without asking.**
+- **It never auto-files a first-time merchant.** Model confidence is useful for ranking a proposal, not for granting permission to write it.
 - **It never touches a transaction it is unsure about.** Below the confidence threshold, the proposal goes to the review queue instead of into your budget.
 - **Everything it does is reversible from inside Actual**, because everything it touches carries the `#clerk` tag.
 
-Set **Settings → Filing → When Clerk is confident** to *Propose it for review* if you would rather approve everything for the first few weeks.
+Set **Settings → Filing → For merchants Clerk already knows** to *Propose every category for review* if you would rather approve established merchants too. First-time merchants always require approval.
 
 ---
 
@@ -184,7 +192,6 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_APPLY_MODE` | `automatic` | `automatic` or `review` |
 | `CLERK_MEMORY_MIN_CONFIDENCE` | `0.75` | Confidence needed from your own history |
 | `CLERK_MEMORY_MIN_OBSERVATIONS` | `2` | Sightings needed from your own history |
-| `CLERK_AI_MIN_CONFIDENCE` | `0.7` | Confidence needed from the model |
 | `CLERK_CATEGORIZE_LOOKBACK_DAYS` | `45` | How far back to file |
 | `CLERK_HISTORY_LOOKBACK_DAYS` | `730` | History read for memory and recurring detection |
 | `CLERK_AI_EXAMPLE_COUNT` | `8` | Your own transactions shown to the model |

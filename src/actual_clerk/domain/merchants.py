@@ -198,9 +198,15 @@ def _normalize_one(descriptor: str | None) -> str:
             break
 
     if not kept:
-        # Everything looked like decoration. Fall back to the alphabetic part
-        # so two charges from the same odd descriptor still group together.
-        kept = [token for token in tokens if token.isalpha()][:_MAX_TOKENS]
+        # Everything looked like decoration. Preserve otherwise opaque tokens
+        # that still contain a letter so identical descriptors such as `86st`
+        # can be matched exactly next time. Pure numbers remain anonymous, and
+        # keys_related will not broaden this into a fuzzy match.
+        kept = [
+            token
+            for token in tokens
+            if any(character.isalpha() for character in token)
+        ][:_MAX_TOKENS]
     return " ".join(kept)
 
 

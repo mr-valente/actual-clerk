@@ -42,15 +42,18 @@ Everything the gateway returns is a plain dictionary. Nothing outside `clients/a
 
 A failed bank sync does not abort a `sync` run: Clerk still has a budget to report on, and the health check is what explains the failure.
 
-Actual's server runs no scheduler of its own, so a bank sync only happens when a client asks for one. Clerk's `sync` job is that client, which is what keeps a headless Actual current without a browser open. A `categorize` job carrying `{"full": true}` reaches back over the whole retained history instead of the recent window, for the first run against an existing budget.
+Actual's server runs no scheduler of its own, so a bank sync only happens when a client asks for one. Clerk's `sync` job is that client, which is what keeps a headless Actual current without a browser open. A `categorize` job carrying `{"full": true}` reaches back over the whole retained history instead of the recent window, for the first run against an existing budget. A job carrying `{"reviews": true}` targets only the open review queue, including items older than the recent window; scheduled categorization excludes those stable exceptions.
 
 ## The filing cascade
 
-Clerk answers the cheapest reliable question first.
+Clerk answers the cheapest reliable question first. A single consistent exact
+prior filing is useful enough to propose without a model call, but it remains
+review-only until it satisfies the configured observation and confidence
+thresholds; related-key matching never uses this provisional path.
 
 1. **Memory.** Merchant descriptors are normalized to a stable key (`SQ *BLUE BOTTLE 4471`, `TST* Blue Bottle Coffee`, and `BLUE BOTTLE COFFEE #4471 OAKLAND CA` all become `blue bottle coffee`). Evidence is built from the user's own categorized history, recency-weighted with a nine-month half-life, plus Clerk's own applied decisions and any explicit corrections, which count triple. Confidence is the weighted share of the dominant category multiplied by a saturation curve over the raw sighting count — the two are tracked separately so old evidence loses influence without ceasing to be evidence.
-2. **Model.** A merchant with no usable history goes to the local model **once per merchant, not once per transaction**. The model receives the budget's existing categories as a numbered list and answers with a number, which removes every failure mode that comes from asking a small local model to reproduce a UUID. It also receives the user's own comparable filings, because a category tree is a personal document: `Costco` belongs under Groceries in one budget and Household in another.
-3. **Review.** Anything neither step settles above its confidence threshold is queued for a human rather than guessed at. The proposal is kept so the review screen can offer it in one click.
+2. **Model.** A merchant with no usable history goes to the local model **once per merchant, not once per transaction**. The model receives the budget's existing categories as a numbered list and answers with a number, which removes every failure mode that comes from asking a small local model to reproduce a UUID. It also receives the user's own comparable filings, because a category tree is a personal document: `Costco` belongs under Groceries in one budget and Household in another. Even a high-confidence answer remains a proposal: model confidence never authorizes a first-time merchant write.
+3. **Review.** Every model proposal and anything else not settled from reliable merchant history is queued for a human rather than guessed at. Approval records memory, allowing later transactions from that merchant to use the automatic memory path when its evidence meets the configured thresholds.
 
 Actual's rules are not re-implemented. Actual applies them during import, so a transaction that reaches Clerk uncategorized is one no rule claimed.
 
@@ -130,7 +133,7 @@ Overspending is measured against a committed category's accrued balance, not aga
 
 ## UI information architecture
 
-Four focused views: overview, review, connections, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Review groups transactions awaiting a decision by merchant, so one choice settles every transaction from that merchant, and lists rules worth promoting. Connections shows per-account health and the full transition history. Activity holds every run and every filing decision, including the ones withheld and why.
+Four focused views: overview, review, connections, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Review groups transactions awaiting a decision by merchant, so one choice settles every transaction from that merchant, and lists rules worth promoting. Connections shows per-account health and the full transition history. Activity separates filing decisions from the longer run history with explicit tabs and opens on decisions by default.
 
 The build-free web client serves its HTML with revalidation and references its
 JavaScript, CSS, and favicon with one SHA-256 fingerprint derived from every

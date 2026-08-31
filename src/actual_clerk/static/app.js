@@ -17,6 +17,7 @@ const state = {
   jobs: [],
   settings: null,
   health: null,
+  activityView: "decisions",
   jobFilter: "all",
   poll: null,
 };
@@ -273,7 +274,7 @@ function jobSummary(job) {
   const result = job.result || {};
   if (job.kind === "sync") return `${result.transactions ?? 0} transaction(s) read${result.imported ? `, ${result.imported} imported` : ""}`;
   if (job.kind === "categorize") {
-    const scope = result.full_history ? "full history · " : "";
+    const scope = result.review_retry ? "review retry · " : result.full_history ? "older history · " : "";
     const base = `${scope}${result.applied ?? 0} applied · ${result.needs_review ?? 0} to review · ${result.model_calls ?? 0} model call(s)`;
     return result.model_abandoned ? `${base} · model unreachable` : base;
   }
@@ -306,7 +307,7 @@ function updateChrome() {
   const pill = document.querySelector("#automation-pill");
   pill.classList.toggle("off", !state.data.sync_enabled);
   pill.querySelector("span").textContent = state.data.sync_enabled
-    ? (state.data.apply_mode === "automatic" ? "Filing automatically" : "Proposing for review")
+    ? (state.data.apply_mode === "automatic" ? "Auto-filing known merchants" : "Proposing everything for review")
     : "Automatic sync off";
   const badge = document.querySelector("#connection-badge");
   const connected = state.data.gateway?.connected;
@@ -467,7 +468,7 @@ async function renderReview() {
   const allIds = state.reviews.map((item) => item.id).join(",");
   const withSuggestion = groups.filter((group) => group.suggestion_id).length;
   content.innerHTML = `
-    <section class="page-intro"><div><h2>Review</h2><p>Clerk files what it is confident about and asks about the rest. These are grouped by merchant: one decision settles every transaction from that merchant, and teaches Clerk to handle it alone next time — no Actual rule required.</p></div><div class="actions"><button class="button ghost" data-action="catch-up">Catch up on all history</button><button class="button ghost" data-action="run-categorize">Re-run filing</button></div></section>
+    <section class="page-intro"><div><h2>Review</h2><p>Clerk can automatically follow reliable merchant history, but every first-time merchant requires your approval. Retry waiting items after changing the model or fixing classification; catch up older history only when you want to search beyond the normal recent window.</p></div><div class="actions"><button class="button ghost" data-action="catch-up">Catch up older history</button><button class="button primary" data-action="retry-reviews" ${state.reviews.length ? "" : "disabled"}>Retry review queue${state.reviews.length ? ` (${state.reviews.length})` : ""}</button></div></section>
     ${suggestions.length ? `<article class="panel">
       <header class="panel-head"><div><h2>Rules worth promoting</h2><p>Merchants Clerk has filed the same way repeatedly. A native Actual rule handles them at import, before Clerk or any model is involved.</p></div>${statusChip("suggested", `${suggestions.length} suggested`)}</header>
       <div class="status-list">${suggestions.map(ruleRow).join("")}</div>
@@ -480,7 +481,7 @@ async function renderReview() {
       ${groups.length ? `<div class="row-head review-row">
         <span>Merchant</span><span class="align-right">Total</span><span>Category</span><span>Confidence</span><span></span>
       </div>` : ""}
-      <div class="status-list">${groups.length ? groups.map(reviewGroupRow).join("") : emptyState("✓", "Nothing is waiting", "Every recent transaction has a category, or Clerk was confident enough to file it. New spending appears here when Clerk is unsure.")}</div>
+      <div class="status-list">${groups.length ? groups.map(reviewGroupRow).join("") : emptyState("✓", "Nothing is waiting", "Known merchants with reliable history can be filed automatically. Every first-time merchant appears here for approval.")}</div>
     </article>`;
 }
 
@@ -516,16 +517,24 @@ async function renderActivity() {
   ]);
   const filters = ["all", "sync", "categorize", "health", "digest"];
   const jobs = state.jobs.filter((job) => state.jobFilter === "all" || job.kind === state.jobFilter);
+  const decisionsActive = state.activityView === "decisions";
   content.innerHTML = `
     <section class="page-intro"><div><h2>Activity</h2><p>Every run Clerk has made and every filing decision it recorded, including the ones it withheld.</p></div><div class="actions"><button class="button ghost" data-action="run-health">Check connections</button><button class="button primary" data-action="sync-now">Sync now</button></div></section>
+    <div class="toolbar panel" style="margin-bottom:18px"><div class="filter-tabs">
+      <button class="${decisionsActive ? "active" : ""}" data-action="activity-view" data-view="decisions">Filing decisions (${state.decisions.length})</button>
+      <button class="${decisionsActive ? "" : "active"}" data-action="activity-view" data-view="runs">Runs (${state.jobs.length})</button>
+    </div></div>
+    ${decisionsActive ? `
     <article class="panel">
+      <header class="panel-head"><div><h2>Filing decisions</h2><p>What Clerk applied, proposed, or withheld—and why.</p></div><span class="muted" style="font-size:11px">${state.decisions.length} decision(s)</span></header>
+      <div class="toolbar"><input class="search-input" id="decision-search" type="search" placeholder="Filter by merchant or category" /></div>
+      <div class="status-list" id="decision-list">${state.decisions.length ? state.decisions.map(decisionRow).join("") : emptyState("✎", "No decisions yet", "Clerk records what it filed, what it withheld, and why, after the first categorization run.")}</div>
+    </article>` : `
+    <article class="panel">
+      <header class="panel-head"><div><h2>Runs</h2><p>Scheduled and manual jobs, newest first.</p></div></header>
       <div class="toolbar"><div class="filter-tabs">${filters.map((filter) => `<button class="${filter === state.jobFilter ? "active" : ""}" data-action="job-filter" data-filter="${filter}">${titleCase(filter)}</button>`).join("")}</div></div>
       <div class="status-list">${jobs.length ? jobs.map((job) => jobRow(job)).join("") : emptyState("↻", "No runs yet", "Clerk records every scheduled and manual run here.")}</div>
-    </article>
-    <article class="panel" style="margin-top:18px">
-      <div class="toolbar"><span class="muted" style="font-size:11px">${state.decisions.length} filing decision(s)</span><span class="spacer"></span><input class="search-input" id="decision-search" type="search" placeholder="Filter by merchant or category" /></div>
-      <div class="status-list" id="decision-list">${state.decisions.length ? state.decisions.map(decisionRow).join("") : emptyState("✎", "No decisions yet", "Clerk records what it filed, what it withheld, and why, after the first categorization run.")}</div>
-    </article>`;
+    </article>`}`;
 }
 
 // ------------------------------------------------------------------ drawers
@@ -554,20 +563,22 @@ async function showDecision(id) {
         <div class="detail-stat"><span>Outcome</span><strong>${escapeHtml(titleCase(item.status))}</strong></div>
         <div class="detail-stat"><span>Decided by</span><strong>${escapeHtml(titleCase(item.source))}</strong></div>
         <div class="detail-stat"><span>Confidence</span><strong>${percent(item.confidence)}</strong></div>
-        <div class="detail-stat"><span>Needed</span><strong>${percent(rationale.threshold || 0)}</strong></div>
+        ${rationale.approval_required
+          ? `<div class="detail-stat"><span>Approval required</span><strong>Yes</strong></div>`
+          : `<div class="detail-stat"><span>Needed</span><strong>${percent(rationale.threshold || 0)}</strong></div>`}
       </div></section>
       <section class="detail-section"><h3>Category</h3><div class="change-list">
         <div class="change"><i>${item.category_id ? "✓" : "?"}</i><div><strong>${escapeHtml(item.category_name || item.proposed_category || "No category proposed")}</strong><small>${escapeHtml(rationale.reason || (memory ? "Chosen from this budget's own filing history." : "No explanation was recorded."))}</small></div></div>
         ${(item.tags || []).map((tag) => `<div class="change"><i>#</i><div><strong>#${escapeHtml(tag)}</strong><small>Written into the transaction notes in Actual.</small></div></div>`).join("")}
       </div></section>
-      ${memory ? `<section class="detail-section"><h3>Memory evidence</h3><div class="change-list"><div class="change"><i>↺</i><div><strong>${memory.observations} prior sighting(s), ${percent(memory.share)} agreement</strong><small>Matched on “${escapeHtml(memory.matched_key)}”${memory.exact ? "" : " by merchant prefix"}. Confidence ${percent(memory.confidence)}.</small></div></div>${evidence.map((entry) => `<div class="change"><i>·</i><div><strong>${escapeHtml(entry.category_name || entry.category_id)}</strong><small>${percent(entry.share)} of this merchant's history · ${entry.sightings} sighting(s)</small></div></div>`).join("")}</div></section>` : ""}
-      ${(rationale.examples || []).length ? `<section class="detail-section"><h3>Examples given to the model</h3><p class="muted" style="font-size:10px">${escapeHtml(rationale.examples.filter(Boolean).join(", "))}</p></section>` : ""}
-      <section class="detail-section"><h3>Raw record</h3><pre class="code-block">${escapeHtml(JSON.stringify({ merchant_key: item.merchant_key, source: item.source, status: item.status, rationale }, null, 2))}</pre></section>
-      <div class="resolution-actions">
+      <div class="resolution-actions detail-section">
         ${actualUrl ? `<a class="button ghost" href="${escapeHtml(actualUrl)}" target="_blank" rel="noreferrer">Open Actual ↗</a>` : ""}
         ${item.merchant_key ? `<button class="button ghost" data-action="forget-merchant" data-key="${escapeHtml(item.merchant_key)}">Forget this merchant</button>` : ""}
         ${item.status === "needs_review" ? `<button class="button primary" data-action="review-accept" data-id="${escapeHtml(item.id)}">Apply proposal</button>` : ""}
       </div>
+      ${memory ? `<section class="detail-section"><h3>Memory evidence</h3><div class="change-list"><div class="change"><i>↺</i><div><strong>${memory.observations} prior sighting(s), ${percent(memory.share)} agreement</strong><small>Matched on “${escapeHtml(memory.matched_key)}”${memory.exact ? "" : " by merchant prefix"}. Confidence ${percent(memory.confidence)}.</small></div></div>${evidence.map((entry) => `<div class="change"><i>·</i><div><strong>${escapeHtml(entry.category_name || entry.category_id)}</strong><small>${percent(entry.share)} of this merchant's history · ${entry.sightings} sighting(s)</small></div></div>`).join("")}</div></section>` : ""}
+      ${(rationale.examples || []).length ? `<section class="detail-section"><h3>Examples given to the model</h3><p class="muted" style="font-size:10px">${escapeHtml(rationale.examples.filter(Boolean).join(", "))}</p></section>` : ""}
+      <section class="detail-section"><h3>Raw record</h3><pre class="code-block">${escapeHtml(JSON.stringify({ merchant_key: item.merchant_key, source: item.source, status: item.status, rationale }, null, 2))}</pre></section>
     </div>`);
   } catch (error) { toast("Could not load the decision", error.message, "error"); closeDrawer(); }
 }
@@ -738,10 +749,9 @@ async function renderSettings() {
           ${settingToggle("categorization_enabled", "File uncategorized transactions", "Runs after every sync. Transactions you have already categorized are never touched.", s.categorization_enabled)}
           ${settingToggle("ai_enabled", "Ask the local model about new merchants", "With this off, Clerk still files merchants it recognizes and queues the rest for review.", s.ai_enabled)}
           <div class="form-grid">
-            ${settingInput("apply_mode", "When Clerk is confident", s.apply_mode, { type: "select", full: true, choices: [["automatic", "Apply the category in Actual"], ["review", "Propose it for review instead"]] })}
+            ${settingInput("apply_mode", "For merchants Clerk already knows", s.apply_mode, { type: "select", full: true, choices: [["automatic", "Apply reliable history in Actual"], ["review", "Propose every category for review"]], note: "First-time merchants always require approval, regardless of this setting." })}
             ${settingInput("memory_min_confidence", "Confidence needed from memory", s.memory_min_confidence, { type: "number", min: 0, max: 1, step: 0.01, note: "Evidence from your own filing history." })}
             ${settingInput("memory_min_observations", "Sightings needed from memory", s.memory_min_observations, { type: "number", min: 1, max: 50 })}
-            ${settingInput("ai_min_confidence", "Confidence needed from the model", s.ai_min_confidence, { type: "number", min: 0, max: 1, step: 0.01 })}
             ${settingInput("categorize_lookback_days", "Only file transactions newer than (days)", s.categorize_lookback_days, { type: "number", min: 1, max: 730 })}
             ${settingInput("ai_example_count", "Examples shown to the model", s.ai_example_count, { type: "number", min: 0, max: 40, note: "Your own filed transactions, which is what makes the model match your habits." })}
             ${settingInput("category_candidate_limit", "Categories offered to the model", s.category_candidate_limit, { type: "number", min: 10, max: 400 })}
@@ -877,9 +887,12 @@ document.addEventListener("click", async (event) => {
     categoryDialog.showModal();
   }
   if (action === "sync-now") enqueue("sync", "Sync");
-  if (action === "run-categorize") enqueue("categorize", "Filing");
+  if (action === "retry-reviews") {
+    if (!window.confirm(`Ask Clerk to classify the ${state.reviews.length} waiting transaction(s) again?\n\nModel suggestions will stay in Review for approval. Only reliable history for an established merchant can apply automatically.`)) return;
+    enqueue("categorize", "Review retry", { reviews: true });
+  }
   if (action === "catch-up") {
-    if (!window.confirm("Go back over your whole retained history and categorize everything Clerk has not filed yet?\n\nThis asks the local model about each unfamiliar merchant once, so it can take a while on the first run.")) return;
+    if (!window.confirm("Find uncategorized transactions across the whole retained history, including items older than the normal filing window?\n\nThis is mainly a first-run or occasional catch-up. Existing Review items stay unchanged; use Retry review queue for those.")) return;
     enqueue("categorize", "History catch-up", { full: true });
   }
   if (action === "check-connections") enqueue("health", "Connection check");
@@ -896,6 +909,7 @@ document.addEventListener("click", async (event) => {
   if (action === "job-detail") showJob(target.dataset.id);
   if (action === "review-detail") showDecision(target.dataset.id);
   if (action === "account-detail") showAccount(target.dataset.id);
+  if (action === "activity-view") { state.activityView = target.dataset.view; renderActivity(); }
   if (action === "job-filter") { state.jobFilter = target.dataset.filter; renderActivity(); }
 
   if (action === "review-accept") {

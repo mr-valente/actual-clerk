@@ -66,6 +66,11 @@ def test_pure_noise_yields_no_key():
     assert normalize_merchant("   ") == ""
 
 
+def test_an_opaque_alphanumeric_name_still_matches_itself_exactly():
+    assert normalize_merchant("86st") == "86st"
+    assert normalize_merchant("86st") == normalize_merchant("86st")
+
+
 def test_first_usable_descriptor_wins():
     assert normalize_merchant(None, "", "SQ *BLUE BOTTLE 4471") == "blue bottle"
 

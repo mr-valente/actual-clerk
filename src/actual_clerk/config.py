@@ -49,8 +49,12 @@ class Settings(BaseModel):
     # has already failed, so these two thresholds are separate on purpose.
     memory_min_confidence: float = Field(default=0.75, ge=0.0, le=1.0)
     memory_min_observations: int = Field(default=2, ge=1, le=50)
+    # Retained for persisted/environment configuration compatibility. Model
+    # confidence is still displayed, but no value can bypass human approval.
     ai_min_confidence: float = Field(default=0.7, ge=0.0, le=1.0)
     ai_enabled: bool = True
+    # Automatic applies only established merchant memory. A first-time
+    # merchant that reaches the model always requires review.
     apply_mode: Literal["automatic", "review"] = "automatic"
     categorize_lookback_days: int = Field(default=45, ge=1, le=730)
     history_lookback_days: int = Field(default=730, ge=30, le=3650)

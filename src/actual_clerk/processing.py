@@ -285,8 +285,13 @@ class JobManager:
 
         # A first run against an existing budget has years of uncategorized
         # history to work through, which the recent-window default would skip.
-        full = bool((job.get("params") or {}).get("full"))
+        params = job.get("params") or {}
+        full = bool(params.get("full"))
+        retry_reviews = bool(params.get("reviews"))
         lookback = settings.history_lookback_days if full else settings.categorize_lookback_days
+        review_transaction_ids = (
+            self.database.open_review_transaction_ids() if retry_reviews else None
+        )
 
         stored = _stored_memory(self.database, snapshot)
         categorizer = Categorizer(settings)
@@ -297,14 +302,24 @@ class JobManager:
                 today=today,
                 lookback_days=lookback,
                 stored_memory=[row for rows in stored.values() for row in rows],
-                exclude_transaction_ids=self.database.open_review_transaction_ids(),
+                exclude_transaction_ids=(
+                    None
+                    if retry_reviews
+                    else self.database.open_review_transaction_ids()
+                ),
+                only_transaction_ids=review_transaction_ids,
             )
         finally:
             await categorizer.close()
 
         if not result.proposals:
             await self._refresh_overview(snapshot, settings, today)
-            return {"considered": 0, "lookback_days": lookback, "full_history": full}
+            return {
+                "considered": 0,
+                "lookback_days": lookback,
+                "full_history": full,
+                "review_retry": retry_reviews,
+            }
 
         self.database.update_job(
             job["id"], phase="writing", total=len(result.updates), current=0
@@ -347,6 +362,7 @@ class JobManager:
         summary["rule_suggestions"] = promotions
         summary["lookback_days"] = lookback
         summary["full_history"] = full
+        summary["review_retry"] = retry_reviews
         return summary
 
     def _suggest_rules(

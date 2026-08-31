@@ -5,6 +5,7 @@ import datetime
 import pytest
 
 from actual_clerk.categorize import (
+    MODEL_FAILURE_LIMIT,
     Categorizer,
     Proposal,
     candidate_categories,
@@ -90,6 +91,25 @@ def test_an_open_review_is_not_proposed_again(settings):
     assert select_targets(snap, today=TODAY, lookback_days=45, exclude_transaction_ids={"t-1"}) == []
 
 
+def test_a_review_retry_targets_only_the_requested_items_regardless_of_age(settings):
+    old = transaction(
+        TODAY - datetime.timedelta(days=400),
+        -100,
+        payee="Old Review",
+        transaction_id="t-old",
+    )
+    recent = transaction(TODAY, -100, payee="New Item", transaction_id="t-new")
+    snap = snapshot(transactions=[old, recent])
+
+    selected = select_targets(
+        snap,
+        today=TODAY,
+        lookback_days=45,
+        only_transaction_ids={"t-old"},
+    )
+    assert [item["id"] for item in selected] == ["t-old"]
+
+
 def test_candidates_are_ordered_by_how_much_the_budget_uses_them(settings):
     snap = snapshot(
         transactions=[
@@ -104,6 +124,11 @@ def test_candidates_are_ordered_by_how_much_the_budget_uses_them(settings):
 
 def test_hidden_categories_are_never_offered(settings):
     snap = snapshot(categories=[category("Old", "Bills", hidden=True), category("Dining")])
+    assert [item["name"] for item in candidate_categories(snap, limit=10)] == ["Dining"]
+
+
+def test_blank_categories_are_never_offered(settings):
+    snap = snapshot(categories=[category("   ", "Everyday"), category("Dining")])
     assert [item["name"] for item in candidate_categories(snap, limit=10)] == ["Dining"]
 
 
@@ -133,7 +158,32 @@ async def test_a_known_merchant_is_filed_from_memory_without_the_model(settings)
     assert {item.category_id for item in result.applied} == {"cat-coffee"}
 
 
-async def test_an_unknown_merchant_goes_to_the_model_once_per_merchant(settings):
+async def test_one_exact_prior_filing_is_proposed_without_asking_the_model(settings):
+    model = FakeModel()
+    prior = transaction(
+        TODAY - datetime.timedelta(days=21),
+        -1024,
+        payee="86st",
+        category_id="cat-dining",
+        category_name="Dining",
+    )
+    pending = transaction(TODAY, -1024, payee="86st")
+
+    result = await run(settings, snapshot(transactions=[prior, pending]), model=model)
+
+    assert model.calls == []
+    assert result.applied == []
+    assert len(result.review) == 1
+    proposal = result.review[0]
+    assert proposal.source == "memory"
+    assert proposal.category_id == "cat-dining"
+    assert proposal.rationale["provisional"] is True
+    assert proposal.rationale["approval_required"] is True
+
+
+async def test_an_unknown_merchant_is_proposed_once_per_merchant_and_never_auto_applied(
+    settings,
+):
     model = FakeModel([{"category_number": 1, "confidence": 0.9, "reason": "Coffee shop", "suggested_new_category": ""}])
     pending = [
         transaction(TODAY, -650, payee="Verve Coffee", description="SQ *VERVE COFFEE 12"),
@@ -144,8 +194,12 @@ async def test_an_unknown_merchant_goes_to_the_model_once_per_merchant(settings)
 
     assert len(model.calls) == 1
     assert result.merchants_seen == 1
-    assert len(result.applied) == 3
-    assert {item.source for item in result.applied} == {"model"}
+    assert result.applied == []
+    assert len(result.review) == 3
+    assert {item.source for item in result.review} == {"model"}
+    assert {item.category_id for item in result.review}
+    assert {item.rationale["approval_required"] for item in result.review} == {True}
+    assert result.updates == []
 
 
 async def test_the_model_sees_the_budgets_own_filing_habits(settings):
@@ -218,14 +272,70 @@ async def test_a_model_failure_degrades_to_review_rather_than_failing_the_run(se
 
     assert len(result.review) == 2
     assert result.review[0].source == "unresolved"
+    assert result.model_calls == 1
     assert result.errors and "connection refused" in result.errors[0]
+
+
+async def test_repeated_invalid_model_answers_abandon_the_model(settings):
+    model = FakeModel(
+        [
+            {
+                "category_number": 1,
+                "confidence": 0.9,
+                "reason": "ok",
+                "suggested_new_category": "",
+                "unexpected": True,
+            }
+        ]
+        * MODEL_FAILURE_LIMIT
+    )
+    pending = [
+        transaction(TODAY, -100 * index, payee=name)
+        for index, name in enumerate(DISTINCT_MERCHANTS, start=1)
+    ]
+    result = await run(settings, snapshot(transactions=pending), model=model)
+
+    assert result.model_calls == MODEL_FAILURE_LIMIT
+    assert result.model_abandoned is True
+    assert len(result.review) == len(DISTINCT_MERCHANTS)
 
 
 async def test_a_percentage_confidence_is_read_as_a_ratio(settings):
     """Small models answer 85 as often as 0.85."""
     model = FakeModel([{"category_number": 1, "confidence": 85, "reason": "ok", "suggested_new_category": ""}])
     result = await run(settings, snapshot(transactions=pending_coffee()), model=model)
-    assert result.applied and result.applied[0].confidence == pytest.approx(0.85)
+    assert result.review and result.review[0].confidence == pytest.approx(0.85)
+
+
+async def test_an_approved_merchant_can_use_memory_automatically_next_time(settings):
+    prior = transaction(
+        TODAY - datetime.timedelta(days=1),
+        -650,
+        payee="Verve Coffee",
+        category_id="cat-coffee",
+        category_name="Coffee",
+    )
+    pending = transaction(TODAY, -700, payee="Verve Coffee")
+    stored = [
+        {
+            "merchant_key": "verve coffee",
+            "category_id": "cat-coffee",
+            "category_name": "Coffee",
+            "hits": 1,
+            "corrections": 0,
+            "last_seen_date": TODAY - datetime.timedelta(days=1),
+        }
+    ]
+
+    result = await run(
+        settings,
+        snapshot(transactions=[prior, pending]),
+        model=FakeModel(),
+        stored_memory=stored,
+    )
+
+    assert result.applied and result.applied[0].source == "memory"
+    assert result.applied[0].rationale["approval_required"] is False
 
 
 async def test_clerks_own_stored_memory_counts_as_evidence(settings):
@@ -389,9 +499,10 @@ async def test_the_run_summary_reports_what_happened(settings):
     summary = result.summary()
 
     assert summary["considered"] == 3
-    assert summary["applied"] == 3
+    assert summary["applied"] == 2
+    assert summary["needs_review"] == 1
     assert summary["model_calls"] == 1
-    assert summary["by_source"] == {"memory": 2, "model": 1}
+    assert summary["by_source"] == {"memory": 2}
     assert summary["merchants"] == 2
 
 
@@ -457,4 +568,4 @@ async def test_an_intermittent_failure_does_not_abandon_the_model(settings):
 
     assert result.model_abandoned is False
     assert len(model.calls) == 6
-    assert len(result.applied) == 3
+    assert len(result.review) == 6

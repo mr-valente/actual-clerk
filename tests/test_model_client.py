@@ -43,11 +43,15 @@ def test_structured_output_survives_small_model_decoration():
     assert parse_structured('```json\n{"a": 2}\n```') == {"a": 2}
     assert parse_structured("<think>hmm</think> here: {\"a\": 3}") == {"a": 3}
     assert parse_structured('Sure! {"a": 4} hope that helps') == {"a": 4}
+    assert parse_structured('[{"a": 5}]') == {"a": 5}
+    assert parse_structured('"{\\"a\\": 6}"') == {"a": 6}
 
 
 def test_output_that_is_not_an_object_is_refused():
     with pytest.raises(ModelError):
         parse_structured("[1, 2, 3]")
+    with pytest.raises(ModelError):
+        parse_structured('[{"a": 1}, {"a": 2}]')
     with pytest.raises(ModelError):
         parse_structured("no json here at all")
     with pytest.raises(ModelError):
@@ -124,6 +128,40 @@ async def test_a_transient_failure_is_retried(settings):
     finally:
         await client.close()
     assert len(calls) == 3
+
+
+async def test_malformed_structured_content_is_retried(settings):
+    settings.model_max_retries = 1
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        content = "null" if len(calls) == 1 else json.dumps(ANSWER)
+        return httpx.Response(200, json=completion(content))
+
+    client = build(settings, handler)
+    try:
+        assert await ask(client) == ANSWER
+    finally:
+        await client.close()
+    assert len(calls) == 2
+
+
+async def test_malformed_structured_content_retries_are_bounded(settings):
+    settings.model_max_retries = 1
+    calls = []
+
+    def handler(request):
+        calls.append(1)
+        return httpx.Response(200, json=completion("null"))
+
+    client = build(settings, handler)
+    try:
+        with pytest.raises(ModelError, match="must be a JSON object"):
+            await ask(client)
+    finally:
+        await client.close()
+    assert len(calls) == 2
 
 
 async def test_retries_are_bounded(settings):
@@ -215,6 +253,8 @@ async def test_the_connection_test_reports_the_model_that_answered(settings):
 
 def test_the_choice_schema_rejects_shapes_that_would_mislead():
     assert CategoryChoice.model_validate(ANSWER).category_number == 2
+    assert CategoryChoice.model_validate({**ANSWER, "suggested_new_category": None}).suggested_new_category == ""
+    assert CategoryChoice.model_validate({**ANSWER, "reason": None}).reason == ""
     # Confidence expressed as a percentage is read as a ratio.
     assert CategoryChoice.model_validate({**ANSWER, "confidence": 85}).confidence == pytest.approx(0.85)
     assert CategoryChoice.model_validate({**ANSWER, "confidence": "nonsense"}).confidence == 0.0

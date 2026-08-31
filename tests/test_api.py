@@ -519,8 +519,26 @@ async def test_an_ordinary_filing_run_is_not_a_catch_up(client):
     assert response.json()["job"]["params"] == {}
 
 
+async def test_a_review_retry_is_marked_as_targeting_the_queue(client):
+    response = await client.post("/api/jobs", json={"kind": "categorize", "reviews": True})
+    assert response.status_code == 202
+    assert response.json()["job"]["params"] == {"reviews": True}
+
+
+async def test_a_categorize_job_cannot_mix_history_and_review_scopes(client):
+    response = await client.post(
+        "/api/jobs", json={"kind": "categorize", "full": True, "reviews": True}
+    )
+    assert response.status_code == 422
+
+
 async def test_the_full_flag_is_meaningless_for_other_job_kinds(client):
     response = await client.post("/api/jobs", json={"kind": "sync", "full": True})
+    assert response.json()["job"]["params"] == {}
+
+
+async def test_the_reviews_flag_is_meaningless_for_other_job_kinds(client):
+    response = await client.post("/api/jobs", json={"kind": "sync", "reviews": True})
     assert response.json()["job"]["params"] == {}
 
 
