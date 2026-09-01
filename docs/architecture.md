@@ -10,18 +10,19 @@ Clerk keeps the useful parts of both and inherits neither data model.
 
 ## Talking to Actual
 
-Actual has no REST API. Its official client downloads the budget file, works against a local SQLite copy, and syncs CRDT messages back to the server. Clerk uses [`actualpy`](https://github.com/bvanelli/actualpy), a Python implementation of that protocol, which keeps the whole application in one language and one process.
+Actual has no REST API. Its supported [`@actual-app/api`](https://actualbudget.org/docs/api/) client downloads the budget file, works against a local SQLite copy, and syncs CRDT messages back to the server. Clerk uses that official package directly in one long-lived Node worker. The Python application sends only high-level requests over a private, line-delimited JSON protocol; the worker's stdout is framed for replies and all library logging goes to stderr.
 
-That local file is not safe for concurrent writers, so **every read and every write goes through one gateway, on one thread, in order**:
+That local file is not safe for concurrent writers, so **every read and every write goes through one gateway and one worker, in order**. A process-lifetime file lock also prevents two Clerk replicas sharing `/app/data` from opening the API cache:
 
 ```text
 Browser UI
     |
 FastAPI JSON API ---- SQLite (jobs, decisions, memory, health, digests, settings)
     |
-Single durable worker
-    +---- ActualGateway  (one thread, one open budget session)
-    |         +---- actualpy -> Actual server -> budget file
+Single durable job worker
+    +---- ActualGateway  (async serializer and worker supervisor)
+    |         +---- @actual-app/api worker (one open budget session)
+    |                   +---- Actual server -> private budget cache
     +---- SimpleFIN client   (direct, read-only, balances and errors)
     +---- Model client       (OpenAI-compatible chat completions)
     +---- ntfy client        (morning digest and connection alerts)
@@ -29,13 +30,19 @@ Single durable worker
 
 There is no Redis and no external task service. SQLite runs in WAL mode with short transactions, a partial unique index for the active job of each kind, and leases so a crashed worker's job is reclaimed on restart.
 
-Everything the gateway returns is a plain dictionary. Nothing outside `clients/actual.py` touches a SQLAlchemy object, which is what lets the budget report, the health checks, and the categorizer be tested without a server.
+The API package and server version are exposed in gateway status and diagnostics. Connection-setting changes restart the worker into a cache keyed by server URL and sync ID. `ACTUAL_VERIFY_SSL=false` is scoped to the child process rather than weakening TLS for Clerk's other clients.
+
+Everything the gateway returns is a plain dictionary. Nothing outside
+`clients/actual.py` knows about Node or Actual's query objects, which is what
+lets the budget report, health checks, and categorizer be tested without a
+server. Transaction writes are prevalidated, grouped with
+`batchBudgetUpdates`, and explicitly synced before the worker reports success.
 
 ## Job kinds
 
 | Kind | Trigger | What it does |
 | --- | --- | --- |
-| `sync` | schedule, manual | Runs Actual's bank sync, re-reads the budget, rebuilds the overview, queues `categorize` |
+| `sync` | schedule, manual | Runs Actual's bank sync, re-reads the budget, rebuilds the overview, queues `categorize` and `health` |
 | `categorize` | after `sync`, manual | Runs the filing cascade and writes results back |
 | `health` | schedule, manual | Reads SimpleFIN directly, scores each account, alerts on transitions |
 | `digest` | daily at the configured local time | Builds and sends the morning report |
@@ -142,18 +149,16 @@ bundle new URLs; assets carrying the current fingerprint are immutable, while
 unversioned or incorrectly fingerprinted requests must revalidate. Private API
 responses retain their stricter `no-store` policy.
 
-## Reading Actual through its redirects
+## Reading Actual through its own semantics
 
 Actual does not rewrite transactions when a category is deleted into a
 replacement, or when two payees are merged. It records a redirect in
-`category_mapping` / `payee_mapping` and resolves it on every read -- its own
-`v_transactions` view and its query layer both join through those tables, and a
-freshly created row is mapped to itself. `actualpy` joins the id columns
-directly, so Clerk resolves those redirects itself when it builds a snapshot:
-transactions, payees, and budget rows all follow them, and a budget left behind
-by a merge is inherited only where the surviving category has no row of its own
-that month.
+`category_mapping` / `payee_mapping`. Clerk queries transactions through
+Actual's public AQL view, which resolves those mappings, filters tombstones, and
+handles split transactions using Actual's own executor. Budget history comes
+from `getBudgetMonth`, the same spreadsheet-backed calculation exposed by the
+official API, rather than from a second reconstruction of raw budget rows.
 
-One narrower case of the same family is still open, and
-[its bug report](bug-renamed-categories.md) is written as a brief for whoever
-picks it up.
+The former Python integration had to reproduce these rules and still diverged
+in edge cases. Its [category bug report](bug-renamed-categories.md) is retained
+as the historical reason this boundary now belongs to Actual itself.

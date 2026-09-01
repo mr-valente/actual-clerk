@@ -48,7 +48,7 @@ class FakeGateway:
             raise ActualGatewayError("An Actual server password is not configured")
         return self.snapshot_payload
 
-    async def run(self, fn, *, refresh: bool = True):
+    async def diagnostics(self):
         return self.probe_payload
 
     def status(self):
@@ -622,6 +622,14 @@ async def test_revalidating_an_unchanged_asset_costs_no_body(client):
     again = await client.get("/assets/app.js", headers={"If-None-Match": first.headers["etag"]})
     assert again.status_code == 304
     assert not again.content
+
+
+async def test_bank_recheck_syncs_while_global_connection_checks_remain_read_only(client):
+    source = (await client.get("/assets/app.js")).text
+    assert 'action === "sync-and-recheck"' in source
+    assert 'enqueue("sync", "Bank sync and connection check")' in source
+    assert 'action === "run-health" || action === "check-connections"' in source
+    assert 'enqueue("health", "Connection check")' in source
 
 
 @pytest.mark.parametrize("changed_name", ("app.js", "styles.css", "favicon.svg"))

@@ -1,0 +1,16 @@
+{
+  "name": "actual-clerk-actual-worker",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Official Actual Budget API worker for Actual Clerk",
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "test": "node --test tests/actual_worker.test.mjs"
+  },
+  "dependencies": {
+    "@actual-app/api": "26.9.0"
+  }
+}

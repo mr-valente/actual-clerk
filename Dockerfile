@@ -1,6 +1,11 @@
 # syntax=docker/dockerfile:1.7
 FROM ghcr.io/astral-sh/uv:0.12.3 AS uv
 
+FROM node:22-bookworm-slim AS node
+WORKDIR /node-app
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev
+
 FROM python:3.12-slim-bookworm AS runtime
 
 ARG ACTUAL_CLERK_VERSION=0.1.0
@@ -20,9 +25,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/app/.venv/bin:$PATH
 
 COPY --from=uv /uv /uvx /bin/
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
 WORKDIR /app
 
-COPY pyproject.toml uv.lock README.md LICENSE ./
+COPY --from=node /node-app/node_modules ./node_modules
+COPY pyproject.toml uv.lock package.json package-lock.json README.md LICENSE ./
 COPY src ./src
 RUN --mount=type=cache,target=/root/.cache/uv \
     uv sync --frozen --no-dev --no-editable \

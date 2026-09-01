@@ -274,6 +274,10 @@ class JobManager:
 
         if settings.categorization_enabled:
             self._enqueue_nowait("categorize", trigger="sync")
+        # A sync changes the evidence the connection check scores. Chaining
+        # them makes every manual "sync and recheck" do what it says, while
+        # the one-active-job guard coalesces this with a scheduled health run.
+        self._enqueue_nowait("health", trigger="sync")
         return result
 
     async def _run_categorize(self, job: dict[str, Any], settings: Settings) -> dict[str, Any]:

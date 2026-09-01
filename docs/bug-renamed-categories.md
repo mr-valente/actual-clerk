@@ -1,7 +1,15 @@
 # Bug report: renaming or reorganizing a category detaches its data from Clerk
 
-**Status:** partly fixed. One mechanism is understood and handled; a second,
-smaller one is reproducible but unexplained.
+**Status:** resolved by architecture replacement. As of the official API
+migration, Clerk no longer reads Actual's raw ORM relationships through
+`actualpy`. Transactions use Actual's AQL views, and budget months use Actual's
+official spreadsheet-backed API. Both paths therefore inherit Actual's own
+redirect and split semantics. The remainder of this document is preserved as a
+historical incident report for the integration that was removed.
+
+---
+
+## Historical report (obsolete implementation)
 
 **How to use this file.** It is written to be pasted to an LLM (or read by a
 person) as a self-contained brief. It assumes no knowledge of the conversation
@@ -11,7 +19,7 @@ where something is a guess, it says so.
 
 ---
 
-## The prompt
+### The prompt
 
 > Actual Clerk reads an Actual Budget file through `actualpy`. When a user
 > renames, merges, or otherwise reorganizes a category in Actual, spending and

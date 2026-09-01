@@ -123,9 +123,12 @@ async def test_a_sync_imports_reads_and_then_queues_filing(manager, settings_man
     assert job["result"]["imported"] == 2
     assert job["result"]["accounts"] == 1
     # The overview is rebuilt so the dashboard is current straight away.
-    assert manager.database.get_snapshot(OVERVIEW_SNAPSHOT)["budget"]["month"] == "2026-08"
+    current_month = datetime.datetime.now(datetime.UTC).strftime("%Y-%m")
+    assert manager.database.get_snapshot(OVERVIEW_SNAPSHOT)["budget"]["month"] == current_month
     # Filing follows automatically.
     assert manager.database.list_jobs(kind="categorize")
+    # Health is scored only after the native bank sync and fresh snapshot.
+    assert manager.database.list_jobs(kind="health")
 
 
 async def test_bank_sync_can_be_left_to_something_else(manager, settings_manager):
@@ -239,7 +242,12 @@ async def test_a_health_check_without_simplefin_still_scores_the_accounts(manage
 async def test_a_simplefin_outage_is_recorded_but_does_not_fail_the_check(
     manager, settings_manager, monkeypatch
 ):
-    settings_manager.update({"simplefin_access_url": "https://user:pass@bridge/simplefin"})
+    settings_manager.update(
+        {
+            "simplefin_access_url": "https://user:pass@bridge/simplefin",
+            "transaction_stale_days": 365,
+        }
+    )
 
     async def broken_fetch(self, **kwargs):
         raise SimpleFinError("bridge unreachable", retryable=True)
@@ -262,7 +270,12 @@ async def test_a_status_change_is_recorded_once(manager):
 async def test_the_health_job_confirms_a_balance_mismatch_over_three_runs(
     manager, settings_manager, monkeypatch
 ):
-    settings_manager.update({"simplefin_access_url": "https://user:pass@bridge/simplefin"})
+    settings_manager.update(
+        {
+            "simplefin_access_url": "https://user:pass@bridge/simplefin",
+            "transaction_stale_days": 365,
+        }
+    )
     remote_balance = {"cents": 250000}
 
     async def fetch(self, **kwargs):

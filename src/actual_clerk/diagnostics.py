@@ -17,11 +17,6 @@ import datetime
 import os
 from typing import Any
 
-from actual import Actual
-from actual.database import CategoryMapping, PayeeMapping, ReflectBudgets, ZeroBudgets
-from actual.queries import get_categories, get_preference
-from sqlmodel import select
-
 from actual_clerk import __version__
 from actual_clerk.config import Settings, tz_database_available
 from actual_clerk.domain.budget import build_budget_report, month_bounds
@@ -30,8 +25,7 @@ from actual_clerk.reporting import to_category_infos, to_transaction_infos
 
 WIDTH = 78
 # Tracking budgets keep their numbers in reflect_budgets; envelope budgets in
-# zero_budgets. actualpy picks between them from one preference, and silently
-# falls back to the envelope table when that preference is missing.
+# zero_budgets. The official API selects between them from this preference.
 TRACKING_VALUES = ("report", "tracking")
 
 
@@ -59,80 +53,6 @@ def money(cents: int | float | None, currency: str = "") -> str:
         return "        --"
     suffix = f" {currency}" if currency else ""
     return f"{cents / 100:>12,.2f}{suffix}"
-
-
-def probe_budget_file(actual: Actual) -> dict[str, Any]:
-    """Facts only a live Actual session can answer. Runs on the budget thread."""
-    session = actual.session
-    preference = get_preference(session, "budgetType")
-    value = preference.value if preference else None
-    tables: dict[str, dict[str, int]] = {}
-    for table, label in ((ZeroBudgets, "zero_budgets"), (ReflectBudgets, "reflect_budgets")):
-        rows = session.exec(select(table)).all()
-        tables[label] = {
-            "rows": len(rows),
-            "non_zero": sum(1 for row in rows if int(row.amount or 0) != 0),
-            "total_cents": sum(int(row.amount or 0) for row in rows),
-        }
-    # A category deleted in the Actual UI is tombstoned, not removed, and
-    # get_categories hides those rows by default. Transactions that referenced
-    # one keep pointing at it, so their spending arrives carrying a category id
-    # that nothing in the snapshot can resolve.
-    # Merging a category or payee leaves a redirect rather than rewriting the
-    # transactions, so the size of these tables says how much of the budget is
-    # only reachable through them.
-    category_redirects = {
-        row.id: row.transfer_id
-        for row in session.exec(select(CategoryMapping)).all()
-        if row.transfer_id and row.transfer_id != row.id
-    }
-    redirects = {
-        "categories": len(category_redirects),
-        "payees": sum(
-            1
-            for row in session.exec(select(PayeeMapping)).all()
-            if row.target_id and row.target_id != row.id
-        ),
-    }
-
-    live_ids = {category.id for category in get_categories(session)}
-    deleted: dict[str, str] = {}
-    for category in get_categories(session, include_deleted=True):
-        if category.id in live_ids:
-            continue
-        group = getattr(category, "group", None)
-        group_name = str(getattr(group, "name", "") or "")
-        deleted[category.id] = f"{group_name} / {category.name or ''}".strip(" /")
-
-    # Every row of the active budget table, exactly as stored. Derived totals
-    # cannot show which row is missing; the rows themselves can.
-    active = ReflectBudgets if value in TRACKING_VALUES else ZeroBudgets
-    budget_rows = [
-        {
-            "month": row.month,
-            "category_id": row.category_id or "",
-            "amount_cents": int(row.amount or 0),
-            "carryover": int(getattr(row, "carryover", 0) or 0),
-        }
-        for row in session.exec(select(active)).all()
-    ]
-
-    try:
-        metadata = actual.get_metadata()
-    except Exception:  # noqa: BLE001 - metadata is a nicety, never a blocker
-        metadata = {}
-    return {
-        "budget_rows": budget_rows,
-        "redirects": redirects,
-        "redirect_map": category_redirects,
-        "deleted_categories": deleted,
-        "budget_type_preference": value,
-        "reads_table": "reflect_budgets" if value in TRACKING_VALUES else "zero_budgets",
-        "is_tracking": value in TRACKING_VALUES,
-        "tables": tables,
-        "budget_name": metadata.get("budgetName") or "",
-        "budget_id": metadata.get("groupId") or metadata.get("id") or "",
-    }
 
 
 class _Report:
@@ -462,7 +382,9 @@ def build_report(
         r.row("Budget name", hide("Budget", probe.get("budget_name")))
         r.row("budgetType preference", repr(probe.get("budget_type_preference")))
         r.row("Budget style", "TRACKING" if probe.get("is_tracking") else "ENVELOPE")
-        r.row("actualpy reads table", probe.get("reads_table"))
+        r.row("Official API reads table", probe.get("reads_table"))
+        if probe.get("api_version"):
+            r.row("Actual API / server", f"{probe.get('api_version')} / {probe.get('server_version') or '(unknown)'}")
         merged = probe.get("redirects") or {}
         if merged:
             r.row(

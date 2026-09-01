@@ -605,7 +605,7 @@ function showAccount(accountId) {
       <div class="change"><i>${item.monitored === false ? "✗" : "✓"}</i><div><strong>${item.monitored === false ? "Monitoring is off" : "Monitoring is on"}</strong><small>${item.monitored === false ? `Clerk still reads this account but will not alert on it${item.underlying_status ? `. Unmonitored, it would currently read as ${escapeHtml(titleCase(item.underlying_status))}.` : "."}` : "Clerk scores this connection and alerts when its status changes."}</small></div></div>
       <div class="change"><i>◷</i><div><strong>Status since ${escapeHtml(fullTime(item.since))}</strong><small>Last checked ${relativeTime(item.checked_at)}.</small></div></div>
     </div></section>
-    <div class="resolution-actions"><button class="button primary" data-action="check-connections">Check again</button></div>
+    <div class="resolution-actions"><button class="button primary" data-action="sync-and-recheck">Sync bank and recheck</button></div>
   </div>`);
 }
 
@@ -887,6 +887,10 @@ document.addEventListener("click", async (event) => {
     categoryDialog.showModal();
   }
   if (action === "sync-now") enqueue("sync", "Sync");
+  if (action === "sync-and-recheck") {
+    closeDrawer();
+    enqueue("sync", "Bank sync and connection check");
+  }
   if (action === "retry-reviews") {
     if (!window.confirm(`Ask Clerk to classify the ${state.reviews.length} waiting transaction(s) again?\n\nModel suggestions will stay in Review for approval. Only reliable history for an established merchant can apply automatically.`)) return;
     enqueue("categorize", "Review retry", { reviews: true });
@@ -895,7 +899,6 @@ document.addEventListener("click", async (event) => {
     if (!window.confirm("Find uncategorized transactions across the whole retained history, including items older than the normal filing window?\n\nThis is mainly a first-run or occasional catch-up. Existing Review items stay unchanged; use Retry review queue for those.")) return;
     enqueue("categorize", "History catch-up", { full: true });
   }
-  if (action === "check-connections") enqueue("health", "Connection check");
   if (action === "send-digest") {
     event.preventDefault();
     // A rehearsal, not the real thing: it must not consume today's delivery.
@@ -905,7 +908,7 @@ document.addEventListener("click", async (event) => {
   if (action === "rerun-diagnostics") { event.preventDefault(); await runDiagnostics(Boolean(state.diagnosticsRedact)); }
   if (action === "copy-diagnostics") { event.preventDefault(); await copyDiagnostics(); }
   if (action === "toggle-diagnostics-redact") { event.preventDefault(); await runDiagnostics(!state.diagnosticsRedact); }
-  if (action === "run-health") enqueue("health", "Connection check");
+  if (action === "run-health" || action === "check-connections") enqueue("health", "Connection check");
   if (action === "job-detail") showJob(target.dataset.id);
   if (action === "review-detail") showDecision(target.dataset.id);
   if (action === "account-detail") showAccount(target.dataset.id);

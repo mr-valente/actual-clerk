@@ -22,7 +22,7 @@ from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleC
 from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
 from actual_clerk.config import TIMEZONE_CHOSEN_KEY, SettingsManager, data_directory
 from actual_clerk.db import Database
-from actual_clerk.diagnostics import build_report, probe_budget_file
+from actual_clerk.diagnostics import build_report
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
 from actual_clerk.schemas import (
     BulkResolveRequest,
@@ -308,7 +308,7 @@ async def diagnostics(request: Request, redact: bool = Query(False)) -> dict[str
     snapshot_error = ""
     try:
         snapshot = await gateway.snapshot(today=today)
-        probe = await gateway.run(probe_budget_file, refresh=False)
+        probe = await gateway.diagnostics()
     except ActualGatewayError as exc:
         snapshot_error = str(exc)
     except Exception as exc:  # noqa: BLE001 - a diagnostic must never fail to render

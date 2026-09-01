@@ -75,7 +75,7 @@ docker compose -f compose.example.yml up -d
 
 Open <http://localhost:8080>.
 
-Your budget **Sync ID** is in Actual under *Settings*, after clicking **Show advanced settings**. Actual shows two identifiers there — Clerk wants the **Sync ID**, the one used to reach the budget on the server, though the Budget ID or the budget's name work too.
+Your budget **Sync ID** is in Actual under *Settings*, after clicking **Show advanced settings**. Actual shows two identifiers there — Clerk requires the **Sync ID**, the one used to reach the budget on the server.
 
 Clerk reads whichever budgeting method you use. The setup works best on Actual's **Tracking Budget**, whose "Projected Savings" is the same arithmetic as Clerk's free money — see [Budget setup](docs/budget-setup.md).
 
@@ -105,7 +105,11 @@ Budget your recurring bills in Actual once, and leave everyday categories unbudg
 
 [Budget setup](docs/budget-setup.md) compares the two if you are unsure.
 
-Known issue: [renaming or merging a category](docs/bug-renamed-categories.md) can detach data from Clerk. The main mechanism is handled; a narrower one is still open, and that page is the brief for fixing it.
+Clerk reads categories, payees, splits, and budget months through Actual's
+official query and budget APIs. Merges and reorganizations therefore use the
+same redirect resolution as Actual itself; the former integration-specific
+[category issue](docs/bug-renamed-categories.md) is retained as historical
+context rather than an active limitation.
 
 ### 5. Catch up on your existing transactions
 
@@ -265,11 +269,16 @@ Actual does not sync with your bank on its own. Its server has no scheduler — 
 
 Clerk is that client. Every sync run calls Actual's own bank sync — the same operation the browser triggers — then re-reads the budget and files whatever arrived. With `CLERK_SYNC_ENABLED` on (the default) that happens every `CLERK_SYNC_INTERVAL_MINUTES`, hourly out of the box, whether or not any browser is open.
 
+The connection detail's **Sync bank and recheck** action runs that native bank
+sync first and then scores the refreshed balances. A plain connection check is
+still available on the Connections and Activity pages when no bank import is
+needed.
+
 Hourly is already generous: SimpleFIN itself refreshes each linked account roughly once a day, and the time of day varies per bank. Polling more often does not produce fresher data, it just asks the same question more times. If you want Actual left alone — because something else already drives bank sync — set `CLERK_BANK_SYNC_ENABLED=false` and Clerk will only read.
 
 ## Deployment notes
 
-- **Persistent storage:** `/app/data` holds Clerk's SQLite database and its cached copy of the budget. The cache makes restarts fast; the database holds jobs, decisions, learned merchants, health history, and settings. Nothing Actual already stores is duplicated.
+- **Persistent storage:** `/app/data` holds Clerk's SQLite database and the official API's private cached copy of the budget. The cache makes restarts fast; the database holds jobs, decisions, learned merchants, health history, and settings. Clerk takes an exclusive lock on that API cache so two replicas cannot write it concurrently.
 - **Health check:** the image reports healthy once `/api/health` answers.
 - **Network:** Clerk needs to reach your Actual server, your model server, and (optionally) SimpleFIN and ntfy. `host.docker.internal` is mapped for a model running on the host.
 - **Security:** Clerk has no authentication of its own. Put it behind whatever already protects your Actual instance, and do not expose it to the internet.
@@ -277,13 +286,19 @@ Hourly is already generous: SimpleFIN itself refreshes each linked account rough
 ## Development
 
 ```bash
-uv venv && uv pip install -e ".[dev]"
-uv run pytest
-uv run ruff check src tests
+uv sync --extra dev
+npm ci
+uv run --extra dev pytest
+uv run --extra dev ruff check src tests
+npm test
 uv run actual-clerk          # http://localhost:8080
 ```
 
-The test suite runs entirely without an Actual server, a SimpleFIN account, or a model: the gateway hands out plain dictionaries, and everything downstream is tested against those.
+Node 20 or newer is required for a source checkout; the container includes
+Node 22. `@actual-app/api` is pinned exactly and its npm lockfile is committed.
+The Python suite and worker contract suite run without an Actual server, a
+SimpleFIN account, or a model. A container build additionally verifies that the
+official API and its native SQLite dependency load in the shipped runtime.
 
 ## Licence
 
