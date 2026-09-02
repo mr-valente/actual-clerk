@@ -47,12 +47,14 @@ def raw_snapshot() -> dict:
     }
 
 
-def fake_worker(path: Path, *, fail_method: str = "") -> None:
+def fake_worker(path: Path, *, fail_method: str = "", oversized_snapshot: bool = False) -> None:
     path.write_text(
         "\n".join(
             [
                 "import json, sys",
                 f"SNAPSHOT = {raw_snapshot()!r}",
+                f"OVERSIZED_SNAPSHOT = {oversized_snapshot!r}",
+                "if OVERSIZED_SNAPSHOT: SNAPSHOT['transport_padding'] = 'x' * 100_000",
                 f"FAIL_METHOD = {fail_method!r}",
                 "PREFIX = '@@actual-clerk-rpc@@'",
                 "for line in sys.stdin:",
@@ -116,6 +118,25 @@ async def test_gateway_starts_one_worker_and_uses_framed_rpc(
     finally:
         await gateway.close()
     assert gateway.connected is False
+
+
+async def test_gateway_accepts_a_snapshot_larger_than_asyncios_default_line_limit(
+    tmp_path, settings_manager
+):
+    configured(settings_manager)
+    script = tmp_path / "worker.py"
+    fake_worker(script, oversized_snapshot=True)
+    gateway = ActualGateway(
+        settings_manager,
+        tmp_path,
+        node_executable=sys.executable,
+        worker_path=script,
+    )
+    try:
+        snapshot = await gateway.snapshot(today=datetime.date(2026, 9, 1))
+        assert len(snapshot["transport_padding"]) == 100_000
+    finally:
+        await gateway.close()
 
 
 async def test_structured_worker_errors_remain_retryable(tmp_path, settings_manager):

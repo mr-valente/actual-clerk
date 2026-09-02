@@ -38,6 +38,10 @@ CONNECTION_FIELDS = (
     "actual_verify_ssl",
 )
 RPC_PREFIX = "@@actual-clerk-rpc@@"
+# A snapshot is one framed JSON response and can easily exceed asyncio's
+# 64 KiB subprocess stream default. Keep a finite ceiling, but size it for a
+# large retained transaction history rather than a terminal-sized log line.
+RPC_STREAM_LIMIT_BYTES = 64 * 1024 * 1024
 
 
 class ActualGatewayError(RuntimeError):
@@ -234,6 +238,7 @@ class ActualGateway:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 env=environment,
+                limit=RPC_STREAM_LIMIT_BYTES,
             )
         except (FileNotFoundError, OSError) as exc:
             raise ActualGatewayError(
