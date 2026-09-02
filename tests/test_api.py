@@ -632,6 +632,31 @@ async def test_bank_recheck_syncs_while_global_connection_checks_remain_read_onl
     assert 'enqueue("health", "Connection check")' in source
 
 
+async def test_activity_defaults_to_one_live_combined_timeline(client):
+    source = (await client.get("/assets/app.js")).text
+    assert 'activityView: "all"' in source
+    assert 'data-view="all">All (' in source
+    assert 'data-view="decisions">Filing decisions (' in source
+    assert 'data-view="tasks">Tasks (' in source
+    assert 'type: "job"' in source
+    assert 'type: "decision"' in source
+    assert 'renderActivity({ poll: true, refreshDrawer: Boolean(state.openJobId) })' in source
+    assert 'state.route === "activity" ? 3000 : 8000' in source
+    assert "Runs (" not in source
+
+
+async def test_review_category_picker_is_grouped_and_filters_as_you_type(client):
+    source = (await client.get("/assets/app.js")).text
+    styles = (await client.get("/assets/styles.css")).text
+    assert 'placeholder="Search categories"' in source
+    assert 'class="category-picker-group"' in source
+    assert 'data-action="category-picker-select"' in source
+    assert "function filterCategoryPicker(picker)" in source
+    assert 'option.hidden = !option.dataset.search.includes(query)' in source
+    assert ".category-picker-options" in styles
+    assert ".category-picker-option.selected" in styles
+
+
 @pytest.mark.parametrize("changed_name", ("app.js", "styles.css", "favicon.svg"))
 def test_asset_version_changes_when_any_asset_changes(tmp_path: Path, changed_name: str):
     for name in ("app.js", "styles.css", "favicon.svg"):

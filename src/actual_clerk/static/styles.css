@@ -280,6 +280,30 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   letter-spacing: .02em; text-transform: none; }
 .cell-select { min-width: 0; }
 .cell-select .select-inline { width: 100%; }
+.review-panel { overflow: visible; }
+.review-panel .panel-head { border-radius: var(--radius) var(--radius) 0 0; }
+.category-picker { position: relative; min-width: 0; }
+.cell-select .category-picker { width: 100%; }
+.category-picker.open { z-index: 12; }
+.category-picker-trigger { width: 100%; min-height: 34px; padding: 7px 9px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--input); cursor: pointer; text-align: left; font-size: 10px; }
+.category-picker-trigger:hover { border-color: var(--ink-faint); }
+.category-picker-trigger:focus-visible, .category-picker.open .category-picker-trigger { border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(135,25,224,.12); outline: none; }
+.category-picker-trigger span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.category-picker-trigger > i { flex: none; color: var(--ink-faint); font-size: 13px; font-style: normal; }
+.category-picker-menu { position: absolute; top: calc(100% + 6px); left: 0; width: min(360px, calc(100vw - 42px)); max-height: 360px; padding: 8px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper-strong); box-shadow: var(--shadow-lg); overflow: hidden; }
+.category-picker-search-wrap { height: 36px; padding: 0 10px; display: flex; align-items: center; gap: 7px; border: 1px solid var(--line); border-radius: 8px; background: var(--input); }
+.category-picker-search-wrap:focus-within { border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(135,25,224,.12); }
+.category-picker-search-wrap > span { color: var(--ink-faint); font-size: 16px; }
+.category-picker-search { min-width: 0; width: 100%; border: 0; outline: 0; color: var(--ink); background: transparent; font-size: 11px; }
+.category-picker-options { max-height: 296px; margin-top: 7px; overflow-y: auto; overscroll-behavior: contain; }
+.category-picker-group > p { margin: 9px 8px 4px; color: var(--ink-faint); font-size: 8px; font-weight: 800; letter-spacing: .09em; text-transform: uppercase; }
+.category-picker-option { width: 100%; min-height: 33px; padding: 7px 9px; display: flex; align-items: center; gap: 9px; border: 0; border-radius: 7px; color: var(--ink-soft); background: transparent; cursor: pointer; text-align: left; font-size: 10px; }
+.category-picker-option:hover, .category-picker-option:focus-visible { color: var(--ink); background: var(--hover); outline: none; }
+.category-picker-option.selected { color: var(--accent); background: var(--accent-soft); font-weight: 750; }
+.category-picker-option span { min-width: 0; flex: 1; }
+.category-picker-option i { color: var(--accent); font-size: 8px; font-style: normal; text-transform: uppercase; }
+.category-picker-empty { margin: 18px 8px; color: var(--ink-faint); font-size: 10px; text-align: center; }
+.category-picker-menu [hidden] { display: none !important; }
 .cell-confidence { text-align: right; font-variant-numeric: tabular-nums; }
 .cell-confidence small { display: block; margin-top: 2px; color: var(--ink-faint); font-size: 9px; }
 .cell-status { display: flex; justify-content: flex-start; }
@@ -546,6 +570,12 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   .page-intro .actions { margin-left: 0; }
   .toolbar { overflow-x: auto; }
   .search-input { display: none; }
+  .review-panel .review-row { grid-template-columns: minmax(0, 1fr) auto !important; }
+  .review-panel .review-row > .cell-select, .review-panel .review-row > .row-actions { display: flex; grid-column: 1 / -1; }
+  .review-panel .review-row > .cell-select { margin-top: 5px; }
+  .review-panel .review-row > .row-actions { justify-content: flex-start; }
+  .category-picker-menu { position: fixed; inset: auto 15px 18px; width: auto; max-height: min(70vh, 520px); }
+  .category-picker-options { max-height: calc(min(70vh, 520px) - 62px); }
   .settings-layout { display: block; }
   .settings-nav { position: static; margin-bottom: 12px; display: flex; overflow-x: auto; }
   .settings-nav a { white-space: nowrap; }

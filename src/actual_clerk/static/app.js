@@ -17,8 +17,11 @@ const state = {
   jobs: [],
   settings: null,
   health: null,
-  activityView: "decisions",
+  activityView: "all",
+  activityFingerprint: "",
+  decisionSearch: "",
   jobFilter: "all",
+  openJobId: null,
   poll: null,
 };
 
@@ -429,9 +432,34 @@ function groupReviews(reviews) {
     || Math.abs(b.total_cents) - Math.abs(a.total_cents));
 }
 
-function categoryOptions(selectedId) {
-  return (overview().categories || []).map((category) =>
-    `<option value="${escapeHtml(category.id)}" ${category.id === selectedId ? "selected" : ""}>${escapeHtml(category.group_name ? `${category.group_name} · ${category.name}` : category.name)}</option>`).join("");
+function categoryPicker(group) {
+  const categories = overview().categories || [];
+  const selected = categories.find((category) => category.id === group.suggestion_id);
+  const suggestedId = selected?.id || "";
+  const grouped = new Map();
+  for (const category of categories) {
+    const name = category.group_name || "Other";
+    if (!grouped.has(name)) grouped.set(name, []);
+    grouped.get(name).push(category);
+  }
+  const options = [...grouped.entries()].map(([groupName, items]) => `
+    <section class="category-picker-group" data-category-group>
+      <p>${escapeHtml(groupName)}</p>
+      ${items.map((category) => `<button type="button" role="option" aria-selected="${category.id === suggestedId}" class="category-picker-option ${category.id === suggestedId ? "selected" : ""}" data-action="category-picker-select" data-category-id="${escapeHtml(category.id)}" data-category-name="${escapeHtml(category.name)}" data-group-name="${escapeHtml(groupName)}" data-search="${escapeHtml(`${groupName} ${category.name}`.toLocaleLowerCase())}"><span>${escapeHtml(category.name)}</span>${category.id === suggestedId ? "<i>Suggested</i>" : ""}</button>`).join("")}
+    </section>`).join("");
+  const label = selected
+    ? `${selected.group_name ? `${selected.group_name} · ` : ""}${selected.name}`
+    : "Choose a category…";
+  return `<div class="category-picker" data-role="review-category" data-id="${escapeHtml(group.key)}" data-value="${escapeHtml(suggestedId)}" data-suggestion-id="${escapeHtml(suggestedId)}">
+    <button type="button" class="category-picker-trigger" data-action="category-picker-toggle" aria-haspopup="listbox" aria-expanded="false">
+      <span data-role="category-picker-label">${escapeHtml(label)}</span><i aria-hidden="true">⌄</i>
+    </button>
+    <div class="category-picker-menu" data-role="category-picker-menu" hidden>
+      <div class="category-picker-search-wrap"><span aria-hidden="true">⌕</span><input class="category-picker-search" data-role="category-picker-search" type="search" placeholder="Search categories" autocomplete="off" aria-label="Search categories" /></div>
+      <div class="category-picker-options" role="listbox">${options}</div>
+      <p class="category-picker-empty" data-role="category-picker-empty" hidden>No matching categories</p>
+    </div>
+  </div>`;
 }
 
 function reviewGroupRow(group) {
@@ -439,24 +467,20 @@ function reviewGroupRow(group) {
   const dates = group.items.map((item) => item.transaction_date).sort();
   const span = dates.length > 1 ? `${shortDate(dates[0])} – ${shortDate(dates[dates.length - 1])}` : shortDate(dates[0]);
   const accounts = [...new Set(group.items.map((item) => item.account_name).filter(Boolean))];
+  const suggestedId = (overview().categories || []).some((category) => category.id === group.suggestion_id) ? group.suggestion_id : "";
   return `<article class="data-row review-row">
     <div class="row-title">
       <strong>${escapeHtml(group.label)}</strong>
       <small>${group.items.length} transaction${group.items.length === 1 ? "" : "s"} · ${span}${accounts.length ? ` · ${escapeHtml(accounts.slice(0, 2).join(", "))}` : ""}</small>
     </div>
     <div class="row-amount money">${money(group.total_cents)}</div>
-    <div class="cell-select">
-      <select class="select-inline" data-role="review-category" data-id="${escapeHtml(group.key)}">
-        <option value="">${escapeHtml(group.suggestion_name || "Choose a category…")}</option>
-        ${categoryOptions(group.suggestion_id)}
-      </select>
-    </div>
+    <div class="cell-select">${categoryPicker(group)}</div>
     <div class="cell-confidence"><span class="confidence ${group.confidence < 0.5 ? "low" : ""}">${percent(group.confidence)}</span><small>confidence</small></div>
     <div class="row-actions">
       ${!group.suggestion_id && group.proposed ? `<button class="button secondary small" data-action="create-category" data-name="${escapeHtml(group.proposed)}" title="The model found no existing category for this merchant">+ ${escapeHtml(group.proposed)}</button>` : ""}
       <button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(group.items[0].id)}">Why</button>
       <button class="button ghost small" data-action="review-dismiss-group" data-ids="${escapeHtml(ids)}">Skip</button>
-      <button class="button primary small" data-action="review-accept-group" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}">Apply${group.items.length > 1 ? ` ${group.items.length}` : ""}</button>
+      <button class="button primary small" data-action="review-accept-group" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}" data-suggestion-id="${escapeHtml(suggestedId)}" ${suggestedId ? "" : "disabled"}>Apply${group.items.length > 1 ? ` ${group.items.length}` : ""}</button>
     </div>
   </article>`;
 }
@@ -473,7 +497,7 @@ async function renderReview() {
       <header class="panel-head"><div><h2>Rules worth promoting</h2><p>Merchants Clerk has filed the same way repeatedly. A native Actual rule handles them at import, before Clerk or any model is involved.</p></div>${statusChip("suggested", `${suggestions.length} suggested`)}</header>
       <div class="status-list">${suggestions.map(ruleRow).join("")}</div>
     </article>` : ""}
-    <article class="panel" style="margin-top:18px">
+    <article class="panel review-panel" style="margin-top:18px">
       <header class="panel-head">
         <div><h2>Waiting on you</h2><p>${state.reviews.length} transaction${state.reviews.length === 1 ? "" : "s"} across ${groups.length} merchant${groups.length === 1 ? "" : "s"}${withSuggestion ? ` · ${withSuggestion} with a suggestion ready` : ""}</p></div>
         ${state.reviews.length ? `<div class="actions"><button class="button ghost small" data-action="review-dismiss-all" data-ids="${escapeHtml(allIds)}">Skip all ${state.reviews.length}</button></div>` : ""}
@@ -510,40 +534,83 @@ async function renderAccounts() {
     </article>`;
 }
 
-async function renderActivity() {
-  [state.jobs, state.decisions] = await Promise.all([
+function activityTimestamp(item) {
+  const value = new Date(item.created_at || 0).getTime();
+  return Number.isFinite(value) ? value : 0;
+}
+
+function filterDecisionRows() {
+  const query = state.decisionSearch.toLocaleLowerCase();
+  document.querySelectorAll("#decision-list .decision-row").forEach((row) => {
+    row.hidden = !row.textContent.toLocaleLowerCase().includes(query);
+  });
+}
+
+async function renderActivity({ poll = false, refreshDrawer = false } = {}) {
+  const [fetchedJobs, fetchedDecisions] = await Promise.all([
     api("/api/jobs?limit=100"),
     api("/api/decisions?limit=150"),
   ]);
+  if (state.route !== "activity") return;
+  const fingerprint = JSON.stringify([
+    fetchedJobs.map((job) => [job.id, job.status, job.phase, job.updated_at]),
+    fetchedDecisions.map((decision) => [decision.id, decision.status, decision.resolved_at]),
+  ]);
+  state.jobs = fetchedJobs;
+  state.decisions = fetchedDecisions;
+  if (poll && fingerprint === state.activityFingerprint) return;
+  state.activityFingerprint = fingerprint;
+
   const filters = ["all", "sync", "categorize", "health", "digest"];
-  const jobs = state.jobs.filter((job) => state.jobFilter === "all" || job.kind === state.jobFilter);
-  const decisionsActive = state.activityView === "decisions";
+  const filteredJobs = state.jobs.filter((job) => state.jobFilter === "all" || job.kind === state.jobFilter);
+  const combined = [
+    ...state.jobs.map((item) => ({ type: "job", item })),
+    ...state.decisions.map((item) => ({ type: "decision", item })),
+  ].sort((left, right) => activityTimestamp(right.item) - activityTimestamp(left.item));
+  const activeElement = document.activeElement;
+  const restoreSearchFocus = activeElement?.id === "decision-search";
   content.innerHTML = `
-    <section class="page-intro"><div><h2>Activity</h2><p>Every run Clerk has made and every filing decision it recorded, including the ones it withheld.</p></div><div class="actions"><button class="button ghost" data-action="run-health">Check connections</button><button class="button primary" data-action="sync-now">Sync now</button></div></section>
+    <section class="page-intro"><div><h2>Activity</h2><p>Every task Clerk has performed and every filing decision it recorded, including the ones it withheld.</p></div><div class="actions"><button class="button ghost" data-action="run-health">Check connections</button><button class="button primary" data-action="sync-now">Sync now</button></div></section>
     <div class="toolbar panel" style="margin-bottom:18px"><div class="filter-tabs">
-      <button class="${decisionsActive ? "active" : ""}" data-action="activity-view" data-view="decisions">Filing decisions (${state.decisions.length})</button>
-      <button class="${decisionsActive ? "" : "active"}" data-action="activity-view" data-view="runs">Runs (${state.jobs.length})</button>
+      <button class="${state.activityView === "all" ? "active" : ""}" data-action="activity-view" data-view="all">All (${combined.length})</button>
+      <button class="${state.activityView === "decisions" ? "active" : ""}" data-action="activity-view" data-view="decisions">Filing decisions (${state.decisions.length})</button>
+      <button class="${state.activityView === "tasks" ? "active" : ""}" data-action="activity-view" data-view="tasks">Tasks (${state.jobs.length})</button>
     </div></div>
-    ${decisionsActive ? `
+    ${state.activityView === "all" ? `
+    <article class="panel">
+      <header class="panel-head"><div><h2>All activity</h2><p>Filing decisions and Clerk tasks together, newest first.</p></div><span class="muted" style="font-size:11px">${combined.length} item(s)</span></header>
+      <div class="status-list">${combined.length ? combined.map(({ type, item }) => type === "job" ? jobRow(item) : decisionRow(item)).join("") : emptyState("↻", "No activity yet", "Clerk records tasks and filing decisions here as they happen.")}</div>
+    </article>` : state.activityView === "decisions" ? `
     <article class="panel">
       <header class="panel-head"><div><h2>Filing decisions</h2><p>What Clerk applied, proposed, or withheld—and why.</p></div><span class="muted" style="font-size:11px">${state.decisions.length} decision(s)</span></header>
-      <div class="toolbar"><input class="search-input" id="decision-search" type="search" placeholder="Filter by merchant or category" /></div>
+      <div class="toolbar"><input class="search-input" id="decision-search" type="search" value="${escapeHtml(state.decisionSearch)}" placeholder="Filter by merchant or category" /></div>
       <div class="status-list" id="decision-list">${state.decisions.length ? state.decisions.map(decisionRow).join("") : emptyState("✎", "No decisions yet", "Clerk records what it filed, what it withheld, and why, after the first categorization run.")}</div>
     </article>` : `
     <article class="panel">
-      <header class="panel-head"><div><h2>Runs</h2><p>Scheduled and manual jobs, newest first.</p></div></header>
+      <header class="panel-head"><div><h2>Tasks</h2><p>Scheduled and manual work Clerk performed, newest first.</p></div></header>
       <div class="toolbar"><div class="filter-tabs">${filters.map((filter) => `<button class="${filter === state.jobFilter ? "active" : ""}" data-action="job-filter" data-filter="${filter}">${titleCase(filter)}</button>`).join("")}</div></div>
-      <div class="status-list">${jobs.length ? jobs.map((job) => jobRow(job)).join("") : emptyState("↻", "No runs yet", "Clerk records every scheduled and manual run here.")}</div>
+      <div class="status-list">${filteredJobs.length ? filteredJobs.map((job) => jobRow(job)).join("") : emptyState("↻", "No tasks yet", "Clerk records every scheduled and manual task here.")}</div>
     </article>`}`;
+  if (state.activityView === "decisions" && state.decisionSearch) filterDecisionRows();
+  if (restoreSearchFocus) {
+    const search = document.querySelector("#decision-search");
+    search?.focus();
+    search?.setSelectionRange(search.value.length, search.value.length);
+  }
+  if (refreshDrawer && state.openJobId) await showJob(state.openJobId, { loading: false });
 }
 
 // ------------------------------------------------------------------ drawers
 
-function openDrawer(html) {
+function openDrawer(html, { jobId = null } = {}) {
+  state.openJobId = jobId;
   drawerContent.innerHTML = html;
   drawer.classList.add("open"); scrim.classList.add("visible"); drawer.setAttribute("aria-hidden", "false");
 }
-function closeDrawer() { drawer.classList.remove("open"); scrim.classList.remove("visible"); drawer.setAttribute("aria-hidden", "true"); }
+function closeDrawer() {
+  state.openJobId = null;
+  drawer.classList.remove("open"); scrim.classList.remove("visible"); drawer.setAttribute("aria-hidden", "true");
+}
 function drawerHeader(eyebrow, title) {
   return `<header class="drawer-head"><div><p class="eyebrow">${escapeHtml(eyebrow)}</p><h2>${escapeHtml(title)}</h2></div><button class="icon-button" data-action="close-drawer" aria-label="Close">×</button></header>`;
 }
@@ -609,10 +676,11 @@ function showAccount(accountId) {
   </div>`);
 }
 
-async function showJob(id) {
-  openDrawer(`${drawerHeader("Run detail", "Loading…")}<div class="drawer-body"><div class="skeleton"></div></div>`);
+async function showJob(id, { loading = true } = {}) {
+  if (loading) openDrawer(`${drawerHeader("Task detail", "Loading…")}<div class="drawer-body"><div class="skeleton"></div></div>`, { jobId: id });
   try {
     const job = await api(`/api/jobs/${id}`);
+    if (state.openJobId !== id) return;
     openDrawer(`${drawerHeader(titleCase(job.kind), jobSummary(job))}<div class="drawer-body">
       <section class="detail-section"><div class="detail-grid">
         <div class="detail-stat"><span>Status</span><strong>${escapeHtml(titleCase(job.status))}</strong></div>
@@ -625,9 +693,12 @@ async function showJob(id) {
       ${job.error_message ? `<section class="detail-section"><h3>Last error</h3><div class="resolution-box"><p class="danger-text">${escapeHtml(job.error_message)}</p></div></section>` : ""}
       <section class="detail-section"><h3>Result</h3><pre class="code-block">${escapeHtml(JSON.stringify(job.result || {}, null, 2))}</pre></section>
       <section class="detail-section"><h3>Timeline</h3><div class="event-list">${(job.events || []).length ? job.events.map((event) => `<div class="event ${escapeHtml(event.level)}"><strong>${escapeHtml(titleCase(event.event_type))}</strong><span>${fullTime(event.created_at)}</span><p>${escapeHtml(event.message)}</p></div>`).join("") : `<p class="muted">No events retained.</p>`}</div></section>
-      <div class="resolution-actions">${["failed", "cancelled"].includes(job.status) ? `<button class="button primary" data-action="retry-job" data-id="${escapeHtml(job.id)}">Retry run</button>` : ""}</div>
-    </div>`);
-  } catch (error) { toast("Could not load the run", error.message, "error"); closeDrawer(); }
+      <div class="resolution-actions">${["failed", "cancelled"].includes(job.status) ? `<button class="button primary" data-action="retry-job" data-id="${escapeHtml(job.id)}">Retry task</button>` : ""}</div>
+    </div>`, { jobId: id });
+  } catch (error) {
+    if (state.openJobId !== id) return;
+    toast("Could not load the task", error.message, "error"); closeDrawer();
+  }
 }
 
 // ------------------------------------------------------------- diagnostics
@@ -867,9 +938,33 @@ async function resolveReview(id, action, categoryId) {
   } catch (error) { toast("Could not apply", error.message, "error"); }
 }
 
+function closeCategoryPickers(except = null) {
+  document.querySelectorAll('.category-picker.open').forEach((picker) => {
+    if (picker === except) return;
+    picker.classList.remove("open");
+    picker.querySelector('[data-role="category-picker-menu"]').hidden = true;
+    picker.querySelector('[data-action="category-picker-toggle"]').setAttribute("aria-expanded", "false");
+  });
+}
+
+function filterCategoryPicker(picker) {
+  const query = picker.querySelector('[data-role="category-picker-search"]').value.trim().toLocaleLowerCase();
+  let visible = 0;
+  picker.querySelectorAll(".category-picker-option").forEach((option) => {
+    option.hidden = !option.dataset.search.includes(query);
+    if (!option.hidden) visible += 1;
+  });
+  picker.querySelectorAll("[data-category-group]").forEach((group) => {
+    group.hidden = !group.querySelector(".category-picker-option:not([hidden])");
+  });
+  picker.querySelector('[data-role="category-picker-empty"]').hidden = visible !== 0;
+}
+
 document.addEventListener("click", async (event) => {
   // A control that owns its own event lives inside a clickable row.
   if (event.target.closest("[data-stop]")) { event.stopPropagation(); return; }
+  const categoryPickerRoot = event.target.closest(".category-picker");
+  if (!categoryPickerRoot) closeCategoryPickers();
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
@@ -885,6 +980,34 @@ document.addEventListener("click", async (event) => {
     categoryForm.querySelector('[name="name"]').value = target.dataset.name || "";
     categoryForm.querySelector('[name="group_name"]').value = "";
     categoryDialog.showModal();
+  }
+  if (action === "category-picker-toggle") {
+    event.stopPropagation();
+    const picker = target.closest(".category-picker");
+    const opening = !picker.classList.contains("open");
+    closeCategoryPickers(picker);
+    picker.classList.toggle("open", opening);
+    picker.querySelector('[data-role="category-picker-menu"]').hidden = !opening;
+    target.setAttribute("aria-expanded", String(opening));
+    if (opening) {
+      const search = picker.querySelector('[data-role="category-picker-search"]');
+      search.value = "";
+      filterCategoryPicker(picker);
+      search.focus();
+    }
+  }
+  if (action === "category-picker-select") {
+    event.stopPropagation();
+    const picker = target.closest(".category-picker");
+    picker.dataset.value = target.dataset.categoryId;
+    picker.querySelector('[data-role="category-picker-label"]').textContent = `${target.dataset.groupName} · ${target.dataset.categoryName}`;
+    picker.querySelectorAll(".category-picker-option").forEach((option) => {
+      option.classList.toggle("selected", option === target);
+      option.setAttribute("aria-selected", String(option === target));
+    });
+    picker.closest(".review-row").querySelector('[data-action="review-accept-group"]').disabled = false;
+    closeCategoryPickers();
+    picker.querySelector('[data-action="category-picker-toggle"]').focus();
   }
   if (action === "sync-now") enqueue("sync", "Sync");
   if (action === "sync-and-recheck") {
@@ -924,9 +1047,10 @@ document.addEventListener("click", async (event) => {
   if (action === "review-dismiss") { event.stopPropagation(); await resolveReview(target.dataset.id, "dismiss"); }
   if (action === "review-accept-group") {
     event.stopPropagation();
-    const select = document.querySelector(`[data-role="review-category"][data-id="${CSS.escape(target.dataset.key)}"]`);
-    const chosen = select?.value || "";
-    await resolveReviewGroup(target.dataset.ids, chosen ? "recategorize" : "accept", chosen || undefined);
+    const picker = document.querySelector(`[data-role="review-category"][data-id="${CSS.escape(target.dataset.key)}"]`);
+    const chosen = picker?.dataset.value || "";
+    const corrected = chosen && chosen !== (target.dataset.suggestionId || "");
+    await resolveReviewGroup(target.dataset.ids, corrected ? "recategorize" : "accept", chosen || undefined);
   }
   if (action === "review-dismiss-group") {
     event.stopPropagation();
@@ -958,12 +1082,12 @@ document.addEventListener("click", async (event) => {
 
   if (action === "retry-job") {
     event.stopPropagation();
-    try { await api(`/api/jobs/${target.dataset.id}/retry`, { method: "POST" }); toast("Run queued"); closeDrawer(); await renderRoute({ quiet: true }); }
+    try { await api(`/api/jobs/${target.dataset.id}/retry`, { method: "POST" }); toast("Task queued"); closeDrawer(); await renderRoute({ quiet: true }); }
     catch (error) { toast("Retry failed", error.message, "error"); }
   }
   if (action === "cancel-job") {
     event.stopPropagation();
-    try { await api(`/api/jobs/${target.dataset.id}/cancel`, { method: "POST" }); toast("Run cancelled"); await renderRoute({ quiet: true }); }
+    try { await api(`/api/jobs/${target.dataset.id}/cancel`, { method: "POST" }); toast("Task cancelled"); await renderRoute({ quiet: true }); }
     catch (error) { toast("Cancel failed", error.message, "error"); }
   }
 
@@ -980,7 +1104,16 @@ document.addEventListener("click", async (event) => {
 });
 
 scrim.addEventListener("click", closeDrawer);
-document.addEventListener("keydown", (event) => { if (event.key === "Escape") closeDrawer(); });
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  const picker = document.querySelector(".category-picker.open");
+  if (picker) {
+    closeCategoryPickers();
+    picker.querySelector('[data-action="category-picker-toggle"]').focus();
+  } else {
+    closeDrawer();
+  }
+});
 document.querySelector("#mobile-menu").addEventListener("click", () => document.querySelector(".sidebar").classList.toggle("mobile-open"));
 document.querySelectorAll(".nav-list a").forEach((item) => item.addEventListener("click", () => document.querySelector(".sidebar").classList.remove("mobile-open")));
 
@@ -1038,7 +1171,7 @@ content.addEventListener("submit", async (event) => {
   button.disabled = true;
   try {
     const result = await api("/api/settings", { method: "PATCH", body: JSON.stringify({ values }) });
-    toast("Settings saved", result.restart_required.length ? `Restart required for: ${result.restart_required.join(", ")}` : "New runs will use these values.");
+    toast("Settings saved", result.restart_required.length ? `Restart required for: ${result.restart_required.join(", ")}` : "New tasks will use these values.");
     state.settings = result.settings;
     applyAppearance(result.settings);
     const scrollPosition = window.scrollY;
@@ -1075,8 +1208,12 @@ content.addEventListener("change", async (event) => {
 
 content.addEventListener("input", (event) => {
   if (event.target.id === "decision-search") {
-    const query = event.target.value.toLowerCase();
-    document.querySelectorAll("#decision-list .decision-row").forEach((row) => { row.hidden = !row.textContent.toLowerCase().includes(query); });
+    state.decisionSearch = event.target.value;
+    filterDecisionRows();
+  }
+  const picker = event.target.closest(".category-picker");
+  if (picker && event.target.matches('[data-role="category-picker-search"]')) {
+    filterCategoryPicker(picker);
   }
 });
 
@@ -1106,6 +1243,20 @@ async function navigateFromHash() {
 
 window.addEventListener("hashchange", navigateFromHash);
 
+async function pollVisibleRoute() {
+  try {
+    if (document.hidden || state.route === "settings" || document.querySelector(".category-picker.open")) return;
+    if (state.route === "activity") {
+      await renderActivity({ poll: true, refreshDrawer: Boolean(state.openJobId) });
+    } else if (!drawer.classList.contains("open")) {
+      await renderRoute({ quiet: true });
+    }
+  } catch { /* keep the last good screen */ }
+  finally {
+    state.poll = setTimeout(pollVisibleRoute, state.route === "activity" ? 3000 : 8000);
+  }
+}
+
 async function initialize() {
   try { state.settings = await api("/api/settings"); applyAppearance(state.settings); }
   catch { /* cached or system appearance remains active */ }
@@ -1114,10 +1265,7 @@ async function initialize() {
     document.querySelector("#app-version").textContent = `Actual Clerk ${state.health.version}`;
   } catch { /* the main route reports the error */ }
   await navigateFromHash();
-  state.poll = setInterval(async () => {
-    if (document.hidden || state.route === "settings" || drawer.classList.contains("open")) return;
-    try { await renderRoute({ quiet: true }); } catch { /* keep the last good screen */ }
-  }, 8000);
+  state.poll = setTimeout(pollVisibleRoute, state.route === "activity" ? 3000 : 8000);
 }
 
 initialize();
