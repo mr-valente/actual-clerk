@@ -69,6 +69,18 @@ def test_the_model_context_must_leave_room_for_input():
     assert Settings(model_context_tokens=8192, model_max_output_tokens=2048)
 
 
+def test_reasoning_effort_has_bounded_choices_and_an_environment_override(monkeypatch):
+    assert Settings().model_reasoning == ""
+    assert Settings(model_reasoning="high").model_reasoning == "high"
+    with pytest.raises(ValidationError):
+        Settings(model_reasoning="extreme")
+
+    monkeypatch.setenv("CLERK_MODEL_REASONING", "off")
+    settings = load_persisted_settings(json.dumps(Settings(model_reasoning="low").persisted_dict()))
+    assert settings.model_reasoning == "off"
+    assert "model_reasoning" in settings.public_dict()["environment_overrides"]
+
+
 def test_the_digest_time_and_zone_are_validated():
     assert Settings(digest_time="7:5").digest_time == "07:05"
     assert Settings(timezone="America/New_York").zone.key == "America/New_York"

@@ -40,6 +40,9 @@ class Settings(BaseModel):
     openai_base_url: str = "http://host.docker.internal:11434/v1"
     openai_api_key: SecretStr = SecretStr("")
     model: str = "qwen2.5:14b"
+    # Clerk asks the model bounded questions about records it supplies rather
+    # than open-ended problems. Empty leaves the server's own default in place.
+    model_reasoning: Literal["", "off", "low", "medium", "high"] = ""
     model_context_tokens: int = Field(default=16384, ge=2048, le=1_000_000)
     model_max_output_tokens: int = Field(default=2048, ge=256, le=131_072)
 
@@ -302,6 +305,7 @@ ENVIRONMENT_FIELDS = {
     "CLERK_OPENAI_BASE_URL": "openai_base_url",
     "CLERK_OPENAI_API_KEY": "openai_api_key",
     "CLERK_MODEL": "model",
+    "CLERK_MODEL_REASONING": "model_reasoning",
     "CLERK_MODEL_CONTEXT_TOKENS": "model_context_tokens",
     "CLERK_MODEL_MAX_OUTPUT_TOKENS": "model_max_output_tokens",
     "CLERK_CATEGORIZATION_ENABLED": "categorization_enabled",

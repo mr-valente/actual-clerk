@@ -92,6 +92,7 @@ In **Settings → Local model**, set the base URL of an OpenAI-compatible server
 ```
 CLERK_OPENAI_BASE_URL=http://host.docker.internal:11434/v1
 CLERK_MODEL=qwen2.5:14b
+# CLERK_MODEL_REASONING=medium
 ```
 
 A mid-sized instruct model is plenty: Clerk asks it to pick a number from a list, not to reason about your finances. Clerk works without a model too — it files what it recognizes and queues the rest.
@@ -184,6 +185,7 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_OPENAI_BASE_URL` | `http://host.docker.internal:11434/v1` | OpenAI-compatible endpoint |
 | `CLERK_OPENAI_API_KEY` | — | Only if your server requires one |
 | `CLERK_MODEL` | `qwen2.5:14b` | Model name |
+| `CLERK_MODEL_REASONING` | *(server default)* | Reasoning effort: `off`, `low`, `medium`, or `high`; unsupported hints are withdrawn automatically |
 | `CLERK_MODEL_CONTEXT_TOKENS` | `16384` | Context limit |
 | `CLERK_MODEL_MAX_OUTPUT_TOKENS` | `2048` | Output limit |
 

@@ -248,6 +248,48 @@ async def test_the_connection_test_reports_the_model_that_answered(settings):
     assert result == {"ok": True, "model": "test-model", "response": "OK"}
 
 
+async def test_reasoning_effort_is_sent_and_withdrawn_when_the_server_refuses_it(settings):
+    payloads = []
+
+    def handler(request):
+        payload = json.loads(request.content)
+        payloads.append(payload)
+        if "chat_template_kwargs" in payload:
+            return httpx.Response(400, text="unknown field chat_template_kwargs")
+        return httpx.Response(200, json=completion(json.dumps({"answer": "ready"})))
+
+    client = build(settings.model_copy(update={"model_reasoning": "off"}), handler)
+    try:
+        await ask(client)
+        await ask(client)
+    finally:
+        await client.close()
+
+    assert payloads[0]["chat_template_kwargs"] == {"enable_thinking": False}
+    assert "chat_template_kwargs" not in payloads[1]
+    assert payloads[1]["response_format"]["type"] == "json_schema"
+    assert "chat_template_kwargs" not in payloads[2]
+    assert len(payloads) == 3
+
+
+@pytest.mark.parametrize("effort", ["low", "medium", "high"])
+async def test_reasoning_levels_use_the_openai_request_field(settings, effort):
+    seen = {}
+    client = build(
+        settings.model_copy(update={"model_reasoning": effort}),
+        lambda request: (
+            seen.update(payload=json.loads(request.content))
+            or httpx.Response(200, json=completion(json.dumps({"answer": "ready"})))
+        ),
+    )
+    try:
+        await ask(client)
+    finally:
+        await client.close()
+
+    assert seen["payload"]["reasoning_effort"] == effort
+
+
 # ------------------------------------------------------------ output schema
 
 

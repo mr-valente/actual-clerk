@@ -28,6 +28,12 @@ Single durable job worker
     +---- ntfy client        (morning digest and connection alerts)
 ```
 
+The optional `model_reasoning` setting asks a hybrid local model to spend less
+effort on Clerk's bounded categorization questions. It is sent as
+`reasoning_effort`, or as the `enable_thinking` chat-template argument for
+`off`; if the server rejects the hint, Clerk withdraws it for that client and
+continues with the existing request contract.
+
 There is no Redis and no external task service. SQLite runs in WAL mode with short transactions, a partial unique index for the active job of each kind, and leases so a crashed worker's job is reclaimed on restart.
 
 The API package and server version are exposed in gateway status and diagnostics. Connection-setting changes restart the worker into a cache keyed by server URL and sync ID. `ACTUAL_VERIFY_SSL=false` is scoped to the child process rather than weakening TLS for Clerk's other clients.

@@ -812,6 +812,7 @@ async function renderSettings() {
           ${settingInput("openai_base_url", "Base URL", s.openai_base_url, { full: true, note: "Usually ends in /v1; Clerk appends /chat/completions." })}
           ${settingInput("openai_api_key", "API key", "", { type: "password", configured: s.openai_api_key_configured, full: true })}
           ${settingInput("model", "Model name", s.model, { full: true })}
+          ${settingInput("model_reasoning", "Reasoning effort", s.model_reasoning, { type: "select", full: true, choices: [["", "Server default"], ["off", "Off — answer without thinking"], ["low", "Low"], ["medium", "Medium"], ["high", "High"]], note: "Clerk asks bounded questions about records it supplies, so thinking costs output tokens and wall clock without adding much. Sent as reasoning_effort, or as a chat-template argument for Off; a server that does not recognise it is asked without it for the rest of the run." })}
           ${settingInput("model_context_tokens", "Context limit", s.model_context_tokens, { type: "number", min: 2048 })}
           ${settingInput("model_max_output_tokens", "Maximum output tokens", s.model_max_output_tokens, { type: "number", min: 256 })}
         </div></div></section>

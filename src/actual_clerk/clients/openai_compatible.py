@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from typing import Any
 
@@ -19,6 +20,9 @@ from actual_clerk.config import Settings
 
 _THINK_BLOCK = re.compile(r"<think>.*?</think>", re.DOTALL | re.IGNORECASE)
 _CODE_FENCE = re.compile(r"^```(?:json)?\s*|\s*```$", re.IGNORECASE)
+_REASONING_KEYS = ("reasoning_effort", "chat_template_kwargs")
+
+log = logging.getLogger(__name__)
 
 
 class ModelError(RuntimeError):
@@ -34,6 +38,8 @@ class OpenAICompatibleClient:
         self.api_key = settings.secret_value("openai_api_key")
         self.max_output_tokens = settings.model_max_output_tokens
         self.max_retries = settings.model_max_retries
+        self.reasoning = settings.model_reasoning
+        self._reasoning_refused = False
         headers = {"Content-Type": "application/json"}
         if self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
@@ -56,6 +62,7 @@ class OpenAICompatibleClient:
         last_error: Exception | None = None
         format_fallback_stage = 0
         attempt = 0
+        payload = {**payload, **self.reasoning_fields()}
         while attempt <= self.max_retries:
             try:
                 response = await self.client.post(self.completions_url, json=payload)
@@ -64,6 +71,22 @@ class OpenAICompatibleClient:
                     if not isinstance(body, dict):
                         raise ValueError("response body must be a JSON object")
                     return body
+                if response.status_code in {400, 404, 422} and any(
+                    key in payload for key in _REASONING_KEYS
+                ):
+                    # The reasoning hint is newer than the rest of the request;
+                    # withdraw it before structured output falls back, so an
+                    # older server does not make that useful fallback fail too.
+                    self._reasoning_refused = True
+                    log.warning(
+                        "Model server rejected the reasoning setting (%s); "
+                        "sending requests without it",
+                        response.status_code,
+                    )
+                    payload = {
+                        key: value for key, value in payload.items() if key not in _REASONING_KEYS
+                    }
+                    continue
                 # Many local servers accept only the looser `json_object` mode,
                 # and a few accept neither. Step down before giving up.
                 if (
@@ -106,6 +129,14 @@ class OpenAICompatibleClient:
                 await asyncio.sleep(min(4, 0.5 * (2**attempt)))
                 attempt += 1
         raise ModelError(f"Model request failed: {last_error}", retryable=True)
+
+    def reasoning_fields(self) -> dict[str, Any]:
+        """Return the server-specific request fields for the selected effort."""
+        if self._reasoning_refused or not self.reasoning:
+            return {}
+        if self.reasoning == "off":
+            return {"chat_template_kwargs": {"enable_thinking": False}}
+        return {"reasoning_effort": self.reasoning}
 
     @staticmethod
     def _content(body: dict[str, Any]) -> str:
