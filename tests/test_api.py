@@ -43,10 +43,18 @@ class FakeGateway:
             "budget_id": "budget-1",
         }
 
-    async def snapshot(self, *, today=None):
+    async def snapshot(self, *, today=None, transaction_ids=()):
         if self.snapshot_payload is None:
             raise ActualGatewayError("An Actual server password is not configured")
-        return self.snapshot_payload
+        requested = set(transaction_ids)
+        return {
+            **self.snapshot_payload,
+            "review_transactions": [
+                item
+                for item in self.snapshot_payload.get("transactions", [])
+                if item["id"] in requested
+            ],
+        }
 
     async def diagnostics(self):
         return self.probe_payload

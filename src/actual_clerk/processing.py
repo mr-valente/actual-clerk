@@ -50,6 +50,54 @@ DIGEST_WINDOW_HOURS = 6
 BALANCE_DRIFT_CONFIRMATION_CHECKS = 3
 
 
+def _reconcile_open_reviews(
+    database: Database,
+    snapshot: dict[str, Any],
+    transaction_ids: set[str],
+    *,
+    job_id: str,
+) -> dict[str, int]:
+    """Retire review rows that the current Actual state has made obsolete."""
+    if not transaction_ids:
+        return {}
+    current = {
+        item["id"]: item
+        for item in snapshot.get("review_transactions") or []
+        if item.get("id") in transaction_ids
+    }
+    resolutions: dict[str, str] = {}
+    for transaction_id in transaction_ids:
+        transaction = current.get(transaction_id)
+        if transaction is None:
+            resolutions[transaction_id] = "deleted"
+        elif transaction.get("is_transfer"):
+            resolutions[transaction_id] = "transfer"
+        elif transaction.get("category_id"):
+            resolutions[transaction_id] = "categorized"
+        elif transaction.get("off_budget"):
+            resolutions[transaction_id] = "off_budget"
+        elif transaction.get("is_starting_balance"):
+            resolutions[transaction_id] = "starting_balance"
+        elif transaction.get("closed_account"):
+            resolutions[transaction_id] = "closed_account"
+
+    resolved = database.resolve_open_reviews(resolutions)
+    if not resolved:
+        return {}
+    by_reason: dict[str, int] = {}
+    for item in resolved:
+        reason = item["reason"]
+        by_reason[reason] = by_reason.get(reason, 0) + 1
+    database.add_event(
+        job_id,
+        "info",
+        "reviews_reconciled",
+        f"Closed {len(resolved)} review(s) already resolved in Actual",
+        {"resolved": len(resolved), "by_reason": by_reason},
+    )
+    return by_reason
+
+
 def digest_is_due(
     local_now: datetime.datetime,
     scheduled: datetime.time,
@@ -267,10 +315,19 @@ class JobManager:
 
         self.database.update_job(job["id"], phase="reading")
         today = datetime.datetime.now(settings.zone).date()
-        snapshot = await self.gateway.snapshot(today=today)
+        open_review_ids = self.database.open_review_transaction_ids()
+        snapshot = await self.gateway.snapshot(
+            today=today, transaction_ids=open_review_ids
+        )
+        review_resolutions = _reconcile_open_reviews(
+            self.database, snapshot, open_review_ids, job_id=job["id"]
+        )
         await self._refresh_overview(snapshot, settings, today)
         result["accounts"] = len(snapshot["accounts"])
         result["transactions"] = len(snapshot["transactions"])
+        result["reviews_resolved"] = sum(review_resolutions.values())
+        if review_resolutions:
+            result["review_resolutions"] = review_resolutions
 
         if settings.categorization_enabled:
             self._enqueue_nowait("categorize", trigger="sync")
@@ -285,7 +342,13 @@ class JobManager:
             return {"skipped": "categorization is disabled"}
         today = datetime.datetime.now(settings.zone).date()
         self.database.update_job(job["id"], phase="reading")
-        snapshot = await self.gateway.snapshot(today=today)
+        open_review_ids = self.database.open_review_transaction_ids()
+        snapshot = await self.gateway.snapshot(
+            today=today, transaction_ids=open_review_ids
+        )
+        review_resolutions = _reconcile_open_reviews(
+            self.database, snapshot, open_review_ids, job_id=job["id"]
+        )
 
         # A first run against an existing budget has years of uncategorized
         # history to work through, which the recent-window default would skip.
@@ -323,6 +386,7 @@ class JobManager:
                 "lookback_days": lookback,
                 "full_history": full,
                 "review_retry": retry_reviews,
+                "reviews_resolved": sum(review_resolutions.values()),
             }
 
         self.database.update_job(
@@ -367,6 +431,7 @@ class JobManager:
         summary["lookback_days"] = lookback
         summary["full_history"] = full
         summary["review_retry"] = retry_reviews
+        summary["reviews_resolved"] = sum(review_resolutions.values())
         return summary
 
     def _suggest_rules(
@@ -615,12 +680,17 @@ def _describe(kind: str, result: dict[str, Any]) -> str:
         parts = [f"{result.get('transactions', 0)} transaction(s) read"]
         if result.get("imported"):
             parts.insert(0, f"{result['imported']} imported")
+        if result.get("reviews_resolved"):
+            parts.append(f"{result['reviews_resolved']} review(s) resolved")
         return ", ".join(parts)
     if kind == "categorize":
-        return (
+        description = (
             f"{result.get('applied', 0)} applied, {result.get('needs_review', 0)} for review, "
             f"{result.get('model_calls', 0)} model call(s)"
         )
+        if result.get("reviews_resolved"):
+            description += f", {result['reviews_resolved']} resolved in Actual"
+        return description
     if kind == "health":
         return f"{result.get('linked', 0)} linked account(s), {result.get('degraded', 0)} degraded"
     if kind == "digest":

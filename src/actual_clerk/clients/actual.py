@@ -86,19 +86,25 @@ def _normalize_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         accounts.append(account)
     snapshot["accounts"] = accounts
 
-    transactions = []
-    for raw in payload.get("transactions") or []:
-        transaction = dict(raw)
-        date = _parse_date(transaction.get("date"))
-        if date is None:
-            continue
-        transaction["date"] = date
-        payee = str(transaction.get("payee_name") or "")
-        description = str(transaction.get("imported_description") or "")
-        transaction["merchant_key"] = normalize_merchant(payee, description)
-        transaction["merchant_label"] = merchant_label(payee, description)
-        transactions.append(transaction)
-    snapshot["transactions"] = transactions
+    def normalize_transactions(rows: Any) -> list[dict[str, Any]]:
+        transactions = []
+        for raw in rows or []:
+            transaction = dict(raw)
+            date = _parse_date(transaction.get("date"))
+            if date is None:
+                continue
+            transaction["date"] = date
+            payee = str(transaction.get("payee_name") or "")
+            description = str(transaction.get("imported_description") or "")
+            transaction["merchant_key"] = normalize_merchant(payee, description)
+            transaction["merchant_label"] = merchant_label(payee, description)
+            transactions.append(transaction)
+        return transactions
+
+    snapshot["transactions"] = normalize_transactions(payload.get("transactions"))
+    snapshot["review_transactions"] = normalize_transactions(
+        payload.get("review_transactions")
+    )
 
     income_history = []
     for row in payload.get("income_history") or []:
@@ -380,12 +386,21 @@ class ActualGateway:
             await self._stop_worker(graceful=True)
             self._release_cache_lock()
 
-    async def snapshot(self, *, today: datetime.date | None = None) -> dict[str, Any]:
+    async def snapshot(
+        self,
+        *,
+        today: datetime.date | None = None,
+        transaction_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
         settings = self._settings_manager.get()
         day = today or datetime.datetime.now(settings.zone).date()
         payload = await self._call(
             "snapshot",
-            {"today": day.isoformat(), "historyLookbackDays": settings.history_lookback_days},
+            {
+                "today": day.isoformat(),
+                "historyLookbackDays": settings.history_lookback_days,
+                "transactionIds": sorted({str(item) for item in transaction_ids if item}),
+            },
         )
         return _normalize_snapshot(payload)
 

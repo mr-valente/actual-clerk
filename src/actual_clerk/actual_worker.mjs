@@ -117,6 +117,7 @@ export function assembleSnapshot({
   groups,
   categories,
   transactionRows,
+  reviewTransactionRows = [],
   balanceRows,
   clearedBalanceRows,
   transferRows,
@@ -144,7 +145,7 @@ export function assembleSnapshot({
     };
   });
 
-  const transactions = transactionRows.map(row => {
+  const mapTransaction = row => {
     const accountId = cleanString(row.account_id);
     const account = accountById.get(accountId) || {};
     return {
@@ -168,7 +169,9 @@ export function assembleSnapshot({
       imported_id: cleanString(row.imported_id),
       schedule_id: cleanString(row.schedule_id) || null,
     };
-  });
+  };
+  const transactions = transactionRows.map(mapTransaction);
+  const reviewTransactions = reviewTransactionRows.map(mapTransaction);
 
   const lastTransaction = new Map();
   for (const transaction of transactions) {
@@ -224,6 +227,7 @@ export function assembleSnapshot({
     budgeted: budgetedHistory[monthOf(today)] || {},
     budgeted_history: budgetedHistory,
     transactions,
+    review_transactions: reviewTransactions,
     income_history: [...income.entries()].sort().map(([month, cents]) => [`${month}-01`, cents]),
     tags: tags.map(tag => ({
       tag: cleanString(tag.tag),
@@ -351,6 +355,30 @@ export class ActualService {
       ]));
   }
 
+  async _reviewTransactionRows(transactionIds) {
+    const ids = [...new Set((transactionIds || []).map(cleanString).filter(Boolean))];
+    if (!ids.length) return [];
+    return this._query(this.api.q('transactions')
+      .filter({ id: { $oneof: ids } })
+      .select([
+        'id',
+        'date',
+        { amount_cents: 'amount' },
+        { category_id: 'category' },
+        { category_name: 'category.name' },
+        { payee_name: 'payee.name' },
+        { imported_description: 'imported_payee' },
+        'notes',
+        { account_id: 'account' },
+        'transfer_id',
+        'is_child',
+        'starting_balance_flag',
+        'cleared',
+        'imported_id',
+        { schedule_id: 'schedule' },
+      ]));
+  }
+
   async _budgetMonths(historyStart, today) {
     const available = await this.api.getBudgetMonths();
     const first = monthOf(historyStart);
@@ -372,6 +400,7 @@ export class ActualService {
     const groups = await this.api.getCategoryGroups();
     const categories = await this.api.getCategories();
     const transactionRows = await this._transactionRows(historyStart, today);
+    const reviewTransactionRows = await this._reviewTransactionRows(params.transactionIds);
     const accountMetadata = await this._accountMetadata();
     const balanceRows = await this._balanceRows(false);
     const clearedBalanceRows = await this._balanceRows(true);
@@ -386,6 +415,7 @@ export class ActualService {
       groups,
       categories,
       transactionRows,
+      reviewTransactionRows,
       balanceRows,
       clearedBalanceRows,
       transferRows,
@@ -543,7 +573,7 @@ export class ActualService {
     const id = await this.api.createRule({
       stage: 'default',
       conditionsOp: 'and',
-      conditions: [{ field: 'imported_payee', op: 'contains', value: params.matchValue }],
+      conditions: [{ field: 'payee', op: 'contains', value: params.matchValue }],
       actions: [{ op: 'set', field: 'category', value: params.categoryId }],
     });
     await this.api.sync();

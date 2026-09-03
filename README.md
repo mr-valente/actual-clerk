@@ -123,7 +123,11 @@ reconsider only the transactions already waiting, which is useful after changing
 the model, settings, or classification code. **Catch up older history** searches
 for other uncategorized transactions beyond the normal 45-day filing window.
 Scheduled filing deliberately leaves open reviews alone so an unresolved
-exception does not churn after every sync.
+exception does not churn after every sync. A sync still removes a waiting item
+when you have already resolved it in Actual by categorizing or deleting the
+transaction, converting it to a transfer, or otherwise making it ineligible
+for filing. Clerk retains that outcome in Activity without learning merchant
+memory from a choice made outside Clerk.
 
 ### 6. Turn on the morning report
 

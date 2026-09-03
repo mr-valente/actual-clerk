@@ -142,6 +142,27 @@ def test_open_reviews_are_reported_for_exclusion(database):
     assert database.open_review_transaction_ids() == {"txn-1"}
 
 
+def test_reviews_resolved_in_actual_are_closed_without_becoming_clerk_memory(database):
+    first = database.add_decision(decision(status="needs_review"))
+    second = database.add_decision(
+        decision(transaction_id="txn-2", status="needs_review", rationale={"reason": "model"})
+    )
+
+    resolved = database.resolve_open_reviews(
+        {"txn-1": "deleted", "txn-2": "transfer", "not-open": "categorized"}
+    )
+
+    assert {item["id"] for item in resolved} == {first, second}
+    assert database.open_review_transaction_ids() == set()
+    assert database.get_decision(first)["status"] == "resolved_external"
+    assert database.get_decision(first)["rationale"] == {
+        "reason": "history",
+        "external_resolution": "deleted",
+    }
+    assert database.get_decision(second)["rationale"]["external_resolution"] == "transfer"
+    assert database.memory_size() == 0
+
+
 def test_decisions_keep_their_tags_and_rationale(database):
     decision_id = database.add_decision(decision())
     stored = database.get_decision(decision_id)

@@ -149,6 +149,7 @@ def snapshot(
         "budgeted": budgeted or {},
         "budgeted_history": budgeted_history or {},
         "transactions": transactions,
+        "review_transactions": transactions,
         "income_history": income_history,
         "tags": tags or [],
         "collected_at": datetime.datetime(2026, 8, 21, 12, tzinfo=datetime.UTC),

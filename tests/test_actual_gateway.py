@@ -40,6 +40,14 @@ def raw_snapshot() -> dict:
             },
             {"id": "bad", "date": "not-a-date"},
         ],
+        "review_transactions": [
+            {
+                "id": "review-transfer",
+                "date": "2026-09-01",
+                "payee_name": "Transfer",
+                "transfer_id": "other-half",
+            }
+        ],
         "income_history": [["2026-08-01", 400000]],
         "tags": [],
         "collected_at": "2026-09-01T12:01:00Z",
@@ -94,8 +102,38 @@ def test_worker_snapshot_is_restored_to_clerks_python_contract():
     assert account["unconfirmed_transfers"][0]["date"] == datetime.date(2026, 8, 31)
     [transaction] = snapshot["transactions"]
     assert transaction["merchant_key"] == "blue bottle"
+    assert snapshot["review_transactions"][0]["id"] == "review-transfer"
+    assert snapshot["review_transactions"][0]["date"] == datetime.date(2026, 9, 1)
     assert snapshot["income_history"] == [(datetime.date(2026, 8, 1), 400000)]
     assert snapshot["history_start"] == datetime.date(2024, 9, 1)
+
+
+async def test_snapshot_requests_exact_review_transaction_ids(
+    tmp_path, settings_manager, monkeypatch
+):
+    configured(settings_manager)
+    gateway = ActualGateway(settings_manager, tmp_path)
+    requested = {}
+
+    async def call(method, params=None):
+        requested["method"] = method
+        requested["params"] = params
+        return raw_snapshot()
+
+    monkeypatch.setattr(gateway, "_call", call)
+    await gateway.snapshot(
+        today=datetime.date(2026, 9, 1),
+        transaction_ids=("txn-two", "txn-one", "txn-two"),
+    )
+
+    assert requested == {
+        "method": "snapshot",
+        "params": {
+            "today": "2026-09-01",
+            "historyLookbackDays": settings_manager.get().history_lookback_days,
+            "transactionIds": ["txn-one", "txn-two"],
+        },
+    }
 
 
 async def test_gateway_starts_one_worker_and_uses_framed_rpc(

@@ -241,12 +241,12 @@ def keys_related(left: str, right: str) -> bool:
 def rule_match_value(*descriptors: str | None) -> str:
     """The verbatim substring that a promoted Actual rule can match on.
 
-    Actual evaluates rules against the payee or imported description with a
-    `contains` operator, so the value has to appear verbatim in an original
+    Actual evaluates promoted rules against the payee with a `contains`
+    operator, so the value has to appear verbatim in the displayed merchant
     descriptor rather than in the normalized key. An empty result means no rule
     can be promoted for this merchant -- the alias table and the hyphen joining
-    both produce keys that were never written on the statement -- and the
-    learned memory keeps handling it instead.
+    both produce keys that were never written in the payee -- and the learned
+    memory keeps handling it instead.
 
     Very short matches are refused as well: a rule containing `UBER` would
     swallow every ride and every meal delivery alike.

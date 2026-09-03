@@ -55,7 +55,7 @@ server. Transaction writes are prevalidated, grouped with
 
 A failed bank sync does not abort a `sync` run: Clerk still has a budget to report on, and the health check is what explains the failure.
 
-Actual's server runs no scheduler of its own, so a bank sync only happens when a client asks for one. Clerk's `sync` job is that client, which is what keeps a headless Actual current without a browser open. A `categorize` job carrying `{"full": true}` reaches back over the whole retained history instead of the recent window, for the first run against an existing budget. A job carrying `{"reviews": true}` targets only the open review queue, including items older than the recent window; scheduled categorization excludes those stable exceptions.
+Actual's server runs no scheduler of its own, so a bank sync only happens when a client asks for one. Clerk's `sync` job is that client, which is what keeps a headless Actual current without a browser open. A `categorize` job carrying `{"full": true}` reaches back over the whole retained history instead of the recent window, for the first run against an existing budget. A job carrying `{"reviews": true}` targets only the open review queue, including items older than the recent window; scheduled categorization excludes those stable exceptions. Every sync does reconcile those exceptions against their exact current transaction IDs: a review already categorized, converted to a transfer, deleted, or otherwise made ineligible in Actual closes as `resolved_external` without teaching Clerk merchant memory from a decision it did not make.
 
 ## The filing cascade
 
@@ -74,7 +74,7 @@ Actual's rules are not re-implemented. Actual applies them during import, so a t
 
 The cascade runs in reverse too. When Clerk has filed the same merchant the same way `rule_promote_after` times, it offers to write a native Actual rule. Once that rule exists, Actual applies it on import and the answer costs nothing — no memory lookup, no model call, no Clerk involvement at all.
 
-Promotion requires a match value that appears **verbatim** on the statement. A key that only exists after normalization — an alias, a joined hyphen — is never promoted, because a rule that can never fire is worse than no rule. Very short matches are refused as well: a rule containing `UBER` would swallow rides and meal delivery alike.
+Promotion requires a match value that appears **verbatim** in the payee name. A key that only exists after normalization — an alias, a joined hyphen — is never promoted, because a rule that can never fire is worse than no rule. Very short matches are refused as well: a rule containing `UBER` would swallow rides and meal delivery alike.
 
 ## Tagging
 

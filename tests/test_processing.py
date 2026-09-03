@@ -27,6 +27,7 @@ class StubGateway:
         self.apply_error: Exception | None = None
         self.skipped: list[dict[str, str]] = []
         self.applied_ids: list[str] | None = None
+        self.snapshot_transaction_ids: list[set[str]] = []
 
     def settings_changed(self):
         pass
@@ -34,8 +35,15 @@ class StubGateway:
     def status(self):
         return {"connected": True, "last_error": "", "last_connected_at": None}
 
-    async def snapshot(self, *, today=None):
-        return self.snap
+    async def snapshot(self, *, today=None, transaction_ids=()):
+        requested = set(transaction_ids)
+        self.snapshot_transaction_ids.append(requested)
+        return {
+            **self.snap,
+            "review_transactions": [
+                item for item in self.snap["transactions"] if item["id"] in requested
+            ],
+        }
 
     async def bank_sync(self, *, run_rules=True):
         self.bank_sync_calls += 1
@@ -151,6 +159,90 @@ async def test_filing_is_not_queued_when_it_is_switched_off(manager, settings_ma
     settings_manager.update({"categorization_enabled": False})
     await run_job(manager, "sync")
     assert manager.database.list_jobs(kind="categorize") == []
+
+
+async def test_sync_retires_reviews_deleted_converted_or_categorized_in_actual(manager):
+    categorized = transaction(
+        TODAY,
+        -1200,
+        payee="Settled Shop",
+        transaction_id="txn-categorized",
+        category_id="cat-groceries",
+        category_name="Groceries",
+    )
+    transfer = transaction(
+        TODAY,
+        -50000,
+        payee="Transfer",
+        transaction_id="txn-transfer",
+        is_transfer=True,
+    )
+    manager.gateway.snap = budget_snapshot([categorized, transfer])
+    for transaction_id in ("txn-categorized", "txn-transfer", "txn-deleted", "txn-new"):
+        manager.database.add_decision(
+            {
+                "transaction_id": transaction_id,
+                "source": "model",
+                "status": "needs_review",
+                "rationale": {"reason": "awaiting approval"},
+            }
+        )
+
+    job = await run_job(manager, "sync")
+
+    assert job["result"]["reviews_resolved"] == 3
+    assert job["result"]["review_resolutions"] == {
+        "categorized": 1,
+        "transfer": 1,
+        "deleted": 1,
+    }
+    assert manager.database.open_review_transaction_ids() == {"txn-new"}
+    decisions = {
+        item["transaction_id"]: item for item in manager.database.list_decisions(limit=20)
+    }
+    assert decisions["txn-categorized"]["rationale"]["external_resolution"] == "categorized"
+    assert decisions["txn-transfer"]["rationale"]["external_resolution"] == "transfer"
+    assert decisions["txn-deleted"]["rationale"]["external_resolution"] == "deleted"
+    assert decisions["txn-new"]["status"] == "needs_review"
+    assert manager.gateway.snapshot_transaction_ids[0] == {
+        "txn-categorized",
+        "txn-transfer",
+        "txn-deleted",
+        "txn-new",
+    }
+    [event] = [item for item in job["events"] if item["event_type"] == "reviews_reconciled"]
+    assert event["data"]["resolved"] == 3
+
+
+async def test_review_retry_reconciles_a_transfer_without_reclassifying_it(
+    manager, settings_manager
+):
+    manager.gateway.snap = budget_snapshot(
+        [
+            transaction(
+                TODAY,
+                -50000,
+                payee="Transfer",
+                transaction_id="txn-transfer",
+                is_transfer=True,
+            )
+        ]
+    )
+    manager.database.add_decision(
+        {
+            "transaction_id": "txn-transfer",
+            "source": "model",
+            "status": "needs_review",
+        }
+    )
+
+    job = await run_job(manager, "categorize", params={"reviews": True})
+
+    assert job["result"]["review_retry"] is True
+    assert job["result"]["considered"] == 0
+    assert job["result"]["reviews_resolved"] == 1
+    assert manager.database.open_review_transaction_ids() == set()
+    assert manager.gateway.updates == []
 
 
 # ------------------------------------------------------------ categorize job

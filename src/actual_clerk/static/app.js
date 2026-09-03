@@ -252,7 +252,7 @@ function healthRow(item, { actions = true, toggle = false } = {}) {
 function ruleRow(item) {
   return `<article class="data-row rule-row">
     <span class="mark">⚡</span>
-    <div class="row-title"><strong>${escapeHtml(item.merchant_label || item.merchant_key)} → ${escapeHtml(item.category_name)}</strong><small>Matches imported descriptions containing “${escapeHtml(item.match_value)}” · ${item.observations} consistent decision(s)</small></div>
+    <div class="row-title"><strong>${escapeHtml(item.merchant_label || item.merchant_key)} → ${escapeHtml(item.category_name)}</strong><small>Matches payees containing “${escapeHtml(item.match_value)}” · ${item.observations} consistent decision(s)</small></div>
     <div class="row-meta">Created ${relativeTime(item.created_at)}</div>
     <div class="row-actions">
       <button class="button ghost small" data-action="rule-decline" data-id="${escapeHtml(item.id)}">No thanks</button>
@@ -275,10 +275,10 @@ function jobRow(job, { actions = true } = {}) {
 function jobSummary(job) {
   if (job.status === "failed" || job.status === "retry_wait") return job.error_message || "Failed";
   const result = job.result || {};
-  if (job.kind === "sync") return `${result.transactions ?? 0} transaction(s) read${result.imported ? `, ${result.imported} imported` : ""}`;
+  if (job.kind === "sync") return `${result.transactions ?? 0} transaction(s) read${result.imported ? `, ${result.imported} imported` : ""}${result.reviews_resolved ? ` · ${result.reviews_resolved} review(s) resolved` : ""}`;
   if (job.kind === "categorize") {
     const scope = result.review_retry ? "review retry · " : result.full_history ? "older history · " : "";
-    const base = `${scope}${result.applied ?? 0} applied · ${result.needs_review ?? 0} to review · ${result.model_calls ?? 0} model call(s)`;
+    const base = `${scope}${result.applied ?? 0} applied · ${result.needs_review ?? 0} to review · ${result.model_calls ?? 0} model call(s)${result.reviews_resolved ? ` · ${result.reviews_resolved} resolved in Actual` : ""}`;
     return result.model_abandoned ? `${base} · model unreachable` : base;
   }
   if (job.kind === "health") return `${result.linked ?? 0} linked · ${result.degraded ?? 0} degraded`;

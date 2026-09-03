@@ -52,6 +52,7 @@ test('the snapshot uses Actual-resolved category and payee mappings', () => {
     groups: [{ id: 'group', name: 'Bills', is_income: false, hidden: false }],
     categories: [{ id: 'cat-new', name: 'Rent', group_id: 'group', is_income: false, hidden: false }],
     transactionRows: [{ id: 'txn', date: '2026-08-31', amount_cents: -3500, category_id: 'cat-new', category_name: 'Rent', payee_name: 'Landlord', account_id: 'acct', cleared: false }],
+    reviewTransactionRows: [{ id: 'review-transfer', date: '2026-09-01', amount_cents: -50000, payee_name: 'Transfer', account_id: 'acct', transfer_id: 'other-half', cleared: true }],
     balanceRows: [{ account_id: 'acct', balance_cents: 6500 }],
     clearedBalanceRows: [{ account_id: 'acct', balance_cents: 10000 }],
     transferRows: [],
@@ -62,6 +63,8 @@ test('the snapshot uses Actual-resolved category and payee mappings', () => {
   assert.equal(snapshot.transactions[0].category_id, 'cat-new');
   assert.equal(snapshot.transactions[0].category_name, 'Rent');
   assert.equal(snapshot.transactions[0].payee_name, 'Landlord');
+  assert.equal(snapshot.review_transactions[0].id, 'review-transfer');
+  assert.equal(snapshot.review_transactions[0].is_transfer, true);
   assert.equal(snapshot.accounts[0].balance_cents, 6500);
   assert.equal(snapshot.accounts[0].cleared_balance_cents, 10000);
   assert.equal(snapshot.accounts[0].uncleared_balance_cents, -3500);
@@ -132,6 +135,35 @@ test('batched writes validate every category and preserve live notes', async () 
     ],
   });
   assert.equal(batches, 1);
+  assert.equal(syncs, 1);
+});
+
+test('promoted category rules match the Actual payee', async () => {
+  const rules = [];
+  let syncs = 0;
+  const api = {
+    getCategories: async () => [{ id: 'cat-coffee' }],
+    createRule: async rule => { rules.push(rule); return 'rule-1'; },
+    sync: async () => { syncs += 1; },
+  };
+  const service = new ActualService(api);
+  service.initialized = true;
+
+  assert.deepEqual(await service.createCategoryRule({
+    matchValue: 'Blue Bottle',
+    categoryId: 'cat-coffee',
+    runImmediately: false,
+  }), {
+    id: 'rule-1',
+    match_value: 'Blue Bottle',
+    category_id: 'cat-coffee',
+  });
+  assert.deepEqual(rules, [{
+    stage: 'default',
+    conditionsOp: 'and',
+    conditions: [{ field: 'payee', op: 'contains', value: 'Blue Bottle' }],
+    actions: [{ op: 'set', field: 'category', value: 'cat-coffee' }],
+  }]);
   assert.equal(syncs, 1);
 });
 

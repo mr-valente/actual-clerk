@@ -660,6 +660,46 @@ class Database:
             ).fetchall()
         return {row["transaction_id"] for row in rows}
 
+    def resolve_open_reviews(self, resolutions: dict[str, str]) -> list[dict[str, str]]:
+        """Close reviews whose transactions were settled directly in Actual.
+
+        The status and rationale preserve that Clerk did not apply or learn
+        from the decision. The status predicate also makes reconciliation safe
+        against a person resolving the same row in the UI at the same time.
+        """
+        if not resolutions:
+            return []
+        resolved: list[dict[str, str]] = []
+        now = time.time()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            rows = connection.execute(
+                "SELECT id,transaction_id,rationale_json FROM decisions "
+                "WHERE status='needs_review'"
+            ).fetchall()
+            for row in rows:
+                transaction_id = row["transaction_id"]
+                reason = resolutions.get(transaction_id)
+                if not reason:
+                    continue
+                rationale = json.loads(row["rationale_json"])
+                rationale["external_resolution"] = reason
+                cursor = connection.execute(
+                    "UPDATE decisions SET status='resolved_external',resolved_at=?,rationale_json=? "
+                    "WHERE id=? AND status='needs_review'",
+                    (now, _json(rationale), row["id"]),
+                )
+                if cursor.rowcount:
+                    resolved.append(
+                        {
+                            "id": row["id"],
+                            "transaction_id": transaction_id,
+                            "reason": reason,
+                        }
+                    )
+            connection.commit()
+        return resolved
+
     @staticmethod
     def _decision_row(row: sqlite3.Row) -> dict[str, Any]:
         item = dict(row)
