@@ -108,6 +108,9 @@ class Settings(BaseModel):
     digest_show_pace: bool = True
     digest_show_projection: bool = False
     digest_show_commitments: bool = True
+    # Account balances are more detailed than the default lock-screen report,
+    # so they are deliberately opt-in as one complete monitored-account list.
+    digest_show_balances: bool = False
     digest_show_connections: bool = True
     digest_show_attention: bool = True
 

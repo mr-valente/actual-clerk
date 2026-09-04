@@ -865,6 +865,7 @@ async function renderSettings() {
             ${settingCheck("digest_show_pace", "Pace for the month", "Whether you are ahead of or behind an even spend across the month.", s.digest_show_pace)}
             ${settingCheck("digest_show_projection", "Projected month end", "Where this month lands if the current pace holds.", s.digest_show_projection)}
             ${settingCheck("digest_show_commitments", "Committed overspend", "Named when a bill or subscription has gone past what you budgeted.", s.digest_show_commitments)}
+            ${settingCheck("digest_show_balances", "Account balances", "The current Actual balance for every bank-linked account with monitoring on. One switch controls the whole list.", s.digest_show_balances)}
             ${settingCheck("digest_show_connections", "Bank connections", "Lists connections needing attention. A broken connection still raises the alert priority either way.", s.digest_show_connections)}
             ${settingCheck("digest_show_attention", "Waiting for you", "Transactions to review and anything still uncategorized this month.", s.digest_show_attention)}
           </div>
@@ -1156,7 +1157,7 @@ content.addEventListener("submit", async (event) => {
   const locked = new Set(state.settings?.environment_overrides || []);
   const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;

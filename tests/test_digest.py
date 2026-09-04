@@ -35,7 +35,7 @@ def only(*names):
     """Every block off but the ones named, as the settings checkboxes do."""
     blocks = (
         "headline", "spending", "safe_to_spend", "pace",
-        "projection", "commitments", "connections", "attention",
+        "projection", "commitments", "balances", "connections", "attention",
     )
     return {name: name in names for name in blocks}
 
@@ -45,13 +45,14 @@ def test_a_good_month_leads_with_what_is_left():
     # The header is the report's name, never a figure: everything the morning
     # holds is in the body, so the notification is recognisable at a glance.
     assert payload["title"] == "The Morning Report"
-    assert payload["message"].splitlines()[0] == "Friday 21 August"
+    assert payload["message"].splitlines()[0] == "Friday, 21 August"
     assert "$1,905.00 free money left" in payload["message"]
     assert "92%" in payload["message"]
     assert "$173.18 a day" in payload["message"]
     assert "under an even pace for the month" in payload["message"]
     assert payload["priority"] == 3
     assert payload["local_date"] == "2026-08-21"
+    assert payload["markdown"] is True
 
 
 def test_the_header_is_whatever_it_was_named():
@@ -149,7 +150,7 @@ def test_every_block_can_be_switched_off():
         sections=only(),
     )
     # The date stays: a report with no date is not a report.
-    assert payload["message"] == "Friday 21 August"
+    assert payload["message"] == "Friday, 21 August"
 
 
 def test_a_block_left_out_of_the_settings_defaults_to_shown():
@@ -168,6 +169,38 @@ def test_the_projection_is_off_until_it_is_asked_for():
         sections=only("projection"),
     )["message"]
     assert "On this pace the month ends with $962.00" in body
+
+
+def test_account_balances_are_one_opt_in_list_of_monitored_linked_accounts():
+    assert Settings().digest_sections["balances"] is False
+    accounts = [
+        {
+            "name": "Checking",
+            "balance_cents": 250000,
+            "sync_source": "simpleFin",
+            "monitored": True,
+        },
+        {
+            "name": "Old Savings",
+            "balance_cents": 80000,
+            "sync_source": "simpleFin",
+            "monitored": False,
+        },
+        {
+            "name": "Cash",
+            "balance_cents": 2000,
+            "sync_source": "",
+            "monitored": True,
+        },
+    ]
+
+    hidden = digest(accounts=accounts, sections=Settings().digest_sections)["message"]
+    shown = digest(accounts=accounts, sections=only("balances"))["message"]
+
+    assert "Account balances" not in hidden
+    assert "💳 Account balances\n\n- Checking — $2,500.00" in shown
+    assert "Old Savings" not in shown
+    assert "Cash" not in shown
 
 
 def test_a_projection_that_lands_short_says_so():
@@ -346,6 +379,6 @@ def test_unmuting_a_broken_account_does_raise_the_alarm():
 def test_an_overspent_month_leads_with_how_far_past_it_is():
     """A negative amount "left" is not a quantity anyone has."""
     payload = digest({"remaining_cents": -99590, "remaining_percent": -0.49})
-    headline = payload["message"].splitlines()[2]
-    assert headline == "$995.90 over budget  \u00b7  49%"
+    headline = next(line for line in payload["message"].splitlines() if "over budget" in line)
+    assert headline == "- $995.90 over budget \u00b7 49%"
     assert "left" not in headline

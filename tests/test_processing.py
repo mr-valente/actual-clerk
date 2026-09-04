@@ -432,6 +432,36 @@ async def test_a_digest_is_sent_at_most_once_a_day(manager, settings_manager, mo
     assert second["result"]["skipped"].startswith("already sent for")
     assert len(sent) == 1
     assert manager.database.latest_digest()["payload"]["title"] == sent[0]["title"]
+    assert sent[0]["markdown"] is True
+
+
+async def test_the_digest_balance_switch_includes_each_monitored_linked_account(
+    manager, settings_manager, delivers
+):
+    settings_manager.update(
+        {
+            "notifications_enabled": True,
+            "ntfy_topic": "clerk-test",
+            "digest_show_balances": True,
+            "monthly_income_override": 4000,
+        }
+    )
+    manager.gateway.snap = snapshot(
+        accounts=[
+            account("Checking", balance_cents=250000),
+            account("Old Savings", balance_cents=80000),
+            account("Cash", sync_source="", balance_cents=2000),
+        ],
+        budgeted={"cat-rent": 180000},
+    )
+    manager.database.set_monitoring("acct-old-savings", False, "Old Savings")
+
+    await run_job(manager, "digest")
+
+    [message] = delivers
+    assert "💳 Account balances\n\n- Checking — $2,500.00" in message["message"]
+    assert "Old Savings" not in message["message"]
+    assert "Cash" not in message["message"]
 
 
 async def test_a_delivered_digest_records_where_it_actually_went(

@@ -412,6 +412,7 @@ async def test_the_report_options_round_trip_through_the_api(client):
     before = (await client.get("/api/settings")).json()
     assert before["digest_title"] == "The Morning Report"
     assert before["digest_show_pace"] is True
+    assert before["digest_show_balances"] is False
 
     response = await client.patch(
         "/api/settings",
@@ -420,6 +421,7 @@ async def test_the_report_options_round_trip_through_the_api(client):
                 "digest_title": "Budget o'clock",
                 "digest_show_pace": False,
                 "digest_show_projection": True,
+                "digest_show_balances": True,
             }
         },
     )
@@ -427,6 +429,7 @@ async def test_the_report_options_round_trip_through_the_api(client):
     assert saved["digest_title"] == "Budget o'clock"
     assert saved["digest_show_pace"] is False
     assert saved["digest_show_projection"] is True
+    assert saved["digest_show_balances"] is True
 
 
 async def test_a_setting_that_needs_a_restart_says_so(client):
@@ -663,6 +666,12 @@ async def test_review_category_picker_is_grouped_and_filters_as_you_type(client)
     assert 'option.hidden = !option.dataset.search.includes(query)' in source
     assert ".category-picker-options" in styles
     assert ".category-picker-option.selected" in styles
+
+
+async def test_settings_offer_one_checkbox_for_all_monitored_account_balances(client):
+    source = (await client.get("/assets/app.js")).text
+    assert 'settingCheck("digest_show_balances", "Account balances"' in source
+    assert "One switch controls the whole list." in source
 
 
 @pytest.mark.parametrize("changed_name", ("app.js", "styles.css", "favicon.svg"))

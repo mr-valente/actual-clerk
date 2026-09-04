@@ -35,6 +35,7 @@ class NtfyClient:
         priority: int = 3,
         tags: Sequence[str] = (),
         click: str = "",
+        markdown: bool = False,
     ) -> dict[str, Any]:
         if not self.topic:
             raise NotificationError("An ntfy topic is required")
@@ -49,6 +50,8 @@ class NtfyClient:
         }
         if click:
             payload["click"] = click
+        if markdown:
+            payload["markdown"] = True
         try:
             response = await self.client.post(self.url, json=payload)
         except httpx.RequestError as exc:

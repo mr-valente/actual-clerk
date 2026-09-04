@@ -16,9 +16,8 @@ from typing import Any
 from actual_clerk.domain.budget import format_money
 from actual_clerk.domain.health import ALERTING_STATUSES, STATUS_LABELS
 
-# A middle dot separates a figure from its qualifier and marks list items. It
-# renders on every platform ntfy reaches, which "-" and box drawing do not do
-# as cleanly on a phone.
+# A middle dot separates a figure from its qualifier. It renders on every
+# platform ntfy reaches more cleanly than box-drawing characters do on a phone.
 BULLET = "\u00b7"
 DASH = "\u2014"
 
@@ -44,7 +43,7 @@ class _Sections:
 
 
 class _Body:
-    """Blocks separated by a blank line, each a heading and its detail."""
+    """Markdown-compatible blocks that remain tidy when rendered as plain text."""
 
     def __init__(self) -> None:
         self.blocks: list[list[str]] = []
@@ -56,7 +55,10 @@ class _Body:
 
     def listing(self, heading: str, items: list[str]) -> None:
         if items:
-            self.blocks.append([heading] + [f"  {BULLET} {item}" for item in items])
+            # ntfy currently renders Markdown only in its web app. A conventional
+            # hyphen list improves that client while remaining readable as raw
+            # text in the phone apps.
+            self.blocks.append([heading, ""] + [f"- {item}" for item in items])
 
     def render(self) -> str:
         return "\n\n".join("\n".join(block) for block in self.blocks)
@@ -139,6 +141,7 @@ def build_digest(
     report: dict[str, Any],
     health: list[dict[str, Any]],
     review_count: int,
+    accounts: list[dict[str, Any]] | None = None,
     currency: str = "USD",
     today: datetime.date | None = None,
     title: str = "The Morning Report",
@@ -160,18 +163,22 @@ def build_digest(
     days_remaining = int(report.get("days_remaining", 1)) or 1
     change = report_change(report=report, previous=previous, health=health, today=today)
 
-    body.block(f"{today:%A} {today.day} {today:%B}")
+    body.block(f"{today:%A}, {today.day} {today:%B}")
 
     if not report.get("configured"):
-        body.block(
-            "Clerk cannot work out your monthly income yet.",
-            "Enter it in Settings, or record this month's income in Actual, "
-            "and the report starts tomorrow.",
+        body.listing(
+            "💰 Budget",
+            [
+                "Clerk cannot work out your monthly income yet.",
+                "Enter it in Settings, or record this month's income in Actual, "
+                "and the report starts tomorrow.",
+            ],
         )
         return _payload(
             title, body, tags + ["warning"], 3, report, health, review_count, today, change
         )
 
+    budget_items: list[str] = []
     if change["unchanged"]:
         if change["reason"] == "newer_bank_data":
             quiet_message = (
@@ -187,14 +194,17 @@ def build_digest(
             quiet_message = (
                 "Nothing to report — your discretionary budget is unchanged since the last report."
             )
-        body.block(quiet_message)
+        budget_items.append(quiet_message)
     elif free <= 0:
         # Nothing is free, so there is no headline figure to lead with.
-        body.block(
-            f"No free money budgeted for {today.strftime('%B')}.",
-            f"Committed spending of {format_money(report.get('committed_cents', 0), currency)} "
-            f"is at or above expected income of "
-            f"{format_money(report.get('expected_income_cents', 0), currency)}.",
+        budget_items.extend(
+            [
+                f"No free money budgeted for {today.strftime('%B')}.",
+                f"Committed spending of "
+                f"{format_money(report.get('committed_cents', 0), currency)} "
+                f"is at or above expected income of "
+                f"{format_money(report.get('expected_income_cents', 0), currency)}.",
+            ]
         )
         priority = 4
         tags.append("warning")
@@ -205,35 +215,33 @@ def build_digest(
                 headline = f"{format_money(abs(remaining), currency)} over budget"
             else:
                 headline = f"{format_money(remaining, currency)} free money left"
-            body.block(f"{headline}  {BULLET}  {abs(percent):.0%}")
+            budget_items.append(f"{headline} {BULLET} {abs(percent):.0%}")
 
-        detail = []
         if show("spending"):
-            detail.append(
+            budget_items.append(
                 f"Spent {format_money(spent, currency)} of "
                 f"{format_money(free, currency)} since the 1st"
             )
         if show("safe_to_spend") and remaining > 0:
             safe = int(report.get("daily_safe_to_spend_cents", 0))
-            detail.append(
+            budget_items.append(
                 f"{format_money(safe, currency)} a day keeps you level for the "
                 f"{plural(days_remaining, 'day')} left"
             )
         if show("pace"):
             delta = format_money(abs(int(report.get("pace_delta_cents", 0))), currency)
             side = "under" if report.get("on_track") else "over"
-            detail.append(f"{delta} {side} an even pace for the month")
+            budget_items.append(f"{delta} {side} an even pace for the month")
         if show("projection"):
             projected = int(report.get("projected_remaining_cents", 0))
             ending = "with" if projected >= 0 else "over by"
-            detail.append(
+            budget_items.append(
                 f"On this pace the month ends {ending} "
                 f"{format_money(abs(projected), currency)}"
             )
-        body.block(*detail)
 
         if remaining <= 0:
-            body.block("Free money for this month is already spent.")
+            budget_items.append("Free money for this month is already spent.")
             priority = 4
             tags.append("warning")
         if not report.get("on_track"):
@@ -242,10 +250,21 @@ def build_digest(
     if not change["unchanged"] and show("commitments"):
         overspend = int(report.get("committed_overspend_cents", 0))
         if overspend > 0:
-            body.block(
+            budget_items.append(
                 f"Committed categories are over budget by "
                 f"{format_money(overspend, currency)}"
             )
+
+    body.listing("💰 Budget", budget_items)
+
+    if show("balances"):
+        balances = [
+            f"{account.get('name') or 'Account'} {DASH} "
+            f"{format_money(int(account.get('balance_cents', 0)), currency)}"
+            for account in (accounts or [])
+            if account.get("monitored", True) and account.get("sync_source")
+        ]
+        body.listing("💳 Account balances", balances)
 
     degraded = [item for item in health if item.get("status") in ALERTING_STATUSES]
     if degraded:
@@ -261,7 +280,7 @@ def build_digest(
             ]
             if len(degraded) > 4:
                 named.append(f"and {len(degraded) - 4} more")
-            body.listing("Connections needing attention", named)
+            body.listing("⚠️ Connections needing attention", named)
 
     if show("attention"):
         waiting = []
@@ -273,7 +292,7 @@ def build_digest(
                 f"{plural(uncategorized, 'transaction')} still uncategorized this month "
                 f"({format_money(report.get('uncategorized_cents', 0), currency)})"
             )
-        body.listing("Waiting for you", waiting)
+        body.listing("👀 Waiting for you", waiting)
 
     return _payload(title, body, tags, priority, report, health, review_count, today, change)
 
@@ -293,6 +312,10 @@ def _payload(
         "local_date": today.isoformat(),
         "title": title,
         "message": body.render(),
+        # ntfy's web app turns the conventional lists into proper Markdown.
+        # Phone clients currently show the source, which is why the message
+        # avoids formatting markers that would be noisy when left unrendered.
+        "markdown": True,
         "tags": tags,
         "priority": priority,
         "report": report,

@@ -525,6 +525,7 @@ class JobManager:
                 report=overview["budget"],
                 health=self.database.health_snapshots(),
                 review_count=self.database.counts()["needs_review"],
+                accounts=overview["accounts"],
                 currency=settings.budget_currency,
                 today=today,
                 title=settings.digest_title,
@@ -552,6 +553,7 @@ class JobManager:
                     message=payload["message"],
                     priority=payload["priority"],
                     tags=payload["tags"],
+                    markdown=payload["markdown"],
                 )
             finally:
                 await client.close()

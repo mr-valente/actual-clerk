@@ -59,7 +59,7 @@ Clerk detects anything billing on a schedule three or more times, tells you what
 
 ### Sends one message every morning
 
-An ntfy notification with your free money, the pace, what is safe to spend today, any bank connection that needs attention, and anything waiting for your review. When the spendable budget is unchanged from the previous delivered report, those repeated figures collapse to “Nothing to report” instead. If SimpleFIN's per-account balance timestamp moved, Clerk can say newer bank data arrived with no new discretionary spending; if it did not, Clerk says SimpleFIN exposed no newer balance timestamp. One a day, short enough to read on a lock screen.
+An ntfy notification with your free money, the pace, what is safe to spend today, any bank connection that needs attention, and anything waiting for your review. A single optional block can also include the current balances of every monitored bank-linked account. When the spendable budget is unchanged from the previous delivered report, those repeated figures collapse to “Nothing to report” instead. If SimpleFIN's per-account balance timestamp moved, Clerk can say newer bank data arrived with no new discretionary spending; if it did not, Clerk says SimpleFIN exposed no newer balance timestamp. One a day, short enough to read on a lock screen.
 
 ---
 
@@ -143,10 +143,11 @@ The notification header is yours to name — *The Morning Report* by default —
 | Pace for the month | Whether you are ahead of or behind an even spend |
 | Projected month end | Where the month lands at the current pace (off by default) |
 | Committed overspend | Named when a bill has gone past its budget |
+| Account balances | Current Actual balance for every monitored bank-linked account (off by default) |
 | Bank connections | Connections needing attention |
 | Waiting for you | Transactions to review, and anything uncategorized |
 
-A broken bank connection still raises the notification's priority whether or not that block is shown: which parts you want to read is a preference, a dead connection is not.
+A broken bank connection still raises the notification's priority whether or not that block is shown: which parts you want to read is a preference, a dead connection is not. Report bodies use short labelled sections and Markdown-compatible lists; ntfy renders those lists in its web app, while the same hyphen bullets remain uncluttered plain text in its phone apps.
 
 On an unchanged morning, connection problems and work waiting for you are still shown. SimpleFIN defines `balance-date` as the timestamp attached to the balance value, so an advancing timestamp proves newer bank data arrived; an unchanged timestamp cannot prove whether the bank was polled and found the same value. Clerk therefore says only that SimpleFIN exposed no newer balance timestamp rather than claiming the connection is stale.
 

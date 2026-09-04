@@ -259,10 +259,17 @@ def test_the_report_header_is_named_and_never_left_blank(database):
 
 def test_the_include_switches_reach_the_builder_by_block_name(database):
     manager = SettingsManager(database)
-    manager.update({"digest_show_pace": False, "digest_show_projection": True})
+    manager.update(
+        {
+            "digest_show_pace": False,
+            "digest_show_projection": True,
+            "digest_show_balances": True,
+        }
+    )
     sections = manager.get().digest_sections
     assert sections["pace"] is False
     assert sections["projection"] is True
+    assert sections["balances"] is True
     assert sections["headline"] is True
     # Every switch is offered, and none is named after its field.
     assert not any(name.startswith("digest_show_") for name in sections)
