@@ -53,6 +53,7 @@ def test_a_good_month_leads_with_what_is_left():
     assert payload["priority"] == 3
     assert payload["local_date"] == "2026-08-21"
     assert payload["markdown"] is True
+    assert payload["tags"] == ["newspaper"]
 
 
 def test_the_header_is_whatever_it_was_named():
@@ -198,7 +199,7 @@ def test_account_balances_are_one_opt_in_list_of_monitored_linked_accounts():
     shown = digest(accounts=accounts, sections=only("balances"))["message"]
 
     assert "Account balances" not in hidden
-    assert "💳 Account balances\n\n- Checking — $2,500.00" in shown
+    assert "**💳 Account balances**\n\n- Checking: $2,500.00" in shown
     assert "Old Savings" not in shown
     assert "Cash" not in shown
 

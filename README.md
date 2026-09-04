@@ -147,7 +147,7 @@ The notification header is yours to name — *The Morning Report* by default —
 | Bank connections | Connections needing attention |
 | Waiting for you | Transactions to review, and anything uncategorized |
 
-A broken bank connection still raises the notification's priority whether or not that block is shown: which parts you want to read is a preference, a dead connection is not. Report bodies use short labelled sections and Markdown-compatible lists; ntfy renders those lists in its web app, while the same hyphen bullets remain uncluttered plain text in its phone apps.
+A broken bank connection still raises the notification's priority whether or not that block is shown: which parts you want to read is a preference, a dead connection is not. Report bodies use short bold section labels and Markdown-compatible lists; ntfy renders those in its web app, while the same labels and hyphen bullets remain understandable as plain text in its phone apps.
 
 On an unchanged morning, connection problems and work waiting for you are still shown. SimpleFIN defines `balance-date` as the timestamp attached to the balance value, so an advancing timestamp proves newer bank data arrived; an unchanged timestamp cannot prove whether the bank was polled and found the same value. Clerk therefore says only that SimpleFIN exposed no newer balance timestamp rather than claiming the connection is stale.
 

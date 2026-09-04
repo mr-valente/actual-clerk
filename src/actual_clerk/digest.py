@@ -56,9 +56,9 @@ class _Body:
     def listing(self, heading: str, items: list[str]) -> None:
         if items:
             # ntfy currently renders Markdown only in its web app. A conventional
-            # hyphen list improves that client while remaining readable as raw
-            # text in the phone apps.
-            self.blocks.append([heading, ""] + [f"- {item}" for item in items])
+            # hyphen list and the small amount of bold markup improve that
+            # client while remaining understandable as raw text in phone apps.
+            self.blocks.append([f"**{heading}**", ""] + [f"- {item}" for item in items])
 
     def render(self) -> str:
         return "\n\n".join("\n".join(block) for block in self.blocks)
@@ -153,7 +153,9 @@ def build_digest(
     today = today or datetime.date.today()
     show = _Sections(sections)
     body = _Body()
-    tags: list[str] = ["moneybag"]
+    # ntfy turns a recognized tag into the emoji preceding the fixed title.
+    # The budget block already owns the money bag, so the report itself is news.
+    tags: list[str] = ["newspaper"]
     priority = 3
 
     free = int(report.get("free_cents", 0))
@@ -259,7 +261,7 @@ def build_digest(
 
     if show("balances"):
         balances = [
-            f"{account.get('name') or 'Account'} {DASH} "
+            f"{account.get('name') or 'Account'}: "
             f"{format_money(int(account.get('balance_cents', 0)), currency)}"
             for account in (accounts or [])
             if account.get("monitored", True) and account.get("sync_source")

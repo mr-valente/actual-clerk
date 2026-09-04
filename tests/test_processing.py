@@ -459,7 +459,7 @@ async def test_the_digest_balance_switch_includes_each_monitored_linked_account(
     await run_job(manager, "digest")
 
     [message] = delivers
-    assert "💳 Account balances\n\n- Checking — $2,500.00" in message["message"]
+    assert "**💳 Account balances**\n\n- Checking: $2,500.00" in message["message"]
     assert "Old Savings" not in message["message"]
     assert "Cash" not in message["message"]
 
