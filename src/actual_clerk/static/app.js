@@ -171,6 +171,21 @@ function connectionRemedies(degraded) {
 // A manual account has nothing to watch and a muted one was opted out, so
 // neither belongs in the "connected" ratio.
 function isWatched(item) { return item.status !== "not_linked" && item.status !== "muted"; }
+// How old the bank's own balance is. This is the single piece of evidence that
+// says whether a feed is still alive -- a link can answer every request and
+// still be handing back a balance from last week -- so it belongs on the row
+// rather than only inside the detail view. Hours while that still reads
+// naturally, days once it does not.
+function balanceAge(item) {
+  const hours = item.balance_age_hours;
+  if (hours === null || hours === undefined) return "";
+  if (hours < 1) return "under an hour old";
+  // Switch on the rounded figure, or 47.6h prints "48h old" one refresh before
+  // the same age starts printing "2.0 days old".
+  const whole = Math.round(hours);
+  if (whole < 48) return `${whole}h old`;
+  return `${(hours / 24).toFixed(1)} days old`;
+}
 function isQuiet(item) { return item.status === "no_transactions"; }
 
 // -------------------------------------------------------------- components
@@ -248,6 +263,7 @@ function budgetHero() {
 }
 
 function healthRow(item, { actions = true, toggle = false } = {}) {
+  const age = balanceAge(item);
   const drift = item.drift_cents;
   const balanceComparison = item.transfer_adjusted
     ? "matches after inferred transfer"
@@ -262,7 +278,7 @@ function healthRow(item, { actions = true, toggle = false } = {}) {
   return `<article class="data-row health-row ${actions ? "clickable" : ""}" ${actions ? `data-action="account-detail" data-id="${escapeHtml(item.account_id)}"` : ""}>
     <span class="dot ${escapeHtml(item.status)}" title="${escapeHtml(item.status_label || item.status)}"></span>
     <div class="row-title"><strong>${escapeHtml(item.account_name || "Account")}</strong><small>${escapeHtml(item.institution || item.sync_source || "Manual account")}</small></div>
-    <div class="row-meta">${escapeHtml((item.detail || "").slice(0, 90))}</div>
+    <div class="row-meta">${escapeHtml((item.detail || "").slice(0, 90))}${age ? `<br /><span${item.remote_balance_date ? ` title="Bank balance dated ${escapeHtml(fullTime(item.remote_balance_date))}"` : ""}>Bank data ${escapeHtml(age)}</span>` : ""}</div>
     <div class="row-meta">${item.remote_balance_cents === null || item.remote_balance_cents === undefined
       ? "—"
       : `<strong>${money(item.remote_balance_cents)}</strong><br /><span>${balanceComparison}</span>`}</div>
@@ -683,7 +699,7 @@ function showAccount(accountId) {
       <div class="detail-stat"><span>Bank-comparable balance</span><strong class="money">${money(item.comparison_balance_cents)}</strong></div>` : ""}
       <div class="detail-stat"><span>Bank balance</span><strong class="money">${item.remote_balance_cents === null || item.remote_balance_cents === undefined ? "—" : money(item.remote_balance_cents)}</strong></div>
       <div class="detail-stat"><span>${item.transfer_adjusted ? "Compared vs bank" : "Cleared vs bank"}</span><strong class="money ${item.drift_cents ? "negative" : ""}">${item.drift_cents === null || item.drift_cents === undefined ? "—" : money(item.drift_cents, { sign: true })}</strong></div>
-      <div class="detail-stat"><span>Bank data age</span><strong>${item.balance_age_hours === null || item.balance_age_hours === undefined ? "—" : `${Math.round(item.balance_age_hours)}h`}</strong></div>
+      <div class="detail-stat"><span>Bank data age</span><strong${item.remote_balance_date ? ` title="Bank balance dated ${escapeHtml(fullTime(item.remote_balance_date))}"` : ""}>${escapeHtml(balanceAge(item) || "—")}</strong></div>
       <div class="detail-stat"><span>Last transaction</span><strong>${escapeHtml(item.last_transaction_date || "—")}</strong></div>
       <div class="detail-stat"><span>Actual last sync</span><strong>${item.last_sync ? relativeTime(item.last_sync) : "—"}</strong></div>
     </div></section>
