@@ -104,6 +104,27 @@ def test_snapshot_accounts_convert_for_the_health_check():
     assert converted.unconfirmed_transfers[0].transaction_id == "transfer-1"
 
 
+def test_only_aged_bank_imports_count_as_uncleared_for_the_health_check():
+    """Manual entries and split children say nothing about what the bank did."""
+
+    def row(**overrides):
+        item = transaction(TODAY, -100, account_id="acct-checking")
+        item.update(overrides)
+        return item
+
+    snap = snapshot(
+        accounts=[account("Checking")],
+        transactions=[
+            row(id="bank-uncleared", cleared=False, imported_id="imp-1"),
+            row(id="bank-cleared", cleared=True, imported_id="imp-2"),
+            row(id="manual-uncleared", cleared=False, imported_id=""),
+            row(id="split-child", cleared=False, imported_id="imp-3", is_child=True),
+        ],
+    )
+    [converted] = to_actual_accounts(snap)
+    assert [item.transaction_id for item in converted.uncleared_imports] == ["bank-uncleared"]
+
+
 def test_missing_simplefin_data_converts_to_nothing():
     assert to_simplefin_accounts(None) == []
     assert to_simplefin_accounts({"accounts": []}) == []

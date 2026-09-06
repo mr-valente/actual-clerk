@@ -243,6 +243,17 @@ def test_only_a_real_change_of_state_produces_a_transition(database):
     assert transition["status"] == "error"
 
 
+def test_a_transition_carries_the_event_it_recorded(database):
+    """Without the id, a delivered alert cannot mark the row it came from."""
+    [transition] = database.record_health([snapshot()])
+    [event] = database.list_health_events()
+    assert transition["event_id"] == event["id"]
+    assert event["notified"] == 0
+
+    database.mark_health_events_notified([transition["event_id"]])
+    assert database.list_health_events()[0]["notified"] == 1
+
+
 def test_health_snapshots_and_events_are_retained(database):
     database.record_health([snapshot()])
     database.record_health([snapshot(status="stale")])

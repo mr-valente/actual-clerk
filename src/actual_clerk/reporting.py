@@ -20,6 +20,7 @@ from actual_clerk.domain.budget import (
 from actual_clerk.domain.health import (
     ActualAccountInfo,
     SimpleFinAccountInfo,
+    StuckImportInfo,
     UnconfirmedTransferInfo,
 )
 
@@ -58,7 +59,37 @@ def to_transaction_infos(
     ]
 
 
+def _uncleared_imports_by_account(
+    snapshot: dict[str, Any],
+) -> dict[str, tuple[StuckImportInfo, ...]]:
+    """Group the bank-imported rows Actual still holds as uncleared.
+
+    Only rows carrying an import id: a manual entry is uncleared until the user
+    clears it, which says nothing about the bank. Split children are skipped
+    because the parent carries the cleared flag for the whole transaction.
+    """
+
+    grouped: dict[str, list[StuckImportInfo]] = {}
+    for item in snapshot.get("transactions") or []:
+        if item.get("cleared") or item.get("is_child") or item.get("is_starting_balance"):
+            continue
+        if not str(item.get("imported_id") or "").strip():
+            continue
+        account_id = str(item.get("account_id") or "")
+        if not account_id:
+            continue
+        grouped.setdefault(account_id, []).append(
+            StuckImportInfo(
+                amount_cents=int(item.get("amount_cents", 0)),
+                date=item["date"],
+                transaction_id=str(item.get("id") or ""),
+            )
+        )
+    return {account_id: tuple(rows) for account_id, rows in grouped.items()}
+
+
 def to_actual_accounts(snapshot: dict[str, Any]) -> list[ActualAccountInfo]:
+    uncleared_imports = _uncleared_imports_by_account(snapshot)
     return [
         ActualAccountInfo(
             id=account["id"],
@@ -76,6 +107,7 @@ def to_actual_accounts(snapshot: dict[str, Any]) -> list[ActualAccountInfo]:
                 )
                 for item in account.get("unconfirmed_transfers", [])
             ),
+            uncleared_imports=uncleared_imports.get(account["id"], ()),
             last_sync=account["last_sync"],
             last_transaction_date=account.get("last_transaction_date"),
             off_budget=account["off_budget"],

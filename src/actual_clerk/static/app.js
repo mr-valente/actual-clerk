@@ -147,6 +147,27 @@ const ALERTING_STATUSES = ["error", "missing", "stale", "drifted"];
 function isDegraded(item) {
   return item.alerting === undefined ? ALERTING_STATUSES.includes(item.status) : Boolean(item.alerting);
 }
+// Each alerting status fails for its own reason and is fixed in its own place.
+// Reauthorizing is the answer only when SimpleFIN has actually lost the bank;
+// telling someone to reauthorize a link that is working sends them to check a
+// connection that was never the problem.
+const STATUS_REMEDIES = {
+  error: "SimpleFIN reported an error for this bank. Reauthorize it in your SimpleFIN Bridge, then run a check here.",
+  missing: "SimpleFIN is no longer returning this account. Relink it in your SimpleFIN Bridge, then run a check here.",
+  stale: "The bank has stopped sending SimpleFIN fresh data for this account. Nothing needs fixing in Actual, and it usually clears on its own once the bank refreshes.",
+  drifted: "Actual and the bank disagree about posted money, so a transaction is missing on one side. Compare the account with the bank and reconcile it in Actual.",
+};
+function connectionRemedies(degraded) {
+  const byStatus = new Map();
+  for (const item of degraded) {
+    if (!byStatus.has(item.status)) byStatus.set(item.status, []);
+    byStatus.get(item.status).push(item.account_name);
+  }
+  return [...byStatus.entries()].map(([status, names]) => {
+    const remedy = STATUS_REMEDIES[status] || "Run a check here for the current detail.";
+    return `<p><strong>${escapeHtml(names.join(", "))}</strong> — ${escapeHtml(remedy)}</p>`;
+  }).join("");
+}
 // A manual account has nothing to watch and a muted one was opted out, so
 // neither belongs in the "connected" ratio.
 function isWatched(item) { return item.status !== "not_linked" && item.status !== "muted"; }
@@ -519,7 +540,7 @@ async function renderAccounts() {
   const configured = state.data?.overview ? true : false;
   content.innerHTML = `
     <section class="page-intro"><div><h2>Bank connections</h2><p>Clerk asks SimpleFIN directly what each account looks like right now, then compares that with what Actual holds. A connection that quietly stops delivering data shows up here as a status change rather than as a slowly staler budget.</p></div><div class="actions"><button class="button ghost" data-action="check-connections">Check now</button><button class="button primary" data-action="open-claim">Connect SimpleFIN</button></div></section>
-    ${degraded.length ? `<div class="alert-banner critical"><span>!</span><div><strong>${degraded.length} connection${degraded.length === 1 ? "" : "s"} need attention</strong><p>Reauthorize the bank in your SimpleFIN Bridge, then run a check here.</p></div></div>` : ""}
+    ${degraded.length ? `<div class="alert-banner critical"><span>!</span><div><strong>${degraded.length} connection${degraded.length === 1 ? "" : "s"} need attention</strong>${connectionRemedies(degraded)}</div></div>` : ""}
     <article class="panel">
       <header class="panel-head"><div><h2>Accounts</h2><p>${linked.length} linked to bank sync, ${health.length - linked.length} manual${muted.length ? `, ${muted.length} not monitored` : ""} · the switch turns Clerk's watching on or off without unlinking anything in Actual</p></div></header>
       <div class="status-list">${health.length ? health.map((item) => healthRow(item, { toggle: true })).join("") : emptyState("⇄", "No accounts checked yet", configured ? "Run a connection check to populate this list." : "Connect Actual first in Settings.")}</div>

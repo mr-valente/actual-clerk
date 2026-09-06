@@ -501,6 +501,12 @@ class JobManager:
             await client.publish(**alert)
         except NotificationError as exc:
             log.warning("Could not deliver the connection alert: %s", exc)
+        else:
+            # Only a delivered alert counts. A failed publish leaves the events
+            # unnotified so the record shows what actually reached the phone.
+            self.database.mark_health_events_notified(
+                [event_id for item in transitions if (event_id := item.get("event_id"))]
+            )
         finally:
             await client.close()
 

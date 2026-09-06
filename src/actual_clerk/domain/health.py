@@ -51,8 +51,26 @@ STATUS_LABELS = {
 MUTED = "muted"
 
 
+# A card charge posts within a few days. An imported row still uncleared well
+# after that is usually one the bank dropped after Actual had already imported
+# it: Actual's import is additive and never removes a transaction the bank
+# stopped reporting, and the bank comparison deliberately looks only at cleared
+# money, so nothing else Clerk checks would ever surface it. It keeps counting
+# as spent in the meantime. Long enough to sit clear of any real pending window.
+STUCK_IMPORT_DAYS = 14
+
+
 @dataclass(frozen=True)
 class UnconfirmedTransferInfo:
+    amount_cents: int
+    date: datetime.date
+    transaction_id: str = ""
+
+
+@dataclass(frozen=True)
+class StuckImportInfo:
+    """An imported transaction Actual still holds as uncleared."""
+
     amount_cents: int
     date: datetime.date
     transaction_id: str = ""
@@ -73,6 +91,9 @@ class ActualAccountInfo:
     # Cleared activity that Actual generated as the other half of an imported
     # transfer, before this account imported its own matching row.
     unconfirmed_transfers: tuple[UnconfirmedTransferInfo, ...] = ()
+    # Every imported row this account still holds as uncleared, whatever its
+    # age. Which of them count as stuck is decided during evaluation.
+    uncleared_imports: tuple[StuckImportInfo, ...] = ()
     last_sync: datetime.datetime | None = None
     last_transaction_date: datetime.date | None = None
     off_budget: bool = False
@@ -119,6 +140,9 @@ class AccountHealth:
     uncleared_balance_cents: int = 0
     unconfirmed_transfer_cents: int = 0
     unconfirmed_transfer_count: int = 0
+    stuck_import_cents: int = 0
+    stuck_import_count: int = 0
+    oldest_stuck_import_date: str | None = None
     comparison_balance_cents: int = 0
     raw_drift_cents: int | None = None
     transfer_adjusted: bool = False
@@ -208,6 +232,7 @@ def evaluate_accounts(
     balance_stale_hours: int = 36,
     balance_tolerance_cents: int = 100,
     transaction_stale_days: int = 4,
+    stuck_import_days: int = STUCK_IMPORT_DAYS,
     unmonitored_ids: set[str] | None = None,
 ) -> list[AccountHealth]:
     """Score every Actual account against what SimpleFIN reports right now.
@@ -240,6 +265,7 @@ def evaluate_accounts(
             balance_stale_hours=balance_stale_hours,
             balance_tolerance_cents=balance_tolerance_cents,
             transaction_stale_days=transaction_stale_days,
+            stuck_import_days=stuck_import_days,
         )
         if account.id in unmonitored_ids:
             health.monitored = False
@@ -288,6 +314,7 @@ def _evaluate_one(
     balance_stale_hours: int,
     balance_tolerance_cents: int,
     transaction_stale_days: int,
+    stuck_import_days: int,
 ) -> AccountHealth:
     signals: list[str] = []
     signals_without_drift: list[str] = []
@@ -420,12 +447,37 @@ def _evaluate_one(
     elif account.last_transaction_date is None:
         flag("no_transactions", "Actual holds no transactions for this account yet.")
 
+    stuck = [
+        item
+        for item in account.uncleared_imports
+        if (today - item.date).days > stuck_import_days
+    ]
+    stuck_detail = ""
+    if stuck:
+        oldest = min(item.date for item in stuck)
+        total = sum(item.amount_cents for item in stuck)
+        health.stuck_import_cents = total
+        health.stuck_import_count = len(stuck)
+        health.oldest_stuck_import_date = oldest.isoformat()
+        stuck_detail = (
+            f"{_money(abs(total))} across {len(stuck)} imported "
+            f"transaction{'' if len(stuck) == 1 else 's'} has sat uncleared since "
+            f"{oldest.isoformat()}. Actual never withdraws a transaction the bank stopped "
+            "reporting, so a dropped charge stays here and keeps counting as spent. Worth "
+            "checking against the bank."
+        )
+        note(stuck_detail)
+
     healthy_detail = (
         "The bank balance agrees after holding out a transfer Actual generated from another "
         "account but this account has not imported yet."
         if health.transfer_adjusted
         else "Balances agree and data is current."
     )
+    # Never a status of its own: the connection is working, and a status would
+    # alert. Said on the row instead, so a healthy account still shows it.
+    if stuck_detail:
+        healthy_detail = stuck_detail
     health.status = worst_status(statuses) if statuses else "ok"
     health.signals = signals
     health.detail = status_details.get(health.status, healthy_detail)

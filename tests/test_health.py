@@ -5,6 +5,7 @@ import datetime
 from actual_clerk.domain.health import (
     ActualAccountInfo,
     SimpleFinAccountInfo,
+    StuckImportInfo,
     UnconfirmedTransferInfo,
     evaluate_accounts,
     summarize,
@@ -421,3 +422,77 @@ def test_alerting_matches_what_the_summary_counts_as_degraded():
     )
     alerting = sum(1 for item in results if item.as_dict()["alerting"])
     assert alerting == summarize(results)["degraded"] == 1
+
+
+# ------------------------------------------- imports the bank never confirmed
+
+
+def stuck_import(days_old, amount_cents=-100):
+    return StuckImportInfo(
+        amount_cents=amount_cents,
+        date=TODAY - datetime.timedelta(days=days_old),
+        transaction_id=f"txn-{days_old}",
+    )
+
+
+def test_a_charge_still_pending_is_left_alone():
+    """Everything uncleared is pending at first. Only age makes it suspect."""
+    [result] = evaluate(
+        [actual_account("Card", uncleared_imports=(stuck_import(3),))],
+        [remote_account("Card")],
+    )
+    assert result.status == "ok"
+    assert result.stuck_import_count == 0
+    assert result.detail == "Balances agree and data is current."
+
+
+def test_an_import_uncleared_far_past_any_pending_window_is_surfaced():
+    [result] = evaluate(
+        [actual_account("Card", uncleared_imports=(stuck_import(30),))],
+        [remote_account("Card")],
+    )
+    assert result.stuck_import_count == 1
+    assert result.stuck_import_cents == -100
+    assert result.oldest_stuck_import_date == (TODAY - datetime.timedelta(days=30)).isoformat()
+    assert "1.00" in result.detail
+    assert any("uncleared since" in signal for signal in result.signals)
+
+
+def test_a_stuck_import_never_becomes_an_alert():
+    """The connection is working. A status here would page someone at 3am."""
+    [result] = evaluate(
+        [actual_account("Card", uncleared_imports=(stuck_import(60),))],
+        [remote_account("Card")],
+    )
+    assert result.status == "ok"
+    assert result.as_dict()["alerting"] is False
+    assert summarize([result])["degraded"] == 0
+
+
+def test_a_stuck_import_does_not_mask_a_real_connection_problem():
+    [result] = evaluate(
+        [actual_account("Card", uncleared_imports=(stuck_import(60),))],
+        [remote_account("Card", balance_date=NOW - datetime.timedelta(days=9))],
+    )
+    assert result.status == "stale"
+    assert "days old" in result.detail
+    assert any("uncleared since" in signal for signal in result.signals)
+
+
+def test_several_stuck_imports_are_totalled_from_the_oldest():
+    [result] = evaluate(
+        [
+            actual_account(
+                "Card",
+                uncleared_imports=(
+                    stuck_import(20, -250),
+                    stuck_import(40, -175),
+                    stuck_import(2, -9999),
+                ),
+            )
+        ],
+        [remote_account("Card")],
+    )
+    assert result.stuck_import_count == 2
+    assert result.stuck_import_cents == -425
+    assert result.oldest_stuck_import_date == (TODAY - datetime.timedelta(days=40)).isoformat()

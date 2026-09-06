@@ -968,7 +968,7 @@ class Database:
                     ),
                 )
                 if changed:
-                    connection.execute(
+                    cursor = connection.execute(
                         "INSERT INTO health_events(account_id,account_name,previous_status,status,"
                         "detail,created_at) VALUES(?,?,?,?,?,?)",
                         (
@@ -984,6 +984,9 @@ class Database:
                         {
                             **snapshot,
                             "previous_status": previous["status"] if previous else "",
+                            # Carried so a delivered alert can mark its own row,
+                            # which is what makes `notified` mean anything.
+                            "event_id": cursor.lastrowid,
                         }
                     )
             connection.commit()
