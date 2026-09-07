@@ -46,7 +46,8 @@ An account that has merely gone quiet is never treated as broken. It gets a nudg
 
 ```
 free money = expected income - what you have already committed
-remaining  = free money - what you have spent since the 1st
+available  = free money + anything refunded from a month already reported
+remaining  = available - what you have spent since the 1st
 ```
 
 Set your income and recurring bills up in Actual once — [the guides](docs/budget-setup.md) walk through it click by click — and the dashboard shows what is left in dollars and as a percentage, what is safe to spend today, whether you are ahead of or behind the month's pace, and where you land if the rest of the month looks like the start of it.
@@ -54,6 +55,8 @@ Set your income and recurring bills up in Actual once — [the guides](docs/budg
 On Actual's Tracking Budget this needs no configuration in Clerk at all: budget your expected income and your bills, and Clerk's free money is exactly Actual's own **Projected Savings**, tracked against your spending as the month goes on.
 
 Unspent budget carries forward to its own category for up to a year, so a variable bill absorbs its own swings and an annual charge budgeted a twelfth at a time is covered when it finally lands — instead of blowing a hole in that month.
+
+A refund settles against the month that paid for the purchase. Return something you bought this month and the two cancel; when the purchase belongs to a month already reported, that report stands and the money comes back as yours to spend now — never as spending pushed below zero, which is how a budget ends up claiming you have more than a whole month left.
 
 ### Finds the commitments you forgot about
 

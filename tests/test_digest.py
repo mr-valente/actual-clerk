@@ -84,6 +84,53 @@ def test_committing_everything_leaves_nothing_to_report_on():
     assert payload["priority"] == 4
 
 
+def test_money_refunded_from_an_earlier_month_is_named_beside_the_spending():
+    payload = digest(
+        {
+            "returned_cents": 7400,
+            "available_cents": 215400,
+            "remaining_cents": 197900,
+            "remaining_percent": 0.9187,
+        }
+    )
+    assert "Spent $175.00 of $2,154.00 since the 1st" in payload["message"]
+    assert "Plus $74.00 refunded from an earlier month" in payload["message"]
+
+
+def test_nothing_is_said_about_refunds_when_none_came_back():
+    assert "refunded from an earlier month" not in digest()["message"]
+
+
+def test_a_refund_is_reported_even_when_the_bills_eat_the_income():
+    """Free money is gone, but the returned money is still there to spend."""
+    payload = digest(
+        {
+            "free_cents": 0,
+            "committed_cents": 400000,
+            "returned_cents": 7400,
+            "available_cents": 7400,
+            "remaining_cents": 7400,
+            "remaining_percent": 1.0,
+        }
+    )
+    assert "No free money budgeted" not in payload["message"]
+    assert "$74.00 free money left" in payload["message"]
+
+
+def test_money_coming_back_is_a_change_worth_reporting():
+    """A refund and a matching charge leave what is left unmoved, not unchanged."""
+    payload = digest(
+        report={
+            "month": "2026-08",
+            "returned_cents": 7400,
+            "spent_cents": HEALTHY_REPORT["spent_cents"] + 7400,
+        },
+        previous=prior_report(),
+    )
+    assert "Nothing to report" not in payload["message"]
+    assert payload["budget_change"]["reason"] == "budget_changed"
+
+
 def test_a_broken_connection_is_the_most_urgent_thing_in_the_digest():
     payload = digest(
         health=[

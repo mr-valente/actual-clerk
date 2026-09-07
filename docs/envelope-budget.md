@@ -170,8 +170,14 @@ The dashboard always names the basis used, and shows what has arrived beside wha
 | Spending not yet cleared by the bank | **Yes**, in full |
 | Transfers between your own accounts | No |
 | Off-budget accounts such as a brokerage | No |
-| Refunds | Subtracted from what the month has spent |
+| Refunds | Subtracted from what the same category spent this month; anything left over comes back as money to spend |
 | Income | Counted as income, never as spending |
+
+### Refunds
+
+A refund settles against the month that paid for the purchase. Return something you bought this month and the two cancel, leaving that category where it started.
+
+When the purchase belongs to a month already reported, that report stands — it was true when it was sent, and the money is not available back then, it is available now. So the refund comes back as money this month has to spend, shown as **Refunded from earlier months**, rather than as spending pushed below zero. Free money itself does not move: it stays your expected income minus what you have already budgeted for bills.
 
 ### Carried budget
 

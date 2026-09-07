@@ -97,6 +97,148 @@ def test_a_refund_gives_the_money_back():
     assert result.discretionary_spent_cents == 6000
 
 
+def test_a_refund_for_a_closed_month_is_money_back_rather_than_negative_spending():
+    """The August purchase was charged to August, and August has been reported."""
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 7, 28), -7400, "out"),
+            TransactionInfo("3", datetime.date(2026, 8, 4), 7400, "out"),
+        ]
+    )
+    assert result.returned_cents == 7400
+    assert result.discretionary_spent_cents == 0
+    assert result.spent_cents == 0
+    assert result.free_cents == 208000
+    assert result.available_cents == 215400
+    assert result.remaining_cents == 215400
+
+
+def test_money_back_never_pushes_the_remaining_share_over_a_whole_month():
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 7, 28), -7400, "out"),
+            TransactionInfo("3", datetime.date(2026, 8, 4), 7400, "out"),
+        ]
+    )
+    assert result.remaining_percent == 1.0
+    assert result.spent_percent == 0.0
+
+
+def test_a_refund_cancels_its_own_category_before_it_counts_as_money_back():
+    """Half the refund answers this month's dining; the rest reverses July."""
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 3), -3000, "out"),
+            TransactionInfo("3", datetime.date(2026, 8, 4), 7400, "out"),
+        ]
+    )
+    assert result.discretionary_spent_cents == 0
+    assert result.returned_cents == 4400
+    assert result.available_cents == 212400
+    assert result.remaining_cents == 212400
+
+
+def test_a_refund_does_not_reach_across_into_another_category():
+    """Groceries were spent; a dining refund is not grocery money not spent."""
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 3), -9000, "food"),
+            TransactionInfo("3", datetime.date(2026, 8, 4), 7400, "out"),
+        ]
+    )
+    assert result.discretionary_spent_cents == 9000
+    assert result.returned_cents == 7400
+    assert result.remaining_cents == 208000 + 7400 - 9000
+
+
+def test_money_back_does_not_project_a_month_that_ends_richer_than_it_started():
+    """A negative spend used to extrapolate into a nonsense month-end figure."""
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 7, 28), -7400, "out"),
+            TransactionInfo("3", datetime.date(2026, 8, 4), 7400, "out"),
+        ]
+    )
+    assert result.projected_spend_cents == 0
+    assert result.projected_remaining_cents == 215400
+    assert result.on_track is True
+
+
+def test_money_back_leaves_free_money_equal_to_actuals_projected_savings():
+    """The setup guides tell you to check the two against each other."""
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 7, 28), -7400, "out"),
+            TransactionInfo("3", datetime.date(2026, 8, 4), 7400, "out"),
+        ]
+    )
+    assert result.free_cents == 400000 - 192000
+
+
+def test_an_uncategorized_refund_from_a_closed_month_is_money_back():
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 4), 7400, None),
+        ]
+    )
+    assert result.uncategorized_cents == 0
+    assert result.uncategorized_count == 0
+    assert result.returned_cents == 7400
+    assert result.discretionary_spent_cents == 0
+
+
+def test_a_refund_on_a_deleted_category_from_a_closed_month_is_money_back():
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 4), 3000, "gone"),
+        ]
+    )
+    assert result.returned_cents == 3000
+    assert result.uncategorized_cents == 0
+
+
+def test_money_back_stays_out_of_income():
+    """A refund is not a paycheck: it must not raise expected income."""
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 4), 7400, "out"),
+        ]
+    )
+    assert result.income_received_cents == 400000
+    assert result.expected_income_cents == 400000
+
+
+def test_a_refund_leaves_no_negative_row_in_the_category_breakdown():
+    result = report(
+        [
+            TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),
+            TransactionInfo("2", datetime.date(2026, 8, 3), -3000, "out"),
+            TransactionInfo("4", datetime.date(2026, 8, 5), -4000, "food"),
+            TransactionInfo("3", datetime.date(2026, 8, 4), 7400, "out"),
+        ]
+    )
+    assert result.top_categories == [
+        {
+            "category_id": "food",
+            "category_name": "Groceries",
+            "group_name": "Everyday",
+            "spent_cents": 4000,
+        }
+    ]
+    assert sum(line["spent_cents"] for line in result.top_categories) <= (
+        result.discretionary_spent_cents
+    )
+
+
 def test_a_refund_on_a_committed_category_reduces_its_overspend():
     result = report(
         [

@@ -200,16 +200,20 @@ function budgetHero() {
   }
 
   const free = report.free_cents || 0;
+  const returned = report.returned_cents || 0;
+  // Free money plus what an earlier month handed back: the sum this month is
+  // measured against, and the denominator of every share shown here.
+  const available = report.available_cents ?? free;
   const spent = report.spent_cents || 0;
   const remaining = report.remaining_cents || 0;
-  const spentRatio = free > 0 ? Math.min(1.4, spent / free) : 1;
+  const spentRatio = available > 0 ? Math.min(1.4, spent / available) : 1;
   const paceRatio = report.days_in_month ? report.day_of_month / report.days_in_month : 0;
   const overspent = remaining < 0;
   const paceClass = report.on_track ? "pace-ahead" : "pace-behind";
   // "-49% left" reads as a quantity of something you still have. Past zero the
   // honest phrasing is how far past it you are.
   const share = Number(report.remaining_percent) || 0;
-  const shareLabel = free <= 0 ? "" : share < 0
+  const shareLabel = available <= 0 ? "" : share < 0
     ? `${percent(Math.abs(share))} over budget`
     : `${percent(share)} left`;
   const paceDelta = Math.abs(report.pace_delta_cents || 0);
@@ -233,7 +237,7 @@ function budgetHero() {
         </div>
         <p class="hero-sub">${overspent
           ? `You are ${money(Math.abs(remaining))} past the free money for this month.`
-          : `${money(spent)} of ${money(free)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.</p>
+          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month, refunding a purchase from an earlier one.` : ""}</p>
       </div>
       <div class="hero-side">
         <div class="hero-chip"><span>Safe to spend daily</span><strong>${money(report.daily_safe_to_spend_cents)}</strong></div>
@@ -257,6 +261,7 @@ function budgetHero() {
       <div><span>Discretionary spent</span><strong class="money">${money(report.discretionary_spent_cents)}</strong></div>
       <div><span>Committed overspend</span><strong class="money ${report.committed_overspend_cents ? "negative" : ""}">${money(report.committed_overspend_cents)}</strong></div>
       ${report.committed_carried_cents ? `<div><span>Set aside from earlier months</span><strong class="money positive">${money(report.committed_carried_cents)}</strong></div>` : ""}
+      ${returned ? `<div><span>Refunded from earlier months</span><strong class="money positive">${money(returned)}</strong></div>` : ""}
       <div><span>Uncategorized</span><strong class="money">${money(report.uncategorized_cents)}${report.uncategorized_count ? ` · ${report.uncategorized_count}` : ""}</strong></div>
     </div>
   </section>`;
@@ -413,7 +418,7 @@ async function renderOverview() {
 
     <section class="grid metrics">
       <article class="metric-card"><span class="metric-icon">▤</span><span class="metric-label">Committed (budgeted)</span><div class="metric-value">${money(report.committed_cents || 0, { compact: true })}</div><span class="metric-note">${money(report.committed_spent_cents || 0)} of it spent so far</span></article>
-      <article class="metric-card"><span class="metric-icon">◇</span><span class="metric-label">Discretionary spent</span><div class="metric-value">${money(report.discretionary_spent_cents || 0, { compact: true })}</div><span class="metric-note">against ${money(report.free_cents || 0)} of free money</span></article>
+      <article class="metric-card"><span class="metric-icon">◇</span><span class="metric-label">Discretionary spent</span><div class="metric-value">${money(report.discretionary_spent_cents || 0, { compact: true })}</div><span class="metric-note">against ${money(report.available_cents ?? report.free_cents ?? 0)} available</span></article>
       <article class="metric-card ${report.uncategorized_count ? "warning" : "good"}"><span class="metric-icon">✎</span><span class="metric-label">Uncategorized this month</span><div class="metric-value">${report.uncategorized_count || 0}</div><span class="metric-note">${money(report.uncategorized_cents || 0)} unaccounted for</span></article>
       <article class="metric-card ${staleSnapshot ? "warning" : ""}"><span class="metric-icon">◈</span><span class="metric-label">Filed by Clerk today</span><div class="metric-value">${counts.applied_today || 0}</div><span class="metric-note">${counts.needs_review ? `${counts.needs_review} waiting · ` : ""}read from Actual ${escapeHtml(lastRead)}</span></article>
     </section>

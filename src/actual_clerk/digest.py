@@ -23,8 +23,15 @@ DASH = "\u2014"
 
 # These are the parts of the report that represent the budget itself. Daily
 # pace and safe-to-spend figures move with the calendar even when no money did,
-# so they must not turn a quiet morning into a supposed budget change.
-_BUDGET_STATE_FIELDS = ("free_cents", "spent_cents", "remaining_cents")
+# so they must not turn a quiet morning into a supposed budget change. Returned
+# money is here because a refund and a matching charge on the same day leave
+# what is left unmoved while two real things happened to the month.
+_BUDGET_STATE_FIELDS = (
+    "free_cents",
+    "returned_cents",
+    "spent_cents",
+    "remaining_cents",
+)
 
 
 def plural(count: int, noun: str) -> str:
@@ -159,6 +166,10 @@ def build_digest(
     priority = 3
 
     free = int(report.get("free_cents", 0))
+    returned = int(report.get("returned_cents", 0))
+    # What the month is measured against: free money plus anything an earlier
+    # month handed back. Older stored reports carry no such figure.
+    available = int(report.get("available_cents", free))
     remaining = int(report.get("remaining_cents", 0))
     spent = int(report.get("spent_cents", 0))
     percent = float(report.get("remaining_percent", 0.0))
@@ -197,7 +208,7 @@ def build_digest(
                 "Nothing to report — your discretionary budget is unchanged since the last report."
             )
         budget_items.append(quiet_message)
-    elif free <= 0:
+    elif available <= 0:
         # Nothing is free, so there is no headline figure to lead with.
         budget_items.extend(
             [
@@ -222,8 +233,13 @@ def build_digest(
         if show("spending"):
             budget_items.append(
                 f"Spent {format_money(spent, currency)} of "
-                f"{format_money(free, currency)} since the 1st"
+                f"{format_money(available, currency)} since the 1st"
             )
+            if returned > 0:
+                budget_items.append(
+                    f"Plus {format_money(returned, currency)} refunded from an "
+                    "earlier month"
+                )
         if show("safe_to_spend") and remaining > 0:
             safe = int(report.get("daily_safe_to_spend_cents", 0))
             budget_items.append(

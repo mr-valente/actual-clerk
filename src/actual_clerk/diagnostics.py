@@ -699,6 +699,10 @@ def build_report(
     for label, value in buckets.items():
         r.row(label, money(value, cur))
     r.row("total", money(sum(buckets.values()), cur))
+    r.text("")
+    r.text("  These are raw sums, so a refund counts against its own category here")
+    r.text("  even when it reverses a charge from an earlier month. Section 8 reports")
+    r.text("  that part as returned instead of as spending driven below zero.")
     if orphans:
         deleted_names = (probe or {}).get("deleted_categories") or {}
         r.finding(
@@ -788,6 +792,8 @@ def build_report(
         "committed_spent_cents",
         "committed_overspend_cents",
         "free_cents",
+        "returned_cents",
+        "available_cents",
         "discretionary_spent_cents",
         "uncategorized_cents",
         "spent_cents",
@@ -798,9 +804,10 @@ def build_report(
     r.row("uncategorized_count", live["uncategorized_count"])
     r.row("configured", live["configured"])
     r.text("")
-    r.text("  free    = expected_income - committed")
-    r.text("  spent   = discretionary_spent + committed_overspend")
-    r.text("  remain  = free - spent")
+    r.text("  free      = expected_income - committed")
+    r.text("  available = free + returned")
+    r.text("  spent     = discretionary_spent + committed_overspend")
+    r.text("  remain    = available - spent")
 
     r.sub("stored snapshot vs live recompute")
     drifted = 0

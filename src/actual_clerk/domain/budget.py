@@ -3,13 +3,21 @@
 The model is deliberately small enough to hold in your head:
 
     free money = expected income - what is already committed
-    remaining  = free money - what has been spent since the 1st
+    available  = free money + money handed back by a month already reported
+    remaining  = available - what has been spent since the 1st
 
 Everything the user sets up as a recurring bill lives in Actual as a budgeted
 amount. Clerk reads those amounts, subtracts them from expected income, and
 tracks the rest against the month's discretionary spending. Overspending a
 committed category also eats into free money, because the money has to come
 from somewhere.
+
+A refund belongs to the month that was charged for the purchase. Within its own
+category it cancels this month's spending first. Whatever is left over reverses
+a charge from a month that has already been reported and closed: that report
+stands, and the money is not spending driven below zero now -- it is money this
+month has back to spend. Free money itself is left alone, so it remains the
+figure Actual shows as Projected Savings, and the returned money sits beside it.
 """
 
 from __future__ import annotations
@@ -74,6 +82,10 @@ class BudgetReport:
     # category. Free money was already reduced by it at the time.
     committed_carried_cents: int
     free_cents: int
+    # Refunded beyond what this month spent in that category, so it reverses a
+    # charge an earlier report already counted. Money back, not negative spend.
+    returned_cents: int
+    available_cents: int
     discretionary_spent_cents: int
     uncategorized_cents: int
     uncategorized_count: int
@@ -242,9 +254,11 @@ def build_budget_report(
 
     income_received = 0
     committed_spent: dict[str, int] = {}
-    discretionary_by_category: dict[str, int] = {}
-    discretionary_total = 0
-    uncategorized_cents = 0
+    # Charges and refunds stay apart until the whole month is in hand: a refund
+    # can only be netted against its own category once that category's spending
+    # for the month is known.
+    discretionary_charges: dict[str, int] = {}
+    discretionary_refunds: dict[str, int] = {}
     uncategorized_count = 0
 
     for transaction in transactions:
@@ -269,31 +283,54 @@ def build_budget_report(
             continue
         spend = transaction.spend_cents
         if spend <= 0:
-            # A refund reduces what the month has spent.
+            # Money coming back. A committed category keeps the simpler rule --
+            # it draws on its own budget rather than on free money -- while
+            # which month a discretionary refund belongs to is settled below.
             if category_id in committed_ids:
                 committed_spent[category_id] = (
                     committed_spent.get(category_id, 0) + transaction.amount_cents * -1
                 )
-            elif category_id:
-                discretionary_by_category[category_id] = (
-                    discretionary_by_category.get(category_id, 0) - transaction.amount_cents
-                )
-                discretionary_total -= transaction.amount_cents
             else:
-                discretionary_total -= transaction.amount_cents
-                uncategorized_cents -= transaction.amount_cents
+                discretionary_refunds[category_id] = (
+                    discretionary_refunds.get(category_id, 0) + transaction.amount_cents
+                )
             continue
         if category_id in committed_ids:
             committed_spent[category_id] = committed_spent.get(category_id, 0) + spend
-        elif category_id:
-            discretionary_by_category[category_id] = (
-                discretionary_by_category.get(category_id, 0) + spend
-            )
-            discretionary_total += spend
         else:
-            discretionary_total += spend
-            uncategorized_cents += spend
-            uncategorized_count += 1
+            discretionary_charges[category_id] = (
+                discretionary_charges.get(category_id, 0) + spend
+            )
+            if not category_id:
+                uncategorized_count += 1
+
+    # A refund cancels its own category's spending for this month first. What it
+    # cannot cancel there reverses a charge this month never counted, so it is
+    # money handed back rather than spending pushed below zero. That is what
+    # keeps "spent" a quantity of money that actually left, and keeps the
+    # remaining share at or under 100% of what the month has to spend.
+    discretionary_by_category: dict[str, int] = {}
+    uncategorized_cents = 0
+    returned_cents = 0
+    # Charged categories keep the order they were seen in, so a tie between two
+    # equal spends still breaks the way it did before refunds were held back.
+    ordered = list(discretionary_charges) + [
+        category_id
+        for category_id in discretionary_refunds
+        if category_id not in discretionary_charges
+    ]
+    for category_id in ordered:
+        net = discretionary_charges.get(category_id, 0) - discretionary_refunds.get(
+            category_id, 0
+        )
+        if net < 0:
+            returned_cents -= net
+            net = 0
+        if category_id:
+            discretionary_by_category[category_id] = net
+        else:
+            uncategorized_cents = net
+    discretionary_total = sum(discretionary_by_category.values()) + uncategorized_cents
 
     committed_spent_total = sum(committed_spent.values())
     carried = committed_carryover(
@@ -334,15 +371,20 @@ def build_budget_report(
     else:
         expected_income, basis = income_received, "unknown"
 
+    # Free money is expected income minus commitments and nothing else, so it
+    # stays the number Actual shows as Projected Savings and the setup guides
+    # tell you to check it against. Returned money is added beside it, and it is
+    # the sum the month is actually measured against.
     free_cents = expected_income - committed_cents
+    available_cents = free_cents + returned_cents
     spent_cents = discretionary_total + committed_overspend
-    remaining_cents = free_cents - spent_cents
+    remaining_cents = available_cents - spent_cents
     configured = expected_income > 0
 
-    if free_cents > 0:
-        remaining_percent = remaining_cents / free_cents
-        spent_percent = spent_cents / free_cents
-        pace_expected = round(free_cents * day_of_month / days_in_month)
+    if available_cents > 0:
+        remaining_percent = remaining_cents / available_cents
+        spent_percent = spent_cents / available_cents
+        pace_expected = round(available_cents * day_of_month / days_in_month)
     else:
         remaining_percent = 0.0
         spent_percent = 0.0
@@ -414,6 +456,8 @@ def build_budget_report(
         committed_overspend_cents=committed_overspend,
         committed_carried_cents=sum(carried.values()),
         free_cents=free_cents,
+        returned_cents=returned_cents,
+        available_cents=available_cents,
         discretionary_spent_cents=discretionary_total,
         uncategorized_cents=uncategorized_cents,
         uncategorized_count=uncategorized_count,
@@ -424,9 +468,9 @@ def build_budget_report(
         daily_safe_to_spend_cents=max(0, remaining_cents) // days_remaining,
         pace_expected_cents=pace_expected,
         pace_delta_cents=pace_expected - spent_cents,
-        on_track=spent_cents <= pace_expected or free_cents <= 0,
+        on_track=spent_cents <= pace_expected or available_cents <= 0,
         projected_spend_cents=projected_spend,
-        projected_remaining_cents=free_cents - projected_spend,
+        projected_remaining_cents=available_cents - projected_spend,
         committed_groups=committed_group_names,
         flexible_groups=sorted(groups - set(committed_group_names)),
         top_categories=top_categories,
