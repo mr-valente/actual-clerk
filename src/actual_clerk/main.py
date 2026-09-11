@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import logging
 import mimetypes
@@ -26,6 +27,7 @@ from actual_clerk.config import TIMEZONE_CHOSEN_KEY, SettingsManager, data_direc
 from actual_clerk.db import Database
 from actual_clerk.diagnostics import build_report
 from actual_clerk.plaid_links import describe, public_item, read_items
+from actual_clerk.plaid_sync import PlaidSyncEngine
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
 from actual_clerk.schemas import (
     BulkResolveRequest,
@@ -35,10 +37,13 @@ from actual_clerk.schemas import (
     EnqueueRequest,
     ExchangeRequest,
     LinkTokenRequest,
+    MigrateToPlaidRequest,
+    MigrateToSimpleFinRequest,
     MonitoringRequest,
     ResolveDecisionRequest,
     ResolveRuleRequest,
     SandboxItemRequest,
+    ServerTokenRequest,
     SettingsPatch,
     UpdateLinkRequest,
 )
@@ -953,6 +958,255 @@ async def plaid_delete_link(actual_account_id: str, request: Request) -> dict[st
         raise HTTPException(status_code=404, detail="Mapping not found")
     await _jobs(request).enqueue("health", trigger="manual")
     return {"deleted": True}
+
+
+# ------------------------------------------------------------------ migration
+#
+# Moving one account's feed between providers, in either direction, with a
+# dry run for every write. The state of an account is derived, never stored:
+# what Actual links it to, and whether Clerk holds an enabled mapping.
+
+
+def _feed_state(actual_source: str, link: dict[str, Any] | None) -> str:
+    clerk = bool(link and link.get("enabled"))
+    if clerk and actual_source:
+        return "both"
+    if clerk:
+        return "plaid"
+    if actual_source:
+        return "simplefin" if actual_source == "simpleFin" else "actual"
+    if link:
+        return "plaid_paused"
+    return "manual"
+
+
+async def _simplefin_server(request: Request, *, with_accounts: bool) -> dict[str, Any]:
+    gateway = _gateway(request)
+    try:
+        status_payload = await gateway.simplefin_server_status()
+    except ActualGatewayError as exc:
+        return {"configured": False, "error": str(exc), "accounts": []}
+    result: dict[str, Any] = {
+        "configured": bool(status_payload.get("configured")),
+        "error": status_payload.get("error") or "",
+        "accounts": [],
+    }
+    if with_accounts and result["configured"]:
+        try:
+            listing = await gateway.simplefin_server_accounts()
+        except ActualGatewayError as exc:
+            result["error"] = str(exc)
+        else:
+            result["accounts"] = listing.get("accounts") or []
+            if listing.get("error"):
+                result["error"] = f"{listing['error']} {listing.get('reason') or ''}".strip()
+    return result
+
+
+@app.get("/api/simplefin/server")
+async def simplefin_server(request: Request, accounts: bool = Query(False)) -> dict[str, Any]:
+    """Whether the Actual *server* holds a SimpleFIN token, and what it can see."""
+    return await _simplefin_server(request, with_accounts=accounts)
+
+
+@app.post("/api/simplefin/server-token")
+async def set_simplefin_server_token(payload: ServerTokenRequest, request: Request) -> dict[str, Any]:
+    """Store a SimpleFIN setup token on the Actual server, as Actual's own UI does."""
+    token = "".join(payload.setup_token.split())
+    await _gateway(request).set_server_secret("simplefin_token", token)
+    return await _simplefin_server(request, with_accounts=False)
+
+
+@app.delete("/api/simplefin/server-token")
+async def clear_simplefin_server_token(request: Request) -> dict[str, Any]:
+    """Remove the SimpleFIN token and derived access key from the Actual server.
+
+    Accounts Actual still links to SimpleFIN stay linked; their next sync
+    simply fails until a token is stored again.
+    """
+    gateway = _gateway(request)
+    await gateway.set_server_secret("simplefin_token", None)
+    with contextlib.suppress(ActualGatewayError):
+        await gateway.set_server_secret("simplefin_accessKey", None)
+    return await _simplefin_server(request, with_accounts=False)
+
+
+@app.get("/api/migration")
+async def migration_overview(request: Request) -> dict[str, Any]:
+    """Every open Actual account, what feeds it, and what it could move to."""
+    settings = _settings_manager(request).get()
+    database = _database(request)
+    gateway = _gateway(request)
+    accounts = await gateway.list_accounts_detailed()
+    links = {link["actual_account_id"]: link for link in database.list_bank_links()}
+    health = {item["account_id"]: item for item in database.health_snapshots()}
+    server = await _simplefin_server(request, with_accounts=True)
+    server_accounts = {account["account_id"]: account for account in server["accounts"]}
+    plaid: dict[str, Any] = {"configured": settings.plaid_configured, "items": []}
+    if settings.plaid_configured:
+        entries = await read_items(database, settings)
+        plaid = {
+            **describe(entries, list(links.values()), environment=settings.plaid_env,
+                       items_ever=len(database.list_plaid_items(include_removed=True))),
+            "configured": True,
+        }
+    rows = []
+    for account in accounts:
+        if account.get("closed"):
+            continue
+        link = links.get(account["id"])
+        actual_source = account.get("sync_source") or ""
+        remembered = (link or {}).get("previous_external_id") or ""
+        simplefin_id = account.get("external_id") if actual_source == "simpleFin" else remembered
+        rows.append(
+            {
+                "id": account["id"],
+                "name": account["name"],
+                "off_budget": account.get("off_budget", False),
+                "actual_sync_source": actual_source,
+                "actual_external_id": account.get("external_id") or "",
+                "bank_name": account.get("bank_name") or "",
+                "state": _feed_state(actual_source, link),
+                "link": _serialize_record(link) if link else None,
+                "health_status": (health.get(account["id"]) or {}).get("status", "unknown"),
+                "simplefin_account": server_accounts.get(simplefin_id),
+            }
+        )
+    return {
+        "accounts": rows,
+        "plaid": plaid,
+        "simplefin_server": {k: v for k, v in server.items() if k != "accounts"},
+        "simplefin_accounts": server["accounts"],
+        "clerk_simplefin_configured": bool(settings.secret_value("simplefin_access_url")),
+    }
+
+
+@app.post("/api/migration/to-plaid")
+async def migrate_to_plaid(payload: MigrateToPlaidRequest, request: Request) -> dict[str, Any]:
+    """Feed an Actual account from Plaid; a dry run shows what the first delivery would do."""
+    settings = _settings_manager(request).get()
+    database = _database(request)
+    gateway = _gateway(request)
+    item = _plaid_item_or_404(request, payload.item_id)
+    account = next(
+        (a for a in await gateway.list_accounts_detailed() if a["id"] == payload.actual_account_id),
+        None,
+    )
+    if account is None or account.get("closed"):
+        raise HTTPException(status_code=404, detail="Actual account not found")
+    client = _plaid_client(request)
+    try:
+        externals = (await client.get_accounts(item["access_token"]))["accounts"]
+    finally:
+        await client.close()
+    external = next((a for a in externals if a["id"] == payload.external_account_id), None)
+    if external is None:
+        raise HTTPException(status_code=404, detail="That account is not on this bank connection")
+    other = database.list_bank_links(enabled_only=True)
+    taken = next(
+        (candidate for candidate in other if candidate["external_account_id"] == external["id"]
+         and candidate["actual_account_id"] != account["id"]),
+        None,
+    )
+    if taken:
+        raise HTTPException(status_code=409, detail="That bank account is already mapped to another Actual account")
+    existing = database.get_bank_link(account["id"])
+    actual_source = account.get("sync_source") or ""
+    cutover = payload.cutover_date or datetime.now(settings.zone).date().isoformat()
+    link = {
+        "actual_account_id": account["id"],
+        "provider": "plaid",
+        "item_id": item["item_id"],
+        "external_account_id": external["id"],
+        "external_name": external["name"],
+        "mask": external["mask"],
+        "account_type": external["type"],
+        "account_subtype": external["subtype"],
+        "institution": item.get("institution_name") or "",
+        "enabled": True,
+        "cutover_date": cutover,
+        "last_error": "",
+        "previous_provider": actual_source or (existing or {}).get("previous_provider") or "",
+        "previous_external_id": (account.get("external_id") if actual_source else "")
+        or (existing or {}).get("previous_external_id") or "",
+    }
+    will_unlink = bool(payload.unlink_actual and actual_source)
+    if payload.dry_run:
+        engine = PlaidSyncEngine(database, settings, gateway, today=datetime.now(settings.zone).date())
+        preview = await engine.preview_link({**link, "last_import_at": None})
+        return {
+            "dry_run": True,
+            "account": {"id": account["id"], "name": account["name"], "actual_sync_source": actual_source},
+            "will_unlink_actual": will_unlink,
+            "keeps_actual_link": bool(actual_source and not payload.unlink_actual),
+            "preview": preview,
+        }
+    if will_unlink:
+        await gateway.unlink_account(account["id"])
+    try:
+        stored = database.upsert_bank_link(link)
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=409, detail="That bank account is already mapped to another Actual account") from exc
+    await _jobs(request).enqueue("sync", trigger="manual")
+    return {
+        "dry_run": False,
+        "unlinked_actual": will_unlink,
+        "link": _serialize_record(stored),
+        "sync_queued": True,
+    }
+
+
+@app.post("/api/migration/to-simplefin")
+async def migrate_to_simplefin(payload: MigrateToSimpleFinRequest, request: Request) -> dict[str, Any]:
+    """Hand an account back to Actual's own SimpleFIN link, from a starting date."""
+    settings = _settings_manager(request).get()
+    database = _database(request)
+    gateway = _gateway(request)
+    account = next(
+        (a for a in await gateway.list_accounts_detailed() if a["id"] == payload.actual_account_id),
+        None,
+    )
+    if account is None or account.get("closed"):
+        raise HTTPException(status_code=404, detail="Actual account not found")
+    link = database.get_bank_link(account["id"])
+    server = await _simplefin_server(request, with_accounts=True)
+    warnings: list[str] = []
+    if not server["configured"]:
+        warnings.append("The Actual server holds no SimpleFIN token. Store one in Settings first.")
+    if server.get("error"):
+        warnings.append(f"The Actual server reported: {server['error']}")
+    wanted = payload.simplefin_account_id or (link or {}).get("previous_external_id") or ""
+    remote = next((a for a in server["accounts"] if a["account_id"] == wanted), None)
+    if not wanted:
+        warnings.append("Choose the SimpleFIN account this Actual account should follow.")
+    elif remote is None and server["configured"]:
+        warnings.append("SimpleFIN did not return that account. Check the SimpleFIN Bridge.")
+    if account.get("sync_source") == "simpleFin" and account.get("external_id") == wanted:
+        warnings.append("Actual already links this account to that SimpleFIN account.")
+    starting = payload.starting_date or (link or {}).get("cutover_date") or datetime.now(settings.zone).date().isoformat()
+    summary = {
+        "account": {"id": account["id"], "name": account["name"], "actual_sync_source": account.get("sync_source") or ""},
+        "simplefin_account": remote,
+        "starting_date": starting,
+        "will_pause_plaid_link": bool(link and link.get("enabled")),
+        "warnings": warnings,
+        "note": (
+            "Actual imports from SimpleFIN from the starting date onward and matches rows "
+            "Clerk delivered from Plaid by amount and date, so the overlap is adopted rather "
+            "than duplicated."
+        ),
+    }
+    if payload.dry_run:
+        return {"dry_run": True, **summary}
+    if warnings and (remote is None or not server["configured"]):
+        raise HTTPException(status_code=409, detail=" ".join(warnings))
+    if link and link.get("enabled"):
+        database.update_bank_link(account["id"], enabled=False)
+    linked = await gateway.link_simplefin_account(
+        remote, account_id=account["id"], starting_date=datetime.fromisoformat(starting).date()
+    )
+    await _jobs(request).enqueue("sync", trigger="manual")
+    return {"dry_run": False, **summary, "linked": linked, "sync_queued": True}
 
 
 # ------------------------------------------------------------------- settings

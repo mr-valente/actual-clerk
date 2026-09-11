@@ -10,6 +10,7 @@ from SimpleFIN to Plaid while keeping the road back open.
 | [stage-1.md](stage-1.md) | Provider-neutral foundations: what changed, what was verified live |
 | [stage-2.md](stage-2.md) | Plaid client, Link, Items, account mapping, and Plaid in the health check |
 | [stage-3.md](stage-3.md) | The sync engine: refresh, cursor stream, adoption, import, opening balances |
+| [stage-4.md](stage-4.md) | Migration tooling in both directions, previews, backfill, server token management |
 
 Stages are implemented one at a time on the `feature/plaid` branch; each ends
 with a checkpoint before the next begins.

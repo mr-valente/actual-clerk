@@ -99,6 +99,49 @@ class FakeGateway:
         self.created_accounts.append((name, off_budget))
         return {"id": "acct-new", "name": name, "off_budget": off_budget}
 
+    # ---- bank links (Stage 1 primitives), scripted per test
+    detailed_accounts: list[dict[str, Any]] = []
+    server_configured = True
+    server_accounts: list[dict[str, Any]] = []
+
+    async def list_accounts_detailed(self):
+        return [dict(account) for account in self.detailed_accounts]
+
+    async def simplefin_server_status(self):
+        return {"configured": self.server_configured, "error": ""}
+
+    async def simplefin_server_accounts(self):
+        return {"accounts": list(self.server_accounts), "error": "", "reason": ""}
+
+    async def unlink_account(self, account_id):
+        self.unlinked = getattr(self, "unlinked", [])
+        self.unlinked.append(account_id)
+        for account in self.detailed_accounts:
+            if account["id"] == account_id:
+                account["sync_source"] = ""
+                account["external_id"] = ""
+        return {"id": account_id, "previous_sync_source": "simpleFin"}
+
+    async def link_simplefin_account(self, external_account, *, account_id="", off_budget=False, starting_date=None, starting_balance_cents=None):
+        self.relinked = getattr(self, "relinked", [])
+        self.relinked.append((account_id, external_account["account_id"], starting_date))
+        return {"id": account_id, "sync_source": "simpleFin", "external_id": external_account["account_id"]}
+
+    async def set_server_secret(self, name, value):
+        self.secrets = getattr(self, "secrets", [])
+        self.secrets.append((name, value))
+        if value is None:
+            self.server_configured = False
+        else:
+            self.server_configured = True
+        return {"name": name, "cleared": value is None}
+
+    async def account_transactions(self, account_id, *, start=None, end=None):
+        return []
+
+    async def import_transactions(self, account_id, transactions, *, dry_run=False):
+        return {"added": [], "updated": [], "errors": [], "preview": [], "dry_run": dry_run}
+
 
 @pytest.fixture
 def gateway():
@@ -1005,3 +1048,115 @@ async def test_a_paused_mapping_is_replaced_by_mapping_the_account_again(client,
     assert link["item_id"] == "item-1"
     assert link["external_account_id"] == "plaid-chk"
     assert link["enabled"] is True
+
+
+# ----------------------------------------------------------------- migration
+
+
+@pytest.fixture
+def feeds(client, gateway, plaid, monkeypatch):
+    """One SimpleFIN-linked account, one manual account, one Plaid Item, a server token."""
+    gateway.detailed_accounts = [
+        {"id": "acct-sf", "name": "Checking", "closed": False, "off_budget": False, "sync_source": "simpleFin", "external_id": "sf-1", "bank_name": "Bank"},
+        {"id": "acct-manual", "name": "Cash", "closed": False, "off_budget": False, "sync_source": "", "external_id": "", "bank_name": ""},
+        {"id": "acct-closed", "name": "Old", "closed": True, "off_budget": False, "sync_source": "", "external_id": "", "bank_name": ""},
+    ]
+    gateway.server_accounts = [{"account_id": "sf-1", "name": "CHECKING (0010)", "institution": "Bank", "org_domain": "bank.example", "org_id": "", "balance": "12.00", "currency": "USD", "balance_date": 1}]
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1", "institution_name": "Platypus"})
+
+    async def sync_page(self, access_token, *, cursor="", count=500):
+        return {"added": [{"transaction_id": "p1", "account_id": "plaid-chk", "amount": 4.5, "date": "2026-09-02", "name": "SHOP", "pending": False}],
+                "modified": [], "removed": [], "next_cursor": "c1", "has_more": False, "update_status": "HISTORICAL_UPDATE_COMPLETE",
+                "accounts": [{"id": "plaid-chk", "balance_cents": 50000}]}
+
+    monkeypatch.setattr("actual_clerk.clients.plaid.PlaidClient.transactions_sync_page", sync_page)
+    return gateway
+
+
+async def test_the_migration_overview_derives_each_accounts_feed_state(client, feeds):
+    client.database.upsert_bank_link({"actual_account_id": "acct-manual", "provider": "plaid", "item_id": "item-1", "external_account_id": "plaid-chk", "enabled": False, "previous_external_id": "sf-old"})
+    body = (await client.get("/api/migration")).json()
+    by_id = {row["id"]: row for row in body["accounts"]}
+    assert set(by_id) == {"acct-sf", "acct-manual"}, "closed accounts are left out"
+    assert by_id["acct-sf"]["state"] == "simplefin"
+    assert by_id["acct-sf"]["simplefin_account"]["name"] == "CHECKING (0010)"
+    assert by_id["acct-manual"]["state"] == "plaid_paused"
+    assert body["simplefin_server"]["configured"] is True
+    assert body["plaid"]["items"][0]["item_id"] == "item-1"
+    assert body["clerk_simplefin_configured"] is False
+
+
+async def test_moving_to_plaid_previews_then_unlinks_maps_and_syncs(client, feeds):
+    preview = await client.post("/api/migration/to-plaid", json={"actual_account_id": "acct-sf", "item_id": "item-1", "external_account_id": "plaid-chk", "cutover_date": "2026-09-01", "dry_run": True})
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["dry_run"] is True
+    assert body["will_unlink_actual"] is True
+    assert body["preview"]["would_import"] == 1
+    assert body["preview"]["opening_balance_cents"] == 50000 + 450
+    assert feeds.unlinked if hasattr(feeds, "unlinked") else True
+    assert client.database.get_bank_link("acct-sf") is None, "a dry run writes nothing"
+    assert getattr(feeds, "unlinked", []) == []
+
+    applied = await client.post("/api/migration/to-plaid", json={"actual_account_id": "acct-sf", "item_id": "item-1", "external_account_id": "plaid-chk", "cutover_date": "2026-09-01"})
+    assert applied.status_code == 200, applied.text
+    assert applied.json()["unlinked_actual"] is True
+    assert feeds.unlinked == ["acct-sf"]
+    link = client.database.get_bank_link("acct-sf")
+    assert link["enabled"] is True
+    assert link["previous_provider"] == "simpleFin"
+    assert link["previous_external_id"] == "sf-1"
+    assert link["cutover_date"] == "2026-09-01"
+    assert client.database.last_job("sync")["status"] == "queued"
+
+
+async def test_moving_to_plaid_can_keep_actuals_link_and_refuses_a_taken_account(client, feeds):
+    kept = await client.post("/api/migration/to-plaid", json={"actual_account_id": "acct-sf", "item_id": "item-1", "external_account_id": "plaid-chk", "unlink_actual": False, "dry_run": True})
+    assert kept.json()["keeps_actual_link"] is True
+    client.database.upsert_bank_link({"actual_account_id": "acct-manual", "provider": "plaid", "item_id": "item-1", "external_account_id": "plaid-chk"})
+    taken = await client.post("/api/migration/to-plaid", json={"actual_account_id": "acct-sf", "item_id": "item-1", "external_account_id": "plaid-chk"})
+    assert taken.status_code == 409
+    missing = await client.post("/api/migration/to-plaid", json={"actual_account_id": "acct-ghost", "item_id": "item-1", "external_account_id": "plaid-chk"})
+    assert missing.status_code == 404
+
+
+async def test_moving_back_to_simplefin_pauses_the_mapping_and_relinks_from_the_date(client, feeds):
+    client.database.upsert_bank_link({"actual_account_id": "acct-manual", "provider": "plaid", "item_id": "item-1", "external_account_id": "plaid-chk", "cutover_date": "2026-09-01", "previous_provider": "simpleFin", "previous_external_id": "sf-1"})
+    preview = await client.post("/api/migration/to-simplefin", json={"actual_account_id": "acct-manual", "dry_run": True})
+    assert preview.status_code == 200, preview.text
+    body = preview.json()
+    assert body["simplefin_account"]["account_id"] == "sf-1", "the remembered account is preselected"
+    assert body["starting_date"] == "2026-09-01"
+    assert body["will_pause_plaid_link"] is True
+    assert body["warnings"] == []
+    assert not hasattr(feeds, "relinked")
+
+    applied = await client.post("/api/migration/to-simplefin", json={"actual_account_id": "acct-manual", "starting_date": "2026-09-05"})
+    assert applied.status_code == 200, applied.text
+    assert feeds.relinked == [("acct-manual", "sf-1", datetime.date(2026, 9, 5))]
+    assert client.database.get_bank_link("acct-manual")["enabled"] is False
+    assert client.database.last_job("sync")["status"] == "queued"
+
+
+async def test_moving_back_to_simplefin_needs_a_server_token_and_a_known_account(client, feeds):
+    feeds.server_configured = False
+    blocked = await client.post("/api/migration/to-simplefin", json={"actual_account_id": "acct-manual", "simplefin_account_id": "sf-1"})
+    assert blocked.status_code == 409
+    assert "no SimpleFIN token" in blocked.json()["detail"]
+    feeds.server_configured = True
+    unknown = await client.post("/api/migration/to-simplefin", json={"actual_account_id": "acct-manual", "simplefin_account_id": "sf-nope", "dry_run": True})
+    assert any("did not return" in warning for warning in unknown.json()["warnings"])
+    already = await client.post("/api/migration/to-simplefin", json={"actual_account_id": "acct-sf", "simplefin_account_id": "sf-1", "dry_run": True})
+    assert any("already links" in warning for warning in already.json()["warnings"])
+
+
+async def test_the_server_simplefin_token_can_be_stored_and_removed(client, feeds):
+    status = (await client.get("/api/simplefin/server?accounts=true")).json()
+    assert status["configured"] is True
+    assert status["accounts"][0]["account_id"] == "sf-1"
+    stored = await client.post("/api/simplefin/server-token", json={"setup_token": "aHR0cHM6Ly9icmlkZ2Uu c2ltcGxlZmluLm9yZy8"})
+    assert stored.status_code == 200
+    assert feeds.secrets[-1] == ("simplefin_token", "aHR0cHM6Ly9icmlkZ2Uuc2ltcGxlZmluLm9yZy8")
+    removed = await client.delete("/api/simplefin/server-token")
+    assert removed.json()["configured"] is False
+    assert feeds.secrets[-2:] == [("simplefin_token", None), ("simplefin_accessKey", None)]

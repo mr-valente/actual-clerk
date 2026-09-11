@@ -211,7 +211,12 @@ at a time with SimpleFIN left running for a settling period, compare balances
 via the health page, then unlink the rest and clear the server token. Reverse
 path documented alongside.
 
-## 5. Open questions to settle as we go
+## 5. Progress
+
+Stages 1 to 4 are implemented on `feature/plaid`; each has its own note in
+this folder. Stage 5 is a runbook, written when the Trial account exists.
+
+## 6. Open questions to settle as we go
 
 - Where the sandbox Actual server should run for testing (a local throwaway
   container is assumed).

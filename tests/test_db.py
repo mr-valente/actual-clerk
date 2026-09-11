@@ -657,3 +657,27 @@ def test_adoptions_are_logged_newest_first(database):
     rows = database.list_adoptions(account_id="acct-1")
     assert [row["reason"] for row in rows] == ["posted", "cutover"]
     assert database.list_adoptions(account_id="other") == []
+
+
+def test_link_tables_from_the_first_plaid_builds_gain_the_previous_provider_columns(data_dir):
+    path = data_dir / "clerk.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE bank_links (actual_account_id TEXT PRIMARY KEY, provider TEXT NOT NULL, "
+            "item_id TEXT NOT NULL DEFAULT '', external_account_id TEXT NOT NULL, "
+            "external_name TEXT NOT NULL DEFAULT '', mask TEXT NOT NULL DEFAULT '', "
+            "account_type TEXT NOT NULL DEFAULT '', account_subtype TEXT NOT NULL DEFAULT '', "
+            "institution TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, "
+            "cutover_date TEXT NOT NULL DEFAULT '', last_import_at REAL, "
+            "last_error TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO bank_links(actual_account_id, provider, external_account_id, created_at, updated_at) "
+            "VALUES ('acct-1', 'plaid', 'plaid-1', 1, 1)"
+        )
+    database = Database(path)
+    database.initialize()
+    link = database.get_bank_link("acct-1")
+    assert link["previous_provider"] == ""
+    database.update_bank_link("acct-1", previous_provider="simpleFin", previous_external_id="sf-1")
+    assert database.get_bank_link("acct-1")["previous_external_id"] == "sf-1"

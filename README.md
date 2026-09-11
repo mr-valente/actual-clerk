@@ -91,7 +91,9 @@ Clerk works with two kinds of bank feed:
 - **SimpleFIN**, which Actual imports itself. Open **Connections → Connect SimpleFIN** and paste a setup token from your SimpleFIN Bridge. Clerk claims it once and stores the resulting access URL, and uses it only to verify that each link is still alive. Generate a **new** token for Clerk rather than reusing the one Actual holds: a SimpleFIN setup token can only be claimed once, and Clerk's access is read-only either way.
 - **Plaid**, which Clerk syncs itself and delivers into Actual. Put your Plaid client id and secret in **Settings → Plaid**, then on the Connections page use **Connect a bank** and map each bank account onto an Actual account (existing or new) with the date Clerk should start importing from. Test in Plaid's sandbox first; the Trial plan's ten production connections are for life. Plaid Link loads from `cdn.plaid.com`, and OAuth banks need an https redirect URI registered in the Plaid dashboard.
 
-Both are optional. Without either, Clerk still checks freshness from Actual's own data; it just cannot see the bank's side. The migration between them is documented in [docs/plaid-migration](docs/plaid-migration/README.md).
+Both are optional. Without either, Clerk still checks freshness from Actual's own data; it just cannot see the bank's side.
+
+Moving an account between them is done from the account's detail on the Connections page. **Move to Plaid** picks a Plaid account and an import date, shows a preview of what the first delivery would do (how many rows import, which existing rows are adopted instead of duplicated, whether an opening balance is needed), removes Actual's own link so the account is fed once, and runs a sync. **Move to SimpleFIN** hands the account back to Actual's own link from a starting date; Actual matches the rows Clerk delivered in the overlap itself. The SimpleFIN token the Actual server uses can be stored or removed from **Settings → SimpleFIN**. The whole migration is documented in [docs/plaid-migration](docs/plaid-migration/README.md).
 
 ### 3. Point it at a local model
 

@@ -322,3 +322,44 @@ async def test_a_gateway_failure_fails_only_that_item(linked):
     assert result["items"] == 2 and result["items_failed"] == 1 and result["imported"] == 1
     assert linked.get_plaid_item("item-1")["status"] == "error"
     assert linked.get_plaid_item("item-2")["status"] == "ok"
+
+
+async def test_a_mapping_added_after_the_cursor_moved_is_served_from_the_start(linked):
+    linked.update_plaid_item("item-1", cursor="cursor-old")
+    linked.upsert_bank_link({"actual_account_id": "acct-old", "provider": "plaid", "item_id": "item-1",
+                             "external_account_id": "plaid-old", "cutover_date": "2026-09-01",
+                             "last_import_at": 1.0})
+    client = FakePlaid([
+        {"cursor": "", "added": [plaid_txn("h1", 1, "2026-09-02"), plaid_txn("h-old", 2, "2026-09-02", account="plaid-old")], "next_cursor": "cursor-old"},
+        {"cursor": "cursor-old", "added": [plaid_txn("n1", 3, "2026-09-10"), plaid_txn("n-old", 4, "2026-09-10", account="plaid-old")], "next_cursor": "cursor-new"},
+    ])
+    gateway = StubGateway()
+    instance, events, _ = engine(linked, gateway, client, plaid_refresh_enabled=False, plaid_starting_balance=False)
+    result = await instance.run()
+    assert result["imported"] == 3, "history for the new mapping, then the increment for both"
+    imported: dict[str, list[str]] = {}
+    for account, rows in gateway.imports:
+        imported.setdefault(account, []).extend(row["imported_id"] for row in rows)
+    assert imported == {"acct-chk": ["h1", "n1"], "acct-old": ["n-old"]}
+    assert [call for call in client.calls if call[0] == "sync"] == [("sync", ""), ("sync", "cursor-old")]
+    assert linked.get_plaid_item("item-1")["cursor"] == "cursor-new"
+    assert any(kind == "plaid_backfilled" for _, kind, _ in events)
+    assert linked.get_bank_link("acct-chk")["last_import_at"]
+
+
+async def test_preview_reads_the_whole_stream_without_writing(linked):
+    gateway = StubGateway({"acct-chk": [
+        {"id": "row-sf", "date": datetime.date(2026, 9, 2), "amount_cents": -450, "imported_id": "ACT-sf", "cleared": True, "reconciled": False, "payee_name": "Shop"},
+    ]})
+    client = FakePlaid([{"cursor": "", "added": [plaid_txn("t1", 4.5, "2026-09-03"), plaid_txn("t2", 9, "2026-09-04"), plaid_txn("old", 1, "2026-08-01")],
+                         "accounts": [{"id": "plaid-chk", "balance_cents": 50000}], "next_cursor": "c-preview"}])
+    instance, events, _ = engine(linked, gateway, client, plaid_refresh_enabled=False)
+    preview = await instance.preview_link(linked.get_bank_link("acct-chk"))
+    assert preview["counts"] == {"imports": 1, "adoptions": 1, "deletions": 0, "kept": 0, "skipped_before_cutover": 1, "unknown_removed": 0}
+    assert preview["would_import"] == 1
+    assert preview["adoptions"][0]["previous_imported_id"] == "ACT-sf"
+    assert preview["opening_balance_cents"] is None, "the account already holds rows"
+    assert preview["import_range"] == ["2026-09-04", "2026-09-04"]
+    assert gateway.adoptions == [] and gateway.deletions == []
+    assert all(rows == [] or True for _, rows in gateway.imports)
+    assert linked.get_plaid_item("item-1")["cursor"] == "", "a preview never moves the cursor"

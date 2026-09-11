@@ -226,3 +226,48 @@ class UpdateLinkRequest(BaseModel):
         if value:
             datetime.date.fromisoformat(value)
         return value
+
+
+# --------------------------------------------------------------- migration
+
+
+class MigrateToPlaidRequest(BaseModel):
+    """Move one Actual account's feed from whatever Actual links to Plaid."""
+
+    actual_account_id: str = Field(min_length=1, max_length=100)
+    item_id: str = Field(min_length=1, max_length=100)
+    external_account_id: str = Field(min_length=1, max_length=100)
+    cutover_date: str = Field(default="", max_length=10)
+    # Detach Actual's own link (SimpleFIN) so the account is fed once, by Clerk.
+    unlink_actual: bool = True
+    dry_run: bool = False
+
+    @field_validator("cutover_date")
+    @classmethod
+    def validate_cutover(cls, value: str) -> str:
+        value = value.strip()
+        if value:
+            datetime.date.fromisoformat(value)
+        return value
+
+
+class MigrateToSimpleFinRequest(BaseModel):
+    """Hand an account back to Actual's own SimpleFIN link."""
+
+    actual_account_id: str = Field(min_length=1, max_length=100)
+    # Blank means the SimpleFIN account the mapping remembers from before.
+    simplefin_account_id: str = Field(default="", max_length=200)
+    starting_date: str = Field(default="", max_length=10)
+    dry_run: bool = False
+
+    @field_validator("starting_date")
+    @classmethod
+    def validate_starting(cls, value: str) -> str:
+        value = value.strip()
+        if value:
+            datetime.date.fromisoformat(value)
+        return value
+
+
+class ServerTokenRequest(BaseModel):
+    setup_token: str = Field(min_length=8, max_length=4000)

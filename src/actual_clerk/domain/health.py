@@ -124,6 +124,10 @@ class ActualAccountInfo:
     # True when Clerk, not Actual, delivers this account's bank feed. The
     # sync_source then names Clerk's provider rather than Actual's.
     managed_by_clerk: bool = False
+    # What Actual itself links the account to, when that differs from the
+    # provider Clerk scores it under. Both feeding one account is a state a
+    # migration passes through and must not stay in.
+    actual_sync_source: str = ""
     # The provider-side connection this account belongs to (a Plaid Item),
     # when Clerk knows it without needing a reading. A connection that stops
     # answering returns no readings at all, and this is what still lets its
@@ -175,6 +179,7 @@ class AccountHealth:
     sync_source: str = ""
     provider_label: str = ""
     managed_by_clerk: bool = False
+    actual_sync_source: str = ""
     actual_balance_cents: int = 0
     actual_cleared_balance_cents: int = 0
     uncleared_balance_cents: int = 0
@@ -412,6 +417,7 @@ def _evaluate_one(
         sync_source=provider,
         provider_label=label if provider else "",
         managed_by_clerk=account.managed_by_clerk,
+        actual_sync_source=account.actual_sync_source,
         actual_balance_cents=account.balance_cents,
         actual_cleared_balance_cents=account.cleared_cents,
         uncleared_balance_cents=account.uncleared_cents,

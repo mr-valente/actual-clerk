@@ -101,11 +101,11 @@ def report_change(
 ) -> dict[str, Any]:
     """Describe whether the spendable budget changed since the last digest.
 
-    SimpleFIN's ``balance-date`` is the timestamp attached to the balance by
-    the data source. An advance proves that newer bank data arrived. A date
-    that did not advance proves only that SimpleFIN exposed no newer balance
-    timestamp; it cannot prove whether the bank was polled again and found the
-    same value.
+    Each provider attaches a timestamp to the balance it reports (SimpleFIN's
+    ``balance-date``, Plaid's last successful update). An advance proves that
+    newer bank data arrived. A date that did not advance proves only that no
+    provider exposed a newer balance timestamp; it cannot prove whether the
+    bank was polled again and found the same value.
     """
 
     result: dict[str, Any] = {"unchanged": False, "reason": "no_baseline"}
@@ -195,12 +195,12 @@ def build_digest(
     if change["unchanged"]:
         if change["reason"] == "newer_bank_data":
             quiet_message = (
-                "Nothing to report — SimpleFIN has newer bank data, but no new "
+                "Nothing to report — your bank provider has newer bank data, but no new "
                 "discretionary spending changed your budget."
             )
         elif change["reason"] == "no_newer_bank_snapshot":
             quiet_message = (
-                "Nothing to report — SimpleFIN has not exposed a newer bank balance "
+                "Nothing to report — your bank provider has not exposed a newer bank balance "
                 "timestamp since the last report."
             )
         else:

@@ -296,7 +296,7 @@ function healthRow(item, { actions = true, toggle = false } = {}) {
     <div class="row-meta">${item.remote_balance_cents === null || item.remote_balance_cents === undefined
       ? "—"
       : `<strong>${money(item.remote_balance_cents)}</strong><br /><span>${balanceComparison}</span>`}</div>
-    <div class="health-state">${statusChip(item.status, item.status_label)}${monitorControl}</div>
+    <div class="health-state">${item.managed_by_clerk && item.actual_sync_source ? `<span class="status-chip warning" title="Actual still links this account to ${escapeHtml(item.actual_sync_source)} while Clerk delivers it from ${escapeHtml(item.provider_label || "another provider")}. Finish the move so it is fed once.">Fed twice</span>` : ""}${statusChip(item.status, item.status_label)}${monitorControl}</div>
   </article>`;
 }
 
@@ -443,8 +443,8 @@ async function renderOverview() {
       </div>
       <div>
         <article class="panel">
-          <header class="panel-head"><div><h2>Bank connections</h2><p>Checked directly against SimpleFIN, not just Actual's last sync</p></div><a href="#accounts" class="panel-link">All accounts</a></header>
-          <div class="status-list">${health.length ? health.slice(0, 6).map((item) => healthRow(item)).join("") : emptyState("⇄", "No connection data yet", "Clerk checks every linked account against SimpleFIN. Run a sync, or add your SimpleFIN access URL in Settings.")}</div>
+          <header class="panel-head"><div><h2>Bank connections</h2><p>Checked directly against each bank provider, not just Actual's last sync</p></div><a href="#accounts" class="panel-link">All accounts</a></header>
+          <div class="status-list">${health.length ? health.slice(0, 6).map((item) => healthRow(item)).join("") : emptyState("⇄", "No connection data yet", "Clerk checks every linked account against its bank provider. Run a sync, or connect SimpleFIN or Plaid on the Connections page.")}</div>
         </article>
       </div>
     </section>`;
@@ -776,8 +776,106 @@ function showAccount(accountId) {
       <div class="change"><i>${item.monitored === false ? "✗" : "✓"}</i><div><strong>${item.monitored === false ? "Monitoring is off" : "Monitoring is on"}</strong><small>${item.monitored === false ? `Clerk still reads this account but will not alert on it${item.underlying_status ? `. Unmonitored, it would currently read as ${escapeHtml(titleCase(item.underlying_status))}.` : "."}` : "Clerk scores this connection and alerts when its status changes."}</small></div></div>
       <div class="change"><i>◷</i><div><strong>Status since ${escapeHtml(fullTime(item.since))}</strong><small>Last checked ${relativeTime(item.checked_at)}.</small></div></div>
     </div></section>
+    <section class="detail-section"><h3>Bank feed</h3><div class="change-list">
+      ${feedDescription(item)}
+    </div>
+    <div class="resolution-actions" style="margin-top:10px">
+      ${state.health?.configured?.plaid ? `<button class="button secondary small" data-action="migrate-open" data-direction="to-plaid" data-id="${escapeHtml(item.account_id)}">${item.managed_by_clerk ? "Change Plaid account…" : "Move to Plaid…"}</button>` : ""}
+      ${item.managed_by_clerk || !item.sync_source ? `<button class="button ghost small" data-action="migrate-open" data-direction="to-simplefin" data-id="${escapeHtml(item.account_id)}">${item.actual_sync_source === "simpleFin" ? "Relink SimpleFIN…" : "Move to SimpleFIN…"}</button>` : ""}
+    </div></section>
     <div class="resolution-actions"><button class="button primary" data-action="sync-and-recheck">Sync bank and recheck</button></div>
   </div>`);
+}
+
+function feedDescription(item) {
+  const rows = [];
+  if (item.managed_by_clerk) {
+    rows.push(`<div class="change"><i>⇄</i><div><strong>Clerk delivers this account from ${escapeHtml(item.provider_label || item.sync_source)}</strong><small>${escapeHtml(item.institution || "")}${item.external_id ? ` · bank account ${escapeHtml(item.external_id.slice(0, 12))}…` : ""}. Manage the mapping on the Plaid connection.</small></div></div>`);
+  }
+  if (item.actual_sync_source) {
+    rows.push(`<div class="change"><i>${item.managed_by_clerk ? "!" : "⇄"}</i><div><strong>Actual links it to ${escapeHtml(item.actual_sync_source === "simpleFin" ? "SimpleFIN" : item.actual_sync_source)}${item.managed_by_clerk ? " as well" : ""}</strong><small>${item.managed_by_clerk ? "Two feeds into one account will duplicate transactions once the cutover window passes. Move it to Plaid again with the SimpleFIN link removed, or move it back to SimpleFIN." : "Actual imports it itself; Clerk verifies the link and files what arrives."}</small></div></div>`);
+  }
+  if (!rows.length) rows.push(`<div class="change"><i>◌</i><div><strong>Manual account</strong><small>No bank feeds this account. Map it to a Plaid account, or link it to SimpleFIN, to have transactions delivered.</small></div></div>`);
+  return rows.join("");
+}
+
+// ------------------------------------------------------------- migration
+
+async function showMigration(accountId, direction) {
+  openDrawer(`${drawerHeader("Bank feed", "Loading…")}<div class="drawer-body"><div class="skeleton"></div></div>`);
+  let overview;
+  try { overview = await api("/api/migration"); }
+  catch (error) { return openDrawer(`${drawerHeader("Bank feed", "Could not read the feeds")}<div class="drawer-body"><p class="muted">${escapeHtml(error.message)}</p></div>`); }
+  state.migration = overview;
+  const account = (overview.accounts || []).find((entry) => entry.id === accountId);
+  if (!account) return openDrawer(`${drawerHeader("Bank feed", "Account not found")}<div class="drawer-body"><p class="muted">Run a sync and try again.</p></div>`);
+  const today = new Date().toISOString().slice(0, 10);
+  let form;
+  if (direction === "to-plaid") {
+    const candidates = [];
+    for (const item of overview.plaid?.items || []) {
+      for (const plaidAccount of item.accounts || []) {
+        if (plaidAccount.link && plaidAccount.link.enabled && plaidAccount.link.actual_account_id !== account.id) continue;
+        candidates.push({ item, plaidAccount });
+      }
+    }
+    form = `<div class="form-grid">
+      <div class="field full"><label>Plaid account</label><select name="plaid_target">${candidates.length ? candidates.map(({ item, plaidAccount }) => `<option value="${escapeHtml(item.item_id)}|${escapeHtml(plaidAccount.id)}" ${account.link?.external_account_id === plaidAccount.id ? "selected" : ""}>${escapeHtml(item.institution_name || "Bank")} · ${escapeHtml(plaidAccountLabel(plaidAccount))}${plaidAccount.balance_cents !== null && plaidAccount.balance_cents !== undefined ? ` · ${money(plaidAccount.balance_cents)}` : ""}</option>`).join("") : `<option value="">No unmapped Plaid accounts — connect a bank first</option>`}</select></div>
+      <div class="field"><label>Import from Plaid starting</label><input type="date" name="cutover_date" value="${escapeHtml(account.link?.cutover_date || today)}" /><small>Older history stays as it is in Actual.</small></div>
+      <div class="field"><label>Actual's own link</label>${account.actual_sync_source ? `<label class="check-row" style="min-height:39px"><input type="checkbox" name="unlink_actual" checked /><span><strong>Unlink ${escapeHtml(account.actual_sync_source === "simpleFin" ? "SimpleFIN" : account.actual_sync_source)} in Actual</strong><small>Recommended: the account should be fed once. Nothing already imported is touched.</small></span></label>` : `<p class="muted" style="font-size:10px;min-height:39px;display:flex;align-items:center">Actual does not link this account itself.</p>`}</div>
+    </div>`;
+  } else {
+    const remembered = account.link?.previous_external_id || account.actual_external_id || "";
+    const simplefinAccounts = overview.simplefin_accounts || [];
+    form = `<div class="form-grid">
+      <div class="field full"><label>SimpleFIN account</label><select name="simplefin_target">${simplefinAccounts.length ? simplefinAccounts.map((remote) => `<option value="${escapeHtml(remote.account_id)}" ${remote.account_id === remembered ? "selected" : ""}>${escapeHtml(remote.institution || "")} · ${escapeHtml(remote.name)}${remote.balance ? ` · ${escapeHtml(remote.balance)}` : ""}</option>`).join("") : `<option value="">${overview.simplefin_server?.configured ? "SimpleFIN returned no accounts" : "The Actual server holds no SimpleFIN token — store one in Settings"}</option>`}</select><small>${remembered ? "Preselected: the account this one followed before." : "Pick the bank account this Actual account should follow."}</small></div>
+      <div class="field"><label>Actual imports from SimpleFIN starting</label><input type="date" name="starting_date" value="${escapeHtml(account.link?.cutover_date || today)}" /><small>Rows Clerk delivered from Plaid in that window are matched by Actual, not duplicated.</small></div>
+      <div class="field"><label>Plaid mapping</label><p class="muted" style="font-size:10px;min-height:39px;display:flex;align-items:center">${account.link?.enabled ? "Paused, so Clerk stops delivering from Plaid. It can be resumed from the Plaid connection." : "None to pause."}</p></div>
+    </div>`;
+  }
+  openDrawer(`${drawerHeader(direction === "to-plaid" ? "Move to Plaid" : "Move to SimpleFIN", account.name)}<div class="drawer-body">
+    <section class="detail-section"><div class="change-list">${feedDescription({ managed_by_clerk: Boolean(account.link?.enabled), provider_label: "Plaid", sync_source: account.link?.enabled ? "plaid" : account.actual_sync_source, actual_sync_source: account.actual_sync_source, institution: account.bank_name, external_id: account.link?.external_account_id || "" })}</div></section>
+    <section class="detail-section migration-form" data-direction="${direction}" data-id="${escapeHtml(account.id)}">${form}
+      <div class="resolution-actions" style="margin-top:12px">
+        <button class="button ghost" data-action="migrate-preview" data-direction="${direction}" data-id="${escapeHtml(account.id)}">Preview</button>
+        <button class="button primary" data-action="migrate-apply" data-direction="${direction}" data-id="${escapeHtml(account.id)}">${direction === "to-plaid" ? "Move to Plaid" : "Move to SimpleFIN"}</button>
+      </div>
+      <div id="migration-preview" style="margin-top:14px"></div>
+    </section>
+  </div>`);
+}
+
+function migrationBody(accountId, direction) {
+  const form = document.querySelector(`.migration-form[data-id="${CSS.escape(accountId)}"]`);
+  if (!form) return null;
+  if (direction === "to-plaid") {
+    const target = form.querySelector('[name="plaid_target"]').value;
+    if (!target) return toast("Choose a Plaid account", "Connect a bank on the Connections page first.", "error") && null;
+    const [itemId, externalId] = target.split("|");
+    const unlink = form.querySelector('[name="unlink_actual"]');
+    return { actual_account_id: accountId, item_id: itemId, external_account_id: externalId, cutover_date: form.querySelector('[name="cutover_date"]').value || "", unlink_actual: unlink ? unlink.checked : false };
+  }
+  return { actual_account_id: accountId, simplefin_account_id: form.querySelector('[name="simplefin_target"]').value || "", starting_date: form.querySelector('[name="starting_date"]').value || "" };
+}
+
+function renderMigrationPreview(direction, result) {
+  const lines = [];
+  if (direction === "to-plaid") {
+    const p = result.preview || {};
+    if (p.not_ready) lines.push("Plaid is still preparing this connection's history; the first delivery will wait for it.");
+    lines.push(`${p.would_import ?? 0} transaction${p.would_import === 1 ? "" : "s"} would be imported${p.import_range ? ` (${escapeHtml(p.import_range[0])} to ${escapeHtml(p.import_range[1])})` : ""}${p.matched_by_actual ? `, and Actual would match ${p.matched_by_actual} more to rows it already holds` : ""}.`);
+    if (p.counts?.skipped_before_cutover) lines.push(`${p.counts.skipped_before_cutover} older Plaid transaction${p.counts.skipped_before_cutover === 1 ? "" : "s"} stay out, dated before ${escapeHtml(p.cutover_date)}.`);
+    if (p.adoptions?.length) lines.push(`${p.counts.adoptions} existing row${p.counts.adoptions === 1 ? "" : "s"} would be adopted rather than duplicated: ${p.adoptions.slice(0, 5).map((a) => `${escapeHtml(a.date)} ${money(a.amount_cents)} ${escapeHtml(a.payee_name || "")}`).join("; ")}${p.adoptions.length > 5 ? "; …" : ""}.`);
+    if (p.deletions?.length) lines.push(`${p.deletions.length} withdrawn pending charge${p.deletions.length === 1 ? "" : "s"} would be removed.`);
+    if (p.opening_balance_cents !== null && p.opening_balance_cents !== undefined) lines.push(`The account is empty, so an opening balance of ${money(p.opening_balance_cents)} would be added to match the bank's ${money(p.bank_balance_cents || 0)}.`);
+    lines.push(result.will_unlink_actual ? "Actual's own link is removed first, so the account is fed once. Nothing already imported changes." : result.keeps_actual_link ? "Actual keeps its own link as well: both feeds will write to this account. Not recommended beyond the cutover window." : "Actual has no link of its own to remove.");
+  } else {
+    if (result.simplefin_account) lines.push(`Actual will follow ${escapeHtml(result.simplefin_account.institution || "")} · ${escapeHtml(result.simplefin_account.name)} from ${escapeHtml(result.starting_date)}.`);
+    if (result.will_pause_plaid_link) lines.push("Clerk's Plaid mapping is paused; it can be resumed from the Plaid connection.");
+    lines.push(result.note);
+    for (const warning of result.warnings || []) lines.push(`⚠ ${escapeHtml(warning)}`);
+  }
+  document.querySelector("#migration-preview").innerHTML = `<div class="change-list">${lines.map((line) => `<div class="change"><i>→</i><div><small style="color:var(--ink-soft)">${line}</small></div></div>`).join("")}</div>`;
 }
 
 function plaidAccountLabel(account) {
@@ -1017,10 +1115,15 @@ function settingToggle(name, title, description, checked) {
 }
 
 async function renderSettings() {
-  state.settings = await api("/api/settings");
+  const [loadedSettings, server] = await Promise.all([
+    api("/api/settings"),
+    api("/api/simplefin/server").catch((error) => ({ configured: false, error: error.message, unreachable: true })),
+  ]);
+  state.settings = loadedSettings;
+  state.simplefinServer = server;
   const s = state.settings;
   applyAppearance(s);
-  content.innerHTML = `<section class="page-intro"><div><h2>Settings</h2><p>Connect Actual, SimpleFIN, and a local model, then decide how much Clerk should do on its own. Save changed values before testing a connection.</p></div></section>
+  content.innerHTML = `<section class="page-intro"><div><h2>Settings</h2><p>Connect Actual, a bank provider, and a local model, then decide how much Clerk should do on its own. Save changed values before testing a connection.</p></div></section>
     <div class="settings-layout">
       <nav class="settings-nav">
         <a href="#settings-actual">Actual Budget</a>
@@ -1045,7 +1148,8 @@ async function renderSettings() {
 
         <section class="panel settings-section" id="settings-simplefin"><header class="panel-head"><div><h3>SimpleFIN</h3><p class="section-description">Read-only access used to verify that each bank link is still alive. Actual keeps doing the importing.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="simplefin">Test connection</button></header><div class="panel-body"><div class="form-grid">
           ${settingInput("simplefin_access_url", "Access URL", "", { type: "password", configured: s.simplefin_access_url_configured, full: true, note: "Claim a setup token below, or paste an access URL you already hold." })}
-        </div><div class="section-actions"><button class="button secondary small" type="button" data-action="open-claim">Claim a setup token</button><span class="muted" style="font-size:10px">A setup token can only be claimed once. Claiming here does not affect the token Actual already uses.</span></div></div></section>
+        </div><div class="section-actions"><button class="button secondary small" type="button" data-action="open-claim">Claim a setup token</button><span class="muted" style="font-size:10px">A setup token can only be claimed once. Claiming here does not affect the token Actual already uses.</span></div>
+        <div class="change-list" style="margin-top:14px"><div class="change"><i>${server.configured ? "✓" : "○"}</i><div style="flex:1"><strong>Actual server token: ${server.unreachable ? "unknown" : server.configured ? "stored" : "not stored"}</strong><small>${escapeHtml(server.error ? server.error : server.configured ? "The Actual server imports SimpleFIN accounts with this token. Managing it here is the same as Actual's own Settings, and needs an admin login on the server." : "Actual cannot link or sync SimpleFIN accounts without a token on the server. Store one here when moving an account back to SimpleFIN.")}</small></div><div class="row-actions"><button class="button ghost small" type="button" data-action="simplefin-server-token">${server.configured ? "Replace" : "Store token"}</button>${server.configured ? `<button class="button danger small" type="button" data-action="simplefin-server-clear">Remove</button>` : ""}</div></div></div></div></section>
 
         <section class="panel settings-section" id="settings-plaid"><header class="panel-head"><div><h3>Plaid</h3><p class="section-description">The bank feed Clerk delivers itself. Connect banks on the Connections page once the keys are saved.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="plaid">Test credentials</button></header><div class="panel-body"><div class="form-grid">
           ${settingInput("plaid_client_id", "Client ID", s.plaid_client_id, { note: "Plaid dashboard → Developers → Keys." })}
@@ -1294,6 +1398,49 @@ document.addEventListener("click", async (event) => {
   if (action === "toggle-diagnostics-redact") { event.preventDefault(); await runDiagnostics(!state.diagnosticsRedact); }
   if (action === "run-health" || action === "check-connections") enqueue("health", "Connection check");
 
+  if (action === "migrate-open") { event.preventDefault(); await showMigration(target.dataset.id, target.dataset.direction); }
+  if (action === "migrate-preview" || action === "migrate-apply") {
+    event.preventDefault();
+    const direction = target.dataset.direction;
+    const body = migrationBody(target.dataset.id, direction);
+    if (!body) return;
+    const apply = action === "migrate-apply";
+    if (apply && !window.confirm(direction === "to-plaid"
+      ? `Move this account's feed to Plaid?${body.unlink_actual ? "\n\nActual's own link is removed first. Nothing already imported changes." : ""}\n\nA sync runs right away.`
+      : "Hand this account back to Actual's SimpleFIN link?\n\nClerk pauses its Plaid mapping and Actual imports from the starting date. A sync runs right away.")) return;
+    target.disabled = true;
+    try {
+      const result = await api(`/api/migration/${direction}`, { method: "POST", body: JSON.stringify({ ...body, dry_run: !apply }) });
+      if (!apply) { renderMigrationPreview(direction, result); return; }
+      toast(direction === "to-plaid" ? "Feed moved to Plaid" : "Feed handed back to SimpleFIN", "A sync is running; the Connections page updates as it finishes.");
+      closeDrawer();
+      await renderRoute({ quiet: true });
+    } catch (error) { toast(apply ? "The move was not made" : "Preview failed", error.message, "error"); }
+    finally { target.disabled = false; }
+  }
+  if (action === "simplefin-server-token") {
+    event.preventDefault();
+    const token = window.prompt("Paste a SimpleFIN setup token for the Actual server.\n\nThis is the token Actual's own Settings would take; the server claims it itself. It is separate from the read-only access URL Clerk holds.");
+    if (!token || !token.trim()) return;
+    target.disabled = true;
+    try {
+      const result = await api("/api/simplefin/server-token", { method: "POST", body: JSON.stringify({ setup_token: token.trim() }) });
+      toast("Token stored on the Actual server", result.configured ? "Actual can link SimpleFIN accounts again." : "Stored, but the server does not report it as configured yet.");
+      await renderSettings();
+    } catch (error) { toast("Could not store the token", error.message, "error"); }
+    finally { target.disabled = false; }
+  }
+  if (action === "simplefin-server-clear") {
+    event.preventDefault();
+    if (!window.confirm("Remove the SimpleFIN token from the Actual server?\n\nAccounts Actual still links to SimpleFIN stay linked but stop syncing until a token is stored again. Clerk's own read-only access URL is unaffected.")) return;
+    target.disabled = true;
+    try {
+      await api("/api/simplefin/server-token", { method: "DELETE" });
+      toast("Server token removed");
+      await renderSettings();
+    } catch (error) { toast("Could not remove the token", error.message, "error"); }
+    finally { target.disabled = false; }
+  }
   if (action === "plaid-connect") { event.preventDefault(); await startPlaidLink(); }
   if (action === "plaid-repair") { event.stopPropagation(); await startPlaidLink({ itemId: target.dataset.id }); }
   if (action === "plaid-item-detail") { event.stopPropagation(); showPlaidItem(target.dataset.id); }

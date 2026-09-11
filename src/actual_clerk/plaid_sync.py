@@ -187,9 +187,31 @@ class PlaidSyncEngine:
         if await self._maybe_refresh(client, item):
             counts["refreshed"] = 1
 
-        stream = await read_stream(client, access_token, item.get("cursor") or "")
+        cursor = item.get("cursor") or ""
+        # An Item's cursor is shared by all its accounts. A mapping added after
+        # the Item has already been read would never see the history the
+        # cursor has moved past, so a never-delivered mapping is first served
+        # from the beginning of the stream, then joins the incremental read.
+        fresh = [link for link in links if cursor and not link.get("last_import_at")]
+        if fresh:
+            history = await read_stream(client, access_token, "")
+            history_balances = {account["id"]: account for account in history["accounts"]}
+            for link in fresh:
+                plan, opening = await self._apply_link(
+                    link, history, history_balances.get(link["external_account_id"])
+                )
+                _tally(counts, plan, opening)
+                self.events(
+                    "info",
+                    "plaid_backfilled",
+                    f"{link.get('external_name') or link['actual_account_id']}: served from the start of "
+                    f"{label}'s history ({plan.summary()['imports']} imported)",
+                    {"item_id": item["item_id"], "actual_account_id": link["actual_account_id"]},
+                )
+
+        stream = await read_stream(client, access_token, cursor)
         changes = len(stream["added"]) + len(stream["modified"]) + len(stream["removed"])
-        if not changes and stream["update_status"] == NOT_READY and not item.get("cursor"):
+        if not changes and stream["update_status"] == NOT_READY and not cursor:
             # Right after linking, Plaid is still preparing history. Keep the
             # empty cursor so the next run asks from the beginning again.
             counts["not_ready"] = 1
@@ -199,14 +221,7 @@ class PlaidSyncEngine:
         balances = {account["id"]: account for account in stream["accounts"]}
         for link in links:
             plan, opening = await self._apply_link(link, stream, balances.get(link["external_account_id"]))
-            summary = plan.summary()
-            counts["imported"] += summary["imports"]
-            counts["adopted"] += sum(1 for a in plan.adoptions if a["reason"] != "settled")
-            counts["updated"] += sum(1 for a in plan.adoptions if a["reason"] == "settled")
-            counts["deleted"] += summary["deletions"]
-            counts["kept"] += summary["kept"]
-            counts["skipped_before_cutover"] += summary["skipped_before_cutover"]
-            counts["starting_balances"] += 1 if opening is not None else 0
+            _tally(counts, plan, opening)
 
         now = self.clock()
         self.database.update_plaid_item(
@@ -277,6 +292,88 @@ class PlaidSyncEngine:
             newer_failed = info.get("last_failed_update") and info["last_failed_update"] != previous_failed
             if newer_ok or newer_failed:
                 return
+
+    # -------------------------------------------------------------- preview
+
+    async def preview_link(self, link: dict[str, Any]) -> dict[str, Any]:
+        """What the first delivery for this mapping would do, without writing.
+
+        Reads the Item's whole stream from the beginning (the cursor is not
+        touched), plans the account, and asks Actual for a dry-run import of
+        the rows that would be new so its own matching is reflected too.
+        """
+
+        item = self.database.get_plaid_item(link["item_id"])
+        if not item:
+            raise PlaidError("Bank connection not found")
+        owned = self.client is None
+        client = self.client or PlaidClient(self.settings)
+        try:
+            stream = await read_stream(client, item["access_token"], "")
+        finally:
+            if owned:
+                await client.close()
+        account_id = link["actual_account_id"]
+        cutover = _cutover(link, self.today)
+        window = datetime.timedelta(days=self.settings.plaid_adopt_window_days)
+        existing = await self.gateway.account_transactions(account_id, start=cutover - window)
+        plan = plan_account(
+            actual_account_id=account_id,
+            external_account_id=link["external_account_id"],
+            cutover=cutover,
+            added=stream["added"],
+            modified=stream["modified"],
+            removed=stream["removed"],
+            existing=existing,
+            adopt_window_days=self.settings.plaid_adopt_window_days,
+        )
+        by_id = {row["id"]: row for row in existing}
+        matched_by_actual = 0
+        if plan.imports:
+            preview = await self.gateway.import_transactions(account_id, plan.imports, dry_run=True)
+            matched_by_actual = sum(
+                1 for entry in preview.get("preview", []) if entry.get("existing")
+            )
+        empty = not existing and not await self.gateway.account_transactions(account_id)
+        balance = next(
+            (a for a in stream["accounts"] if a["id"] == link["external_account_id"]), None
+        )
+        opening = (
+            starting_balance_cents(
+                current_balance_cents=(balance or {}).get("balance_cents"), imports=plan.imports
+            )
+            if self.settings.plaid_starting_balance and empty and plan.imports
+            else None
+        )
+        dates = sorted(row["date"] for row in plan.imports)
+        return {
+            "not_ready": stream["update_status"] == NOT_READY and not (
+                stream["added"] or stream["modified"]
+            ),
+            "cutover_date": cutover.isoformat(),
+            "counts": plan.summary(),
+            "would_import": len(plan.imports) - matched_by_actual,
+            "matched_by_actual": matched_by_actual,
+            "import_range": [dates[0].isoformat(), dates[-1].isoformat()] if dates else None,
+            "adoptions": [
+                {
+                    "date": by_id[a["transaction_id"]]["date"].isoformat(),
+                    "amount_cents": by_id[a["transaction_id"]].get("amount_cents", 0),
+                    "payee_name": by_id[a["transaction_id"]].get("payee_name", ""),
+                    "previous_imported_id": a["previous_imported_id"],
+                    "reason": a["reason"],
+                }
+                for a in plan.adoptions[:20]
+                if a["transaction_id"] in by_id
+            ],
+            "deletions": [
+                {"date": d["date"].isoformat() if d.get("date") else "", "amount_cents": d["amount_cents"]}
+                for d in plan.deletions[:20]
+            ],
+            "opening_balance_cents": opening,
+            "bank_balance_cents": (balance or {}).get("balance_cents"),
+            "account_empty": empty,
+        }
 
     # ----------------------------------------------------------------- link
 
@@ -389,6 +486,17 @@ class PlaidSyncEngine:
                 self._starting_balance_category = category["id"]
                 break
         return self._starting_balance_category
+
+
+def _tally(counts: dict[str, int], plan: AccountPlan, opening: int | None) -> None:
+    summary = plan.summary()
+    counts["imported"] += summary["imports"]
+    counts["adopted"] += sum(1 for a in plan.adoptions if a["reason"] != "settled")
+    counts["updated"] += sum(1 for a in plan.adoptions if a["reason"] == "settled")
+    counts["deleted"] += summary["deletions"]
+    counts["kept"] += summary["kept"]
+    counts["skipped_before_cutover"] += summary["skipped_before_cutover"]
+    counts["starting_balances"] += 1 if opening is not None else 0
 
 
 def _cutover(link: dict[str, Any], today: datetime.date) -> datetime.date:

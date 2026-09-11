@@ -776,10 +776,11 @@ export class ActualService {
   }
 
   async setServerSecret(params) {
-    // Only the SimpleFIN token is ever managed from here. A null value
-    // deletes the secret on the Actual server.
+    // Only the SimpleFIN secrets are ever managed from here: the setup token
+    // the user pastes, and the access key the server derives from it. A null
+    // value deletes the secret on the Actual server.
     const name = cleanString(params.name);
-    if (name !== 'simplefin_token') throw new Error(`Refusing to manage server secret ${name || '(blank)'}`);
+    if (!['simplefin_token', 'simplefin_accessKey'].includes(name)) throw new Error(`Refusing to manage server secret ${name || '(blank)'}`);
     const value = params.value == null ? null : cleanString(params.value);
     const response = await this._send('secret-set', { name, value });
     if (response?.error) {

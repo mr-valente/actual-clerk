@@ -218,6 +218,10 @@ CREATE TABLE IF NOT EXISTS bank_links (
     cutover_date TEXT NOT NULL DEFAULT '',
     last_import_at REAL,
     last_error TEXT NOT NULL DEFAULT '',
+    -- What Actual linked the account to before Clerk took the feed over, so
+    -- the road back needs no guesswork.
+    previous_provider TEXT NOT NULL DEFAULT '',
+    previous_external_id TEXT NOT NULL DEFAULT '',
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -266,6 +270,8 @@ _BANK_LINK_DEFAULTS: dict[str, Any] = {
     "cutover_date": "",
     "last_import_at": None,
     "last_error": "",
+    "previous_provider": "",
+    "previous_external_id": "",
 }
 
 
@@ -291,6 +297,7 @@ class Database:
             self._migrate_digests(connection)
             connection.executescript(SCHEMA)
             self._migrate_health_candidates(connection)
+            self._migrate_bank_links(connection)
             self._restore_digests(connection)
             now = time.time()
             # A job that was running when the process died has no worker to
@@ -347,6 +354,17 @@ class Database:
             # observations. Candidates are deliberately non-public, so restart
             # their confirmation rather than carrying suspect evidence forward.
             connection.execute("DELETE FROM health_candidates")
+
+    @staticmethod
+    def _migrate_bank_links(connection: sqlite3.Connection) -> None:
+        """Add the previous-provider columns to link tables from the first Plaid builds."""
+
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(bank_links)")}
+        for column in ("previous_provider", "previous_external_id"):
+            if columns and column not in columns:
+                connection.execute(
+                    f"ALTER TABLE bank_links ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
 
     # ------------------------------------------------------------------ settings
 
@@ -1331,6 +1349,8 @@ class Database:
         "cutover_date",
         "last_import_at",
         "last_error",
+        "previous_provider",
+        "previous_external_id",
     )
 
     def upsert_bank_link(self, link: dict[str, Any]) -> dict[str, Any]:

@@ -146,6 +146,7 @@ def to_actual_accounts(snapshot: dict[str, Any]) -> list[ActualAccountInfo]:
             off_budget=account["off_budget"],
             closed=account["closed"],
             managed_by_clerk=bool(account.get("managed_by_clerk", False)),
+            actual_sync_source=str(account.get("actual_sync_source") or ""),
             connection_id=str(account.get("connection_id") or ""),
         )
         for account in snapshot["accounts"]
