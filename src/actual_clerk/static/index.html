@@ -16,6 +16,8 @@
       } catch { /* use server defaults */ }
     </script>
     <link rel="stylesheet" href="/assets/styles.css?v=__STATIC_ASSET_VERSION__" />
+    <!-- Plaid requires Link to load from its own CDN; it is only used when a bank is connected. -->
+    <script src="https://cdn.plaid.com/link/v2/stable/link-initialize.js" defer></script>
   </head>
   <body>
     <div class="app-shell">
@@ -77,7 +79,7 @@
         <button class="icon-button dialog-close" type="button" data-action="close-claim" aria-label="Close">×</button>
         <p class="eyebrow">SimpleFIN</p>
         <h2>Connect SimpleFIN</h2>
-        <p class="muted">Paste the setup token from your SimpleFIN Bridge. Clerk claims it once and stores the resulting access URL. A token cannot be claimed twice, so generate a fresh one if this fails.</p>
+        <p class="muted">Paste the setup token from your SimpleFIN Bridge. Clerk claims it once and stores the resulting access URL. A token cannot be claimed twice, so generate a fresh one if this fails. Actual keeps importing from SimpleFIN; Clerk only reads it.</p>
         <label class="field">
           <span>Setup token</span>
           <textarea name="setup_token" rows="4" placeholder="aHR0cHM6Ly9icmlkZ2Uuc2ltcGxlZmluLm9yZy8…" required></textarea>

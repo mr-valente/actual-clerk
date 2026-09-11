@@ -4,6 +4,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import sqlite3
 import sys
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
@@ -19,20 +20,27 @@ from actual_clerk import __version__
 from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
 from actual_clerk.clients.ntfy import NotificationError, NtfyClient
 from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleClient
+from actual_clerk.clients.plaid import PlaidClient, PlaidError
 from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
 from actual_clerk.config import TIMEZONE_CHOSEN_KEY, SettingsManager, data_directory
 from actual_clerk.db import Database
 from actual_clerk.diagnostics import build_report
+from actual_clerk.plaid_links import describe, public_item, read_items
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
 from actual_clerk.schemas import (
     BulkResolveRequest,
     ClaimSetupTokenRequest,
     CreateCategoryRequest,
+    CreateLinkRequest,
     EnqueueRequest,
+    ExchangeRequest,
+    LinkTokenRequest,
     MonitoringRequest,
     ResolveDecisionRequest,
     ResolveRuleRequest,
+    SandboxItemRequest,
     SettingsPatch,
+    UpdateLinkRequest,
 )
 
 log = logging.getLogger(__name__)
@@ -238,6 +246,14 @@ async def gateway_error_handler(_: Request, exc: ActualGatewayError) -> JSONResp
     )
 
 
+@app.exception_handler(PlaidError)
+async def plaid_error_handler(_: Request, exc: PlaidError) -> JSONResponse:
+    return JSONResponse(
+        status_code=status.HTTP_502_BAD_GATEWAY,
+        content={"error": "plaid_error", "detail": str(exc), **exc.as_dict()},
+    )
+
+
 # ------------------------------------------------------------------ read-only
 
 
@@ -252,6 +268,7 @@ async def health(request: Request) -> dict[str, Any]:
                 settings.secret_value("actual_password") and settings.actual_budget_id
             ),
             "simplefin": bool(settings.secret_value("simplefin_access_url")),
+            "plaid": settings.plaid_configured,
             "model": bool(settings.openai_base_url and settings.model and settings.ai_enabled),
             "notifications": bool(settings.notifications_enabled and settings.ntfy_topic),
         },
@@ -633,6 +650,311 @@ async def forget_merchant(merchant_key: str, request: Request) -> dict[str, bool
     return {"forgotten": True}
 
 
+# ---------------------------------------------------------------------- Plaid
+#
+# Plaid Items are Clerk's own: Actual never sees them. Access tokens are stored
+# in Clerk's database and never returned by any of these endpoints.
+
+
+def _plaid_client(request: Request) -> PlaidClient:
+    settings = _settings_manager(request).get()
+    if not settings.plaid_configured:
+        raise HTTPException(
+            status_code=409, detail="Plaid is not configured: add a client id and secret in Settings"
+        )
+    return PlaidClient(settings)
+
+
+def _plaid_item_or_404(request: Request, item_id: str) -> dict[str, Any]:
+    item = _database(request).get_plaid_item(item_id)
+    if not item or item.get("status") == "removed":
+        raise HTTPException(status_code=404, detail="Bank connection not found")
+    return item
+
+
+def _actual_accounts_for_mapping(request: Request) -> list[dict[str, Any]]:
+    """The Actual accounts a Plaid account can be mapped onto, from the last snapshot."""
+    snapshot = _database(request).get_snapshot(OVERVIEW_SNAPSHOT) or {}
+    # Only a live mapping makes an account unavailable. A paused one (its
+    # connection was removed, say) is replaced by mapping the account again.
+    links = {
+        link["actual_account_id"]: link
+        for link in _database(request).list_bank_links(enabled_only=True)
+    }
+    accounts = []
+    for account in snapshot.get("accounts") or []:
+        if account.get("closed"):
+            continue
+        link = links.get(account["id"])
+        accounts.append(
+            {
+                "id": account["id"],
+                "name": account["name"],
+                "off_budget": bool(account.get("off_budget")),
+                "actual_sync_source": account.get("actual_sync_source", account.get("sync_source", "")),
+                "linked_to": (
+                    {"provider": link["provider"], "external_account_id": link["external_account_id"]}
+                    if link
+                    else None
+                ),
+            }
+        )
+    return accounts
+
+
+@app.get("/api/plaid/items")
+async def plaid_items(request: Request) -> dict[str, Any]:
+    """Every Plaid Item Clerk holds, its accounts and balances, and the mappings."""
+    settings = _settings_manager(request).get()
+    database = _database(request)
+    entries = await read_items(database, settings) if settings.plaid_configured else []
+    result = describe(
+        entries,
+        database.list_bank_links(),
+        environment=settings.plaid_env,
+        items_ever=len(database.list_plaid_items(include_removed=True)),
+    )
+    result["configured"] = settings.plaid_configured
+    result["redirect_uri"] = settings.plaid_redirect_uri
+    result["actual_accounts"] = _actual_accounts_for_mapping(request)
+    return result
+
+
+@app.post("/api/plaid/link-token")
+async def plaid_link_token(payload: LinkTokenRequest, request: Request) -> dict[str, Any]:
+    """Mint a Link token: a new connection, or update mode for a named Item."""
+    client = _plaid_client(request)
+    access_token = None
+    if payload.item_id:
+        access_token = _plaid_item_or_404(request, payload.item_id)["access_token"]
+    try:
+        token = await client.create_link_token(
+            access_token=access_token, account_selection=payload.account_selection
+        )
+    finally:
+        await client.close()
+    return {**token, "item_id": payload.item_id}
+
+
+async def _store_item(
+    request: Request,
+    client: PlaidClient,
+    *,
+    access_token: str,
+    item_id: str,
+    institution_id: str = "",
+    institution_name: str = "",
+) -> dict[str, Any]:
+    settings = _settings_manager(request).get()
+    database = _database(request)
+    info: dict[str, Any] = {}
+    try:
+        info = await client.get_item(access_token)
+    except PlaidError as exc:
+        log.warning("Stored Plaid Item %s before it could be described: %s", item_id, exc)
+    stored = database.upsert_plaid_item(
+        {
+            "item_id": item_id,
+            "access_token": access_token,
+            "environment": settings.plaid_env,
+            "institution_id": info.get("institution_id") or institution_id,
+            "institution_name": info.get("institution_name") or institution_name,
+            "status": "ok",
+            "last_error": "",
+        }
+    )
+    await _jobs(request).enqueue("health", trigger="manual")
+    return public_item(stored)
+
+
+@app.post("/api/plaid/exchange", status_code=status.HTTP_201_CREATED)
+async def plaid_exchange(payload: ExchangeRequest, request: Request) -> dict[str, Any]:
+    """Exchange Link's one-time public token and keep the resulting Item."""
+    client = _plaid_client(request)
+    try:
+        exchanged = await client.exchange_public_token(payload.public_token)
+        item = await _store_item(
+            request,
+            client,
+            access_token=exchanged["access_token"],
+            item_id=exchanged["item_id"],
+            institution_id=payload.institution_id,
+            institution_name=payload.institution_name,
+        )
+    finally:
+        await client.close()
+    return {"item": item, "accounts": [account.model_dump() for account in payload.accounts]}
+
+
+@app.post("/api/plaid/sandbox/items", status_code=status.HTTP_201_CREATED)
+async def plaid_sandbox_item(payload: SandboxItemRequest, request: Request) -> dict[str, Any]:
+    """Create a sandbox Item without the Link UI. Refused outside the sandbox."""
+    client = _plaid_client(request)
+    try:
+        created = await client.sandbox_create_item(
+            institution_id=payload.institution_id, username=payload.username
+        )
+        item = await _store_item(
+            request,
+            client,
+            access_token=created["access_token"],
+            item_id=created["item_id"],
+            institution_id=created["institution_id"],
+        )
+    finally:
+        await client.close()
+    return {"item": item}
+
+
+@app.post("/api/plaid/items/{item_id}/repaired")
+async def plaid_item_repaired(item_id: str, request: Request) -> dict[str, Any]:
+    """After Link's update mode: re-read the Item and clear its repair flag if it is healthy."""
+    item = _plaid_item_or_404(request, item_id)
+    client = _plaid_client(request)
+    try:
+        info = await client.get_item(item["access_token"])
+    finally:
+        await client.close()
+    database = _database(request)
+    if info.get("error"):
+        database.update_plaid_item(
+            item_id,
+            status="needs_repair" if info["error"]["needs_repair"] else "error",
+            last_error=info["error"]["error_message"] or info["error"]["error_code"],
+        )
+        return {"repaired": False, "error": info["error"]}
+    database.update_plaid_item(item_id, status="ok", last_error="")
+    await _jobs(request).enqueue("health", trigger="manual")
+    return {"repaired": True, "item": public_item(database.get_plaid_item(item_id) or item)}
+
+
+@app.post("/api/plaid/items/{item_id}/remove")
+async def plaid_item_remove(item_id: str, request: Request) -> dict[str, Any]:
+    """Disconnect an Item at Plaid and disable every mapping that used it.
+
+    On the Trial plan this does not give the Item slot back. A Plaid-side
+    failure (the Item may already be dead) still removes it locally.
+    """
+    item = _plaid_item_or_404(request, item_id)
+    client = _plaid_client(request)
+    plaid_error = ""
+    try:
+        await client.remove_item(item["access_token"])
+    except PlaidError as exc:
+        plaid_error = str(exc)
+        log.warning("Plaid refused to remove Item %s; removing locally anyway: %s", item_id, exc)
+    finally:
+        await client.close()
+    disabled = _database(request).remove_plaid_item(item_id)
+    await _jobs(request).enqueue("health", trigger="manual")
+    return {"removed": True, "links_disabled": disabled, "plaid_error": plaid_error}
+
+
+@app.post("/api/plaid/sandbox/items/{item_id}/reset-login")
+async def plaid_sandbox_reset_login(item_id: str, request: Request) -> dict[str, Any]:
+    """Break a sandbox Item's login to rehearse the repair flow."""
+    item = _plaid_item_or_404(request, item_id)
+    client = _plaid_client(request)
+    try:
+        await client.sandbox_reset_login(item["access_token"])
+    finally:
+        await client.close()
+    await _jobs(request).enqueue("health", trigger="manual")
+    return {"reset": True}
+
+
+@app.post("/api/plaid/links", status_code=status.HTTP_201_CREATED)
+async def plaid_create_link(payload: CreateLinkRequest, request: Request) -> dict[str, Any]:
+    """Map one Plaid account onto an Actual account.
+
+    Nothing is imported here; the mapping only tells later syncs where the
+    feed goes and from which date. Mapping an account Actual still links to
+    SimpleFIN is allowed (that is what a migration looks like mid-way), and
+    the Connections page says so.
+    """
+    item = _plaid_item_or_404(request, payload.item_id)
+    client = _plaid_client(request)
+    try:
+        accounts = (await client.get_accounts(item["access_token"]))["accounts"]
+    finally:
+        await client.close()
+    external = next((a for a in accounts if a["id"] == payload.external_account_id), None)
+    if external is None:
+        raise HTTPException(
+            status_code=404, detail="That account is not on this bank connection"
+        )
+    database = _database(request)
+    actual_account_id = payload.actual_account_id
+    created_account: dict[str, Any] | None = None
+    if payload.new_account is not None:
+        created_account = await _gateway(request).create_account(
+            payload.new_account.name, off_budget=payload.new_account.off_budget
+        )
+        actual_account_id = created_account["id"]
+    existing = database.get_bank_link(actual_account_id)
+    if (
+        existing
+        and existing["enabled"]
+        and existing["external_account_id"] != payload.external_account_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="That Actual account is already mapped to a different bank account",
+        )
+    try:
+        link = database.upsert_bank_link(
+            {
+                "actual_account_id": actual_account_id,
+                "provider": "plaid",
+                "item_id": item["item_id"],
+                "external_account_id": external["id"],
+                "external_name": external["name"],
+                "mask": external["mask"],
+                "account_type": external["type"],
+                "account_subtype": external["subtype"],
+                "institution": item.get("institution_name") or "",
+                "enabled": True,
+                "cutover_date": payload.cutover_date
+                or datetime.now(_settings_manager(request).get().zone).date().isoformat(),
+                "last_error": "",
+            }
+        )
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(
+            status_code=409, detail="That bank account is already mapped to another Actual account"
+        ) from exc
+    if created_account is not None:
+        await _jobs(request).refresh_now()
+    await _jobs(request).enqueue("health", trigger="manual")
+    return {"link": _serialize_record(link), "created_account": created_account}
+
+
+@app.patch("/api/plaid/links/{actual_account_id}")
+async def plaid_update_link(
+    actual_account_id: str, payload: UpdateLinkRequest, request: Request
+) -> dict[str, Any]:
+    database = _database(request)
+    if not database.get_bank_link(actual_account_id):
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    fields: dict[str, Any] = {}
+    if payload.enabled is not None:
+        fields["enabled"] = payload.enabled
+    if payload.cutover_date is not None:
+        fields["cutover_date"] = payload.cutover_date
+    link = database.update_bank_link(actual_account_id, **fields)
+    await _jobs(request).enqueue("health", trigger="manual")
+    return {"link": _serialize_record(link or {})}
+
+
+@app.delete("/api/plaid/links/{actual_account_id}")
+async def plaid_delete_link(actual_account_id: str, request: Request) -> dict[str, Any]:
+    """Forget a mapping. The Actual account and everything imported into it stay."""
+    if not _database(request).delete_bank_link(actual_account_id):
+        raise HTTPException(status_code=404, detail="Mapping not found")
+    await _jobs(request).enqueue("health", trigger="manual")
+    return {"deleted": True}
+
+
 # ------------------------------------------------------------------- settings
 
 
@@ -687,6 +1009,8 @@ async def test_settings(target: str, request: Request) -> dict[str, Any]:
             return await _gateway(request).test_connection()
         if target == "simplefin":
             client: Any = SimpleFinClient(settings)
+        elif target == "plaid":
+            client = PlaidClient(settings)
         elif target == "model":
             client = OpenAICompatibleClient(settings)
         elif target == "notifications":
@@ -697,7 +1021,7 @@ async def test_settings(target: str, request: Request) -> dict[str, Any]:
             return await client.test_connection()
         finally:
             await client.close()
-    except (ActualGatewayError, SimpleFinError, ModelError, NotificationError) as exc:
+    except (ActualGatewayError, SimpleFinError, PlaidError, ModelError, NotificationError) as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
 

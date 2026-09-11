@@ -571,3 +571,24 @@ def test_missing_and_stale_wording_names_the_provider():
     )
     assert stale.status == "stale"
     assert stale.detail.startswith("Plaid's balance is")
+
+
+def test_a_connection_that_stopped_answering_still_reaches_its_accounts_by_link():
+    """A broken Plaid Item returns no readings; Clerk's own link names the Item."""
+    accounts = [
+        actual_account("Card", sync_source="plaid", external_id="acc-1", connection_id="item-1",
+                       managed_by_clerk=True),
+        actual_account("Other", sync_source="plaid", external_id="acc-2", connection_id="item-2",
+                       managed_by_clerk=True),
+    ]
+    by_name = {
+        item.account_name: item
+        for item in evaluate(
+            accounts,
+            [remote_account("Other", id="acc-2", provider="plaid", connection_id="item-2")],
+            [{"provider": "plaid", "conn_id": "item-1", "msg": "Login required"}],
+        )
+    }
+    assert by_name["Card"].status == "error"
+    assert by_name["Card"].detail == "Login required"
+    assert by_name["Other"].status == "ok"

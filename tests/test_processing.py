@@ -776,3 +776,56 @@ async def test_an_unforced_digest_is_still_once_a_day(manager, settings_manager,
     await run_job(manager, "digest")
     again = await run_job(manager, "digest")
     assert again["result"]["skipped"].startswith("already sent for")
+
+
+async def test_the_health_job_reads_plaid_items_and_scores_clerk_linked_accounts(
+    manager, settings_manager, monkeypatch
+):
+    """A Plaid-fed account is scored against Plaid; a broken Item is recorded, not fatal."""
+    from actual_clerk.clients.plaid import PlaidError
+
+    settings_manager.update(
+        {"plaid_client_id": "client-1", "plaid_secret": "secret-1", "transaction_stale_days": 365}
+    )
+    database = manager.database
+    database.upsert_plaid_item({"item_id": "item-ok", "access_token": "access-ok"})
+    database.upsert_plaid_item({"item_id": "item-broken", "access_token": "access-broken"})
+    # The fixture's Checking account is what Actual links to SimpleFIN; Clerk's
+    # own link overrides that for the health check.
+    database.upsert_bank_link(
+        {"actual_account_id": "acct-checking", "provider": "plaid", "item_id": "item-ok",
+         "external_account_id": "plaid-chk", "institution": "Platypus"}
+    )
+
+    async def get_item(self, access_token):
+        if access_token == "access-broken":
+            raise PlaidError("Plaid ITEM_ERROR/ITEM_LOGIN_REQUIRED: log in", error_code="ITEM_LOGIN_REQUIRED")
+        return {"item_id": "item-ok", "institution_id": "ins_1", "institution_name": "First Platypus Bank",
+                "error": None, "consent_expiration_time": None, "products": [], "billed_products": [],
+                "last_successful_update": datetime.datetime.now(datetime.UTC), "last_failed_update": None}
+
+    async def get_accounts(self, access_token):
+        return {"item": {}, "accounts": [
+            {"id": "plaid-chk", "item_id": "item-ok", "name": "Checking", "official_name": "", "mask": "1",
+             "type": "depository", "subtype": "checking", "currency": "USD", "balance_cents": 250000,
+             "available_cents": None, "limit_cents": None, "balance_updated": None},
+        ]}
+
+    monkeypatch.setattr("actual_clerk.clients.plaid.PlaidClient.get_item", get_item)
+    monkeypatch.setattr("actual_clerk.clients.plaid.PlaidClient.get_accounts", get_accounts)
+
+    job = await run_job(manager, "health")
+    assert job["status"] == "completed", job
+    assert job["result"]["plaid_items"] == 2
+    assert job["result"]["plaid_errors"] == 1
+    assert any(event["event_type"] == "plaid_item_failed" for event in job["events"])
+    [health] = database.health_snapshots()
+    assert health["sync_source"] == "plaid"
+    assert health["provider_label"] == "Plaid"
+    assert health["managed_by_clerk"] is True
+    assert health["institution"] == "First Platypus Bank"
+    assert health["status"] == "ok"
+    assert health["remote_balance_cents"] == 250000
+    assert database.get_plaid_item("item-ok")["status"] == "ok"
+    assert database.get_plaid_item("item-ok")["institution_name"] == "First Platypus Bank"
+    assert database.get_plaid_item("item-broken")["status"] == "needs_repair"

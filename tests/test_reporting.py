@@ -151,7 +151,7 @@ def test_clerk_managed_links_overlay_the_snapshot_and_keep_what_actual_said():
     apply_bank_links(
         snapshot,
         [
-            {"actual_account_id": "acct-1", "provider": "plaid",
+            {"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1",
              "external_account_id": "plaid-1", "institution": "Platypus", "enabled": True},
             {"actual_account_id": "acct-2", "provider": "plaid",
              "external_account_id": "plaid-2", "enabled": False},
@@ -159,6 +159,7 @@ def test_clerk_managed_links_overlay_the_snapshot_and_keep_what_actual_said():
     )
     card, checking = snapshot["accounts"]
     assert card["sync_source"] == "plaid"
+    assert card["connection_id"] == "item-1"
     assert card["external_id"] == "plaid-1"
     assert card["bank_name"] == "Platypus"
     assert card["managed_by_clerk"] is True
@@ -170,6 +171,7 @@ def test_clerk_managed_links_overlay_the_snapshot_and_keep_what_actual_said():
     infos = {item.id: item for item in to_actual_accounts(snapshot)}
     assert infos["acct-1"].managed_by_clerk is True
     assert infos["acct-1"].sync_source == "plaid"
+    assert infos["acct-1"].connection_id == "item-1"
     assert infos["acct-2"].managed_by_clerk is False
 
 

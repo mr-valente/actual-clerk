@@ -585,3 +585,10 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   .detail-grid { grid-template-columns: 1fr 1fr; }
   .drawer-head, .drawer-body { padding-left: 18px; padding-right: 18px; }
 }
+
+/* Plaid mapping forms live inside the drawer's change list. */
+.plaid-map-form .form-grid { gap: 10px 12px; }
+.plaid-map-form .field { font-size: 9px; }
+.plaid-map-form .field input, .plaid-map-form .field select { min-height: 33px; font-size: 11px; }
+.plaid-map-form .field small { font-weight: 500; color: var(--ink-faint); }
+.field[hidden] { display: none; }

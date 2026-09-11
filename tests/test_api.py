@@ -94,6 +94,11 @@ class FakeGateway:
             raise self.error
         return {"ok": True, "message": "3 account(s) in My Budget"}
 
+    async def create_account(self, name, *, off_budget=False, initial_balance_cents=None):
+        self.created_accounts = getattr(self, "created_accounts", [])
+        self.created_accounts.append((name, off_budget))
+        return {"id": "acct-new", "name": name, "off_budget": off_budget}
+
 
 @pytest.fixture
 def gateway():
@@ -153,7 +158,7 @@ async def test_health_reports_what_is_configured(client):
     body = response.json()
     assert body["status"] == "ok"
     assert body["configured"]["actual"] is False
-    assert set(body["configured"]) == {"actual", "simplefin", "model", "notifications"}
+    assert set(body["configured"]) == {"actual", "simplefin", "plaid", "model", "notifications"}
 
 
 async def test_api_responses_are_never_cached(client):
@@ -768,3 +773,235 @@ async def test_a_failed_batch_hands_every_claim_back(client, gateway):
 async def test_bulk_resolve_rejects_an_empty_list(client):
     response = await client.post("/api/reviews/resolve", json={"ids": [], "action": "dismiss"})
     assert response.status_code == 422
+
+
+# --------------------------------------------------------------------- plaid
+
+
+@pytest.fixture
+def plaid(client, monkeypatch):
+    """Plaid configured, every network call answered locally, calls recorded."""
+    client.settings_manager.update({"plaid_client_id": "client-1", "plaid_secret": "secret-1"})
+    calls: list[tuple[str, Any]] = []
+    state = {
+        "item_error": None,
+        "accounts": [
+            {"id": "plaid-chk", "item_id": "item-1", "name": "Checking", "official_name": "Plaid checking",
+             "mask": "8193", "type": "depository", "subtype": "checking", "currency": "USD",
+             "balance_cents": 50000, "available_cents": 44200, "limit_cents": None, "balance_updated": None},
+        ],
+    }
+
+    async def create_link_token(self, *, access_token=None, account_selection=False):
+        calls.append(("link_token", access_token, account_selection))
+        return {"link_token": "link-1", "expiration": "soon", "update_mode": bool(access_token), "environment": "sandbox"}
+
+    async def exchange_public_token(self, public_token):
+        calls.append(("exchange", public_token))
+        return {"access_token": "access-1", "item_id": "item-1"}
+
+    async def sandbox_create_item(self, *, institution_id="ins_109508", username="user_transactions_dynamic", password="pass_good"):
+        calls.append(("sandbox_item", institution_id, username))
+        return {"access_token": "access-sb", "item_id": "item-sb", "institution_id": institution_id}
+
+    async def get_item(self, access_token):
+        calls.append(("item", access_token))
+        return {"item_id": "item-1", "institution_id": "ins_1", "institution_name": "Platypus", "error": state["item_error"],
+                "consent_expiration_time": None, "products": [], "billed_products": [], "last_successful_update": None, "last_failed_update": None}
+
+    async def get_accounts(self, access_token):
+        calls.append(("accounts", access_token))
+        return {"item": {"item_id": "item-1"}, "accounts": state["accounts"]}
+
+    async def remove_item(self, access_token):
+        calls.append(("remove", access_token))
+        return True
+
+    async def sandbox_reset_login(self, access_token):
+        calls.append(("reset", access_token))
+        return True
+
+    for name, function in {
+        "create_link_token": create_link_token, "exchange_public_token": exchange_public_token,
+        "sandbox_create_item": sandbox_create_item, "get_item": get_item, "get_accounts": get_accounts,
+        "remove_item": remove_item, "sandbox_reset_login": sandbox_reset_login,
+    }.items():
+        monkeypatch.setattr(f"actual_clerk.clients.plaid.PlaidClient.{name}", function)
+    return {"calls": calls, "state": state}
+
+
+async def test_plaid_endpoints_refuse_until_configured(client):
+    response = await client.post("/api/plaid/link-token", json={})
+    assert response.status_code == 409
+    listing = await client.get("/api/plaid/items")
+    assert listing.status_code == 200
+    assert listing.json()["configured"] is False
+    assert listing.json()["items"] == []
+
+
+async def test_a_link_token_is_minted_for_a_new_connection_or_a_repair(client, plaid):
+    fresh = await client.post("/api/plaid/link-token", json={})
+    assert fresh.status_code == 200
+    assert fresh.json()["update_mode"] is False
+    assert (await client.post("/api/plaid/link-token", json={"item_id": "nope"})).status_code == 404
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    repair = await client.post("/api/plaid/link-token", json={"item_id": "item-1", "account_selection": True})
+    assert repair.json()["update_mode"] is True
+    assert ("link_token", "access-1", True) in plaid["calls"]
+
+
+async def test_exchanging_a_public_token_stores_the_item_without_its_token(client, plaid):
+    response = await client.post(
+        "/api/plaid/exchange",
+        json={"public_token": "public-sandbox-1", "institution_name": "Given", "accounts": [{"id": "plaid-chk", "name": "Checking"}]},
+    )
+    assert response.status_code == 201, response.text
+    item = response.json()["item"]
+    assert item["item_id"] == "item-1"
+    assert item["institution_name"] == "Platypus", "Plaid's own description wins over Link metadata"
+    assert "access_token" not in item
+    stored = client.database.get_plaid_item("item-1")
+    assert stored["access_token"] == "access-1"
+    assert stored["environment"] == "sandbox"
+    assert client.database.last_job("health")["status"] == "queued"
+
+
+async def test_a_sandbox_item_can_be_created_without_link(client, plaid):
+    response = await client.post("/api/plaid/sandbox/items", json={"username": "user_good"})
+    assert response.status_code == 201, response.text
+    assert response.json()["item"]["item_id"] == "item-sb"
+    assert ("sandbox_item", "ins_109508", "user_good") in plaid["calls"]
+
+
+async def test_items_are_listed_with_accounts_mappings_and_slot_usage(client, plaid):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1", "institution_name": "Platypus"})
+    client.database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1", "external_account_id": "plaid-chk", "cutover_date": "2026-09-01"})
+    client.database.set_snapshot(OVERVIEW_SNAPSHOT, {"accounts": [
+        {"id": "acct-1", "name": "Checking", "off_budget": False, "closed": False, "sync_source": "plaid", "actual_sync_source": "simpleFin"},
+        {"id": "acct-2", "name": "Closed", "off_budget": False, "closed": True},
+    ]})
+    response = await client.get("/api/plaid/items")
+    body = response.json()
+    assert body["configured"] is True
+    assert body["slots"] == {"used": 1, "limit": None}
+    [item] = body["items"]
+    assert item["status"] == "ok"
+    assert "access_token" not in item
+    [account] = item["accounts"]
+    assert account["link"]["actual_account_id"] == "acct-1"
+    assert account["link"]["cutover_date"] == "2026-09-01"
+    [actual] = body["actual_accounts"]
+    assert actual["actual_sync_source"] == "simpleFin"
+    assert actual["linked_to"]["external_account_id"] == "plaid-chk"
+
+
+async def test_a_broken_item_is_recorded_as_needing_repair_and_then_cleared(client, plaid):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    plaid["state"]["item_error"] = {"error_type": "ITEM_ERROR", "error_code": "ITEM_LOGIN_REQUIRED", "error_message": "log in", "display_message": "", "needs_repair": True}
+    listing = await client.get("/api/plaid/items")
+    assert listing.json()["items"][0]["needs_repair"] is True
+    assert client.database.get_plaid_item("item-1")["status"] == "needs_repair"
+    still_broken = await client.post("/api/plaid/items/item-1/repaired")
+    assert still_broken.json()["repaired"] is False
+    plaid["state"]["item_error"] = None
+    repaired = await client.post("/api/plaid/items/item-1/repaired")
+    assert repaired.json()["repaired"] is True
+    assert client.database.get_plaid_item("item-1")["status"] == "ok"
+
+
+async def test_mapping_a_plaid_account_onto_an_existing_actual_account(client, plaid):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1", "institution_name": "Platypus"})
+    response = await client.post(
+        "/api/plaid/links",
+        json={"item_id": "item-1", "external_account_id": "plaid-chk", "actual_account_id": "acct-1", "cutover_date": "2026-09-01"},
+    )
+    assert response.status_code == 201, response.text
+    link = response.json()["link"]
+    assert link["external_name"] == "Checking"
+    assert link["mask"] == "8193"
+    assert link["institution"] == "Platypus"
+    assert link["cutover_date"] == "2026-09-01"
+    assert link["enabled"] is True
+    unknown = await client.post("/api/plaid/links", json={"item_id": "item-1", "external_account_id": "plaid-nope", "actual_account_id": "acct-1"})
+    assert unknown.status_code == 404
+    taken = await client.post("/api/plaid/links", json={"item_id": "item-1", "external_account_id": "plaid-chk", "actual_account_id": "acct-2"})
+    assert taken.status_code == 409
+    both = await client.post("/api/plaid/links", json={"item_id": "item-1", "external_account_id": "plaid-chk", "actual_account_id": "acct-1", "new_account": {"name": "New"}})
+    assert both.status_code == 422
+    bad_date = await client.post("/api/plaid/links", json={"item_id": "item-1", "external_account_id": "plaid-chk", "actual_account_id": "acct-1", "cutover_date": "yesterday"})
+    assert bad_date.status_code == 422
+
+
+async def test_mapping_onto_a_new_actual_account_creates_it_first(client, plaid, gateway):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    response = await client.post(
+        "/api/plaid/links",
+        json={"item_id": "item-1", "external_account_id": "plaid-chk", "new_account": {"name": "Plaid Checking", "off_budget": True}},
+    )
+    assert response.status_code == 201, response.text
+    assert gateway.created_accounts == [("Plaid Checking", True)]
+    assert response.json()["created_account"]["id"] == "acct-new"
+    assert response.json()["link"]["actual_account_id"] == "acct-new"
+    assert response.json()["link"]["cutover_date"]
+
+
+async def test_a_mapping_can_be_paused_moved_and_forgotten(client, plaid):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    await client.post("/api/plaid/links", json={"item_id": "item-1", "external_account_id": "plaid-chk", "actual_account_id": "acct-1"})
+    updated = await client.patch("/api/plaid/links/acct-1", json={"enabled": False, "cutover_date": "2026-08-15"})
+    assert updated.json()["link"]["enabled"] is False
+    assert updated.json()["link"]["cutover_date"] == "2026-08-15"
+    assert (await client.patch("/api/plaid/links/ghost", json={"enabled": True})).status_code == 404
+    assert (await client.delete("/api/plaid/links/acct-1")).json()["deleted"] is True
+    assert (await client.delete("/api/plaid/links/acct-1")).status_code == 404
+
+
+async def test_removing_an_item_disconnects_at_plaid_and_disables_its_mappings(client, plaid):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    client.database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1", "external_account_id": "plaid-chk"})
+    response = await client.post("/api/plaid/items/item-1/remove")
+    assert response.json() == {"removed": True, "links_disabled": 1, "plaid_error": ""}
+    assert ("remove", "access-1") in plaid["calls"]
+    assert client.database.get_bank_link("acct-1")["enabled"] is False
+    assert (await client.post("/api/plaid/items/item-1/remove")).status_code == 404
+
+
+async def test_a_sandbox_login_can_be_broken_on_purpose(client, plaid):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    assert (await client.post("/api/plaid/sandbox/items/item-1/reset-login")).json() == {"reset": True}
+    assert ("reset", "access-1") in plaid["calls"]
+
+
+async def test_the_plaid_connection_test_reports_the_environment(client, plaid):
+    response = await client.post("/api/settings/test/plaid")
+    assert response.status_code == 200
+    assert response.json()["environment"] == "sandbox"
+
+
+async def test_plaid_failures_carry_their_error_code(client, plaid, monkeypatch):
+    from actual_clerk.clients.plaid import PlaidError
+
+    async def broken(self, *args, **kwargs):
+        raise PlaidError("Plaid API_ERROR/INTERNAL: down", error_type="API_ERROR", error_code="INTERNAL", retryable=True)
+
+    monkeypatch.setattr("actual_clerk.clients.plaid.PlaidClient.create_link_token", broken)
+    response = await client.post("/api/plaid/link-token", json={})
+    assert response.status_code == 502
+    assert response.json()["error_code"] == "INTERNAL"
+
+
+async def test_a_paused_mapping_is_replaced_by_mapping_the_account_again(client, plaid):
+    """Remove a connection, reconnect the bank, map the same Actual account onto the new Item."""
+    client.database.upsert_plaid_item({"item_id": "item-old", "access_token": "access-old"})
+    client.database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-old", "external_account_id": "plaid-old"})
+    client.database.remove_plaid_item("item-old")
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    client.database.set_snapshot(OVERVIEW_SNAPSHOT, {"accounts": [{"id": "acct-1", "name": "Checking", "off_budget": False, "closed": False}]})
+    listing = await client.get("/api/plaid/items")
+    assert listing.json()["actual_accounts"][0]["linked_to"] is None
+    response = await client.post("/api/plaid/links", json={"item_id": "item-1", "external_account_id": "plaid-chk", "actual_account_id": "acct-1"})
+    assert response.status_code == 201, response.text
+    link = client.database.get_bank_link("acct-1")
+    assert link["item_id"] == "item-1"
+    assert link["external_account_id"] == "plaid-chk"
+    assert link["enabled"] is True

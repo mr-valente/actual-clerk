@@ -24,17 +24,20 @@ from actual_clerk.categorize import (
 )
 from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
 from actual_clerk.clients.ntfy import NotificationError, NtfyClient
+from actual_clerk.clients.plaid import PlaidError
 from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
 from actual_clerk.config import Settings, SettingsManager
 from actual_clerk.db import Database
 from actual_clerk.digest import build_digest, health_alert
 from actual_clerk.domain import tagging
 from actual_clerk.domain.health import evaluate_accounts, summarize
+from actual_clerk.plaid_links import read_items, readings
 from actual_clerk.reporting import (
     apply_bank_links,
     budget_report,
     freshness,
     to_actual_accounts,
+    to_remote_accounts,
     to_simplefin_accounts,
 )
 
@@ -279,7 +282,7 @@ class JobManager:
                 job["id"], "cancelled", "Clerk stopped while this job was running", True
             )
             raise
-        except (ProcessingError, ActualGatewayError, SimpleFinError) as exc:
+        except (ProcessingError, ActualGatewayError, SimpleFinError, PlaidError) as exc:
             retryable = getattr(exc, "retryable", False)
             code = getattr(exc, "code", type(exc).__name__)
             self.database.fail_or_retry(job["id"], str(code), str(exc), retryable)
@@ -475,11 +478,37 @@ class JobManager:
         finally:
             await client.close()
 
+        # Plaid Items are Clerk's own; each is asked for its status and cached
+        # balances, and a broken one is recorded on the Item as well as
+        # reported here. One Item failing never hides the others.
+        plaid_payload: dict[str, Any] = {"accounts": [], "errors": []}
+        plaid_items = 0
+        if settings.plaid_configured and self.database.list_plaid_items():
+            self.database.update_job(job["id"], phase="plaid")
+            entries = await read_items(self.database, settings)
+            plaid_items = len(entries)
+            plaid_payload = readings(entries)
+            for entry in entries:
+                if entry.get("error") is not None:
+                    self.database.add_event(
+                        job["id"],
+                        "warning",
+                        "plaid_item_failed",
+                        f"{entry['item'].get('institution_name') or entry['item']['item_id']}: "
+                        f"{entry['error']}",
+                        {"item_id": entry["item"]["item_id"],
+                         "needs_repair": entry["error"].needs_repair},
+                    )
+
         results = evaluate_accounts(
             accounts=to_actual_accounts(snapshot),
-            remote_accounts=to_simplefin_accounts(remote_payload),
-            errors=(remote_payload or {}).get("errors", []),
+            remote_accounts=[
+                *to_simplefin_accounts(remote_payload),
+                *to_remote_accounts(plaid_payload, provider="plaid"),
+            ],
+            errors=[*(remote_payload or {}).get("errors", []), *plaid_payload["errors"]],
             simplefin_configured=client.configured and not simplefin_error,
+            providers={"plaid": plaid_items > 0},
             balance_stale_hours=settings.balance_stale_hours,
             balance_tolerance_cents=settings.balance_tolerance_cents,
             transaction_stale_days=settings.transaction_stale_days,
@@ -498,6 +527,8 @@ class JobManager:
         await self._refresh_overview(snapshot, settings, today, health=snapshots)
         summary = summarize(snapshots)
         summary["simplefin_error"] = simplefin_error
+        summary["plaid_items"] = plaid_items
+        summary["plaid_errors"] = len(plaid_payload["errors"])
         summary["transitions"] = len(transitions)
         return summary
 

@@ -124,6 +124,11 @@ class ActualAccountInfo:
     # True when Clerk, not Actual, delivers this account's bank feed. The
     # sync_source then names Clerk's provider rather than Actual's.
     managed_by_clerk: bool = False
+    # The provider-side connection this account belongs to (a Plaid Item),
+    # when Clerk knows it without needing a reading. A connection that stops
+    # answering returns no readings at all, and this is what still lets its
+    # error reach every account on it.
+    connection_id: str = ""
 
     @property
     def cleared_cents(self) -> int:
@@ -427,8 +432,9 @@ def _evaluate_one(
         return health
 
     account_errors = errors_by_account.get((provider, account.external_id), [])
+    connection_id = remote.connection_id if remote else account.connection_id
     connection_errors = (
-        errors_by_connection.get((provider, remote.connection_id), []) if remote else []
+        errors_by_connection.get((provider, connection_id), []) if connection_id else []
     )
     reported = account_errors + connection_errors
     if reported:

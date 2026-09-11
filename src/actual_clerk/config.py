@@ -36,6 +36,20 @@ class Settings(BaseModel):
     simplefin_access_url: SecretStr = SecretStr("")
     simplefin_setup_token: SecretStr = SecretStr("")
 
+    # --- Plaid ------------------------------------------------------------
+    # The bank feed Clerk delivers itself. The secret belongs to one Plaid
+    # environment; switching environments means a different secret and a
+    # fresh set of Items.
+    plaid_client_id: str = Field(default="", max_length=100)
+    plaid_secret: SecretStr = SecretStr("")
+    plaid_env: Literal["sandbox", "production"] = "sandbox"
+    # History requested when an Item is first linked; Plaid allows 1 to 730.
+    plaid_days_requested: int = Field(default=90, ge=1, le=730)
+    # Required only for OAuth institutions: an https URL registered in the
+    # Plaid dashboard that returns the browser to Clerk's own page.
+    plaid_redirect_uri: str = ""
+    plaid_client_name: str = Field(default="Actual Clerk", max_length=30)
+
     # --- Local OpenAI-compatible endpoint ---------------------------------
     openai_base_url: str = "http://host.docker.internal:11434/v1"
     openai_api_key: SecretStr = SecretStr("")
@@ -140,6 +154,24 @@ class Settings(BaseModel):
         if not value.startswith(("http://", "https://")):
             raise ValueError("must start with http:// or https://")
         return value
+
+    @field_validator("plaid_redirect_uri")
+    @classmethod
+    def validate_redirect_uri(cls, value: str) -> str:
+        value = value.strip()
+        if value and not value.startswith("https://"):
+            raise ValueError("the Plaid redirect URI must be an https:// URL")
+        return value
+
+    @field_validator("plaid_client_id")
+    @classmethod
+    def strip_plaid_client_id(cls, value: str) -> str:
+        return value.strip()
+
+    @field_validator("plaid_client_name")
+    @classmethod
+    def normalize_plaid_client_name(cls, value: str) -> str:
+        return " ".join(value.split()) or "Actual Clerk"
 
     @field_validator("clerk_tag")
     @classmethod
@@ -254,6 +286,10 @@ class Settings(BaseModel):
         }
 
     @property
+    def plaid_configured(self) -> bool:
+        return bool(self.plaid_client_id and self.secret_value("plaid_secret"))
+
+    @property
     def zone(self) -> zoneinfo.ZoneInfo:
         return zoneinfo.ZoneInfo(self.timezone)
 
@@ -292,6 +328,7 @@ SECRET_FIELDS = (
     "actual_encryption_password",
     "simplefin_access_url",
     "simplefin_setup_token",
+    "plaid_secret",
     "openai_api_key",
     "ntfy_token",
 )
@@ -305,6 +342,12 @@ ENVIRONMENT_FIELDS = {
     "ACTUAL_VERIFY_SSL": "actual_verify_ssl",
     "CLERK_SIMPLEFIN_ACCESS_URL": "simplefin_access_url",
     "CLERK_SIMPLEFIN_SETUP_TOKEN": "simplefin_setup_token",
+    "CLERK_PLAID_CLIENT_ID": "plaid_client_id",
+    "CLERK_PLAID_SECRET": "plaid_secret",
+    "CLERK_PLAID_ENV": "plaid_env",
+    "CLERK_PLAID_DAYS_REQUESTED": "plaid_days_requested",
+    "CLERK_PLAID_REDIRECT_URI": "plaid_redirect_uri",
+    "CLERK_PLAID_CLIENT_NAME": "plaid_client_name",
     "CLERK_OPENAI_BASE_URL": "openai_base_url",
     "CLERK_OPENAI_API_KEY": "openai_api_key",
     "CLERK_MODEL": "model",

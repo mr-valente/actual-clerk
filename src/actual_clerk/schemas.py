@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import datetime
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -141,3 +142,87 @@ CATEGORY_CHOICE_SCHEMA: dict[str, Any] = {
     "required": ["category_number", "confidence", "reason", "suggested_new_category"],
     "additionalProperties": False,
 }
+
+
+# ------------------------------------------------------------------- Plaid
+
+
+class LinkTokenRequest(BaseModel):
+    # Naming an Item asks for Link's update mode, which repairs that Item's
+    # login without creating a new one.
+    item_id: str = Field(default="", max_length=100)
+    account_selection: bool = False
+
+
+class LinkAccountMetadata(BaseModel):
+    id: str = Field(default="", max_length=100)
+    name: str = Field(default="", max_length=200)
+    mask: str = Field(default="", max_length=10)
+    type: str = Field(default="", max_length=40)
+    subtype: str = Field(default="", max_length=40)
+
+
+class ExchangeRequest(BaseModel):
+    public_token: str = Field(min_length=8, max_length=200)
+    institution_id: str = Field(default="", max_length=100)
+    institution_name: str = Field(default="", max_length=200)
+    accounts: list[LinkAccountMetadata] = Field(default_factory=list)
+
+
+class SandboxItemRequest(BaseModel):
+    institution_id: str = Field(default="ins_109508", max_length=40)
+    username: str = Field(default="user_transactions_dynamic", max_length=80)
+
+
+class NewActualAccount(BaseModel):
+    name: str = Field(min_length=1, max_length=100)
+    off_budget: bool = False
+
+    @field_validator("name")
+    @classmethod
+    def normalize(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("may not be blank")
+        return normalized
+
+
+class CreateLinkRequest(BaseModel):
+    """Map one Plaid account onto an Actual account, existing or new."""
+
+    item_id: str = Field(min_length=1, max_length=100)
+    external_account_id: str = Field(min_length=1, max_length=100)
+    actual_account_id: str = Field(default="", max_length=100)
+    new_account: NewActualAccount | None = None
+    # The first date Clerk imports from Plaid. Earlier history stays with
+    # whatever fed the account before; blank means today.
+    cutover_date: str = Field(default="", max_length=10)
+
+    @field_validator("cutover_date")
+    @classmethod
+    def validate_cutover(cls, value: str) -> str:
+        value = value.strip()
+        if value:
+            datetime.date.fromisoformat(value)
+        return value
+
+    @model_validator(mode="after")
+    def one_target(self) -> CreateLinkRequest:
+        if bool(self.actual_account_id) == bool(self.new_account):
+            raise ValueError("choose an existing Actual account or describe a new one, not both")
+        return self
+
+
+class UpdateLinkRequest(BaseModel):
+    enabled: bool | None = None
+    cutover_date: str | None = Field(default=None, max_length=10)
+
+    @field_validator("cutover_date")
+    @classmethod
+    def validate_cutover(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        value = value.strip()
+        if value:
+            datetime.date.fromisoformat(value)
+        return value

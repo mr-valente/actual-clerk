@@ -17,6 +17,7 @@ const state = {
   jobs: [],
   settings: null,
   health: null,
+  plaid: null,
   activityView: "all",
   activityFingerprint: "",
   decisionSearch: "",
@@ -152,19 +153,27 @@ function isDegraded(item) {
 // telling someone to reauthorize a link that is working sends them to check a
 // connection that was never the problem.
 const STATUS_REMEDIES = {
-  error: "SimpleFIN reported an error for this bank. Reauthorize it in your SimpleFIN Bridge, then run a check here.",
-  missing: "SimpleFIN is no longer returning this account. Relink it in your SimpleFIN Bridge, then run a check here.",
-  stale: "The bank has stopped sending SimpleFIN fresh data for this account. Nothing needs fixing in Actual, and it usually clears on its own once the bank refreshes.",
+  simpleFin: {
+    error: "SimpleFIN reported an error for this bank. Reauthorize it in your SimpleFIN Bridge, then run a check here.",
+    missing: "SimpleFIN is no longer returning this account. Relink it in your SimpleFIN Bridge, then run a check here.",
+    stale: "The bank has stopped sending SimpleFIN fresh data for this account. Nothing needs fixing in Actual, and it usually clears on its own once the bank refreshes.",
+  },
+  plaid: {
+    error: "Plaid reports a problem with this bank connection. If the bank wants a fresh login, use Repair on the Plaid connection below; it keeps the same connection.",
+    missing: "Plaid is no longer returning this account on its connection. Open the connection below to remap or remove the mapping.",
+    stale: "Plaid has not received fresh data from the bank for this account. Nothing needs fixing in Actual; if it persists, check the connection below.",
+  },
   drifted: "Actual and the bank disagree about posted money, so a transaction is missing on one side. Compare the account with the bank and reconcile it in Actual.",
 };
 function connectionRemedies(degraded) {
-  const byStatus = new Map();
+  const byKey = new Map();
   for (const item of degraded) {
-    if (!byStatus.has(item.status)) byStatus.set(item.status, []);
-    byStatus.get(item.status).push(item.account_name);
+    const key = `${item.sync_source || "simpleFin"}:${item.status}`;
+    if (!byKey.has(key)) byKey.set(key, { status: item.status, provider: item.sync_source || "simpleFin", names: [] });
+    byKey.get(key).names.push(item.account_name);
   }
-  return [...byStatus.entries()].map(([status, names]) => {
-    const remedy = STATUS_REMEDIES[status] || "Run a check here for the current detail.";
+  return [...byKey.values()].map(({ status, provider, names }) => {
+    const remedy = STATUS_REMEDIES[status] || STATUS_REMEDIES[provider]?.[status] || STATUS_REMEDIES.simpleFin[status] || "Run a check here for the current detail.";
     return `<p><strong>${escapeHtml(names.join(", "))}</strong> — ${escapeHtml(remedy)}</p>`;
   }).join("");
 }
@@ -282,7 +291,7 @@ function healthRow(item, { actions = true, toggle = false } = {}) {
     : "";
   return `<article class="data-row health-row ${actions ? "clickable" : ""}" ${actions ? `data-action="account-detail" data-id="${escapeHtml(item.account_id)}"` : ""}>
     <span class="dot ${escapeHtml(item.status)}" title="${escapeHtml(item.status_label || item.status)}"></span>
-    <div class="row-title"><strong>${escapeHtml(item.account_name || "Account")}</strong><small>${escapeHtml(item.institution || item.sync_source || "Manual account")}</small></div>
+    <div class="row-title"><strong>${escapeHtml(item.account_name || "Account")}</strong><small>${escapeHtml([item.institution, item.provider_label ? `via ${item.provider_label}` : ""].filter(Boolean).join(" · ") || "Manual account")}</small></div>
     <div class="row-meta">${escapeHtml((item.detail || "").slice(0, 90))}${age ? `<br /><span${item.remote_balance_date ? ` title="Bank balance dated ${escapeHtml(fullTime(item.remote_balance_date))}"` : ""}>Bank data ${escapeHtml(age)}</span>` : ""}</div>
     <div class="row-meta">${item.remote_balance_cents === null || item.remote_balance_cents === undefined
       ? "—"
@@ -405,8 +414,8 @@ async function renderOverview() {
   const configured = state.health?.configured || {};
   const setupBanner = !configured.actual
     ? `<div class="alert-banner"><span>1</span><div><strong>Connect Actual Budget to get started</strong><p>Clerk needs your Actual server URL, password, and budget sync ID before it can read anything. Nothing runs on a schedule until then.</p></div><a class="button primary" href="#settings-actual">Open settings</a></div>`
-    : !configured.simplefin
-      ? `<div class="alert-banner"><span>2</span><div><strong>Connect SimpleFIN to verify your bank links</strong><p>Without it Clerk can only tell that transactions stopped arriving, not that a bank connection is the reason.</p></div><a class="button ghost" href="#accounts">Connect</a></div>`
+    : !configured.simplefin && !configured.plaid
+      ? `<div class="alert-banner"><span>2</span><div><strong>Connect SimpleFIN or Plaid to verify your bank links</strong><p>Without a bank provider Clerk can only tell that transactions stopped arriving, not that a bank connection is the reason.</p></div><a class="button ghost" href="#accounts">Connect</a></div>`
       : "";
 
   content.innerHTML = `
@@ -551,8 +560,59 @@ async function renderReview() {
     </article>`;
 }
 
+function plaidItemStatus(item) {
+  if (item.status === "needs_repair") return ["error", "Needs repair"];
+  if (item.status === "error") return ["error", "Error"];
+  if (item.status === "removed") return ["muted", "Removed"];
+  return ["ok", "Connected"];
+}
+
+function plaidItemRow(item, { sandbox }) {
+  const [status, label] = plaidItemStatus(item);
+  const accounts = item.accounts || [];
+  const mapped = accounts.filter((account) => account.link && account.link.enabled).length;
+  const detail = item.error
+    ? (item.error.display_message || item.error.error_message || item.error.message || item.error.error_code || "Plaid reported a problem")
+    : `${accounts.length} account${accounts.length === 1 ? "" : "s"} · ${mapped} mapped to Actual${item.last_successful_update ? ` · bank data ${relativeTime(item.last_successful_update)}` : ""}`;
+  return `<article class="data-row clickable" style="grid-template-columns:30px minmax(0,1fr) auto auto" data-action="plaid-item-detail" data-id="${escapeHtml(item.item_id)}">
+    <span class="dot ${status}"></span>
+    <div class="row-title"><strong>${escapeHtml(item.institution_name || item.institution_id || "Bank")}</strong><small>${escapeHtml(detail.slice(0, 140))}</small></div>
+    <div class="health-state">${statusChip(status, label)}</div>
+    <div class="row-actions">
+      ${item.needs_repair ? `<button class="button secondary small" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair</button>` : ""}
+      <button class="button ghost small" data-action="plaid-item-detail" data-id="${escapeHtml(item.item_id)}">Map accounts</button>
+      ${sandbox ? `<button class="button ghost small" title="Sandbox only: make Plaid demand a fresh login" data-action="plaid-reset-login" data-id="${escapeHtml(item.item_id)}">Break login</button>` : ""}
+      <button class="button danger small" data-action="plaid-remove-item" data-id="${escapeHtml(item.item_id)}" data-name="${escapeHtml(item.institution_name || "this bank")}">Remove</button>
+    </div>
+  </article>`;
+}
+
+function plaidPanel(plaid) {
+  if (!plaid) return "";
+  const configured = Boolean(plaid.configured);
+  const sandbox = plaid.environment === "sandbox";
+  const items = plaid.items || [];
+  const slots = plaid.slots || {};
+  const slotText = slots.limit ? `${slots.used} of ${slots.limit} lifetime production connections used` : `${plaid.environment} environment`;
+  return `<article class="panel" id="plaid-panel">
+    <header class="panel-head"><div><h2>Plaid connections</h2><p>${configured ? `Banks Clerk syncs itself and delivers into Actual · ${escapeHtml(slotText)}` : "Add a Plaid client id and secret in Settings to connect banks here."}${configured && !sandbox ? " · removing a connection does not give its slot back" : ""}</p></div>
+      <div class="panel-actions">
+        ${configured && sandbox ? `<button class="button ghost small" data-action="plaid-sandbox-item" title="Create a sandbox bank connection without the Link flow">Add sandbox bank</button>` : ""}
+        ${configured ? `<button class="button primary small" data-action="plaid-connect">Connect a bank</button>` : `<a class="button ghost small" href="#settings-plaid">Configure Plaid</a>`}
+      </div></header>
+    <div class="status-list">${items.length
+      ? items.map((item) => plaidItemRow(item, { sandbox })).join("")
+      : emptyState("⇄", configured ? "No banks connected through Plaid yet" : "Plaid is not configured", configured ? "Connect a bank, then map each of its accounts onto an Actual account." : "Clerk keeps verifying SimpleFIN links either way.")}</div>
+  </article>`;
+}
+
 async function renderAccounts() {
-  state.accounts = await api("/api/accounts");
+  const [accounts, plaid] = await Promise.all([
+    api("/api/accounts"),
+    api("/api/plaid/items").catch((error) => ({ configured: true, items: [], error: error.message })),
+  ]);
+  state.accounts = accounts;
+  state.plaid = plaid;
   const health = state.accounts.health || [];
   const events = state.accounts.events || [];
   const linked = health.filter((item) => item.status !== "not_linked");
@@ -560,8 +620,10 @@ async function renderAccounts() {
   const degraded = health.filter(isDegraded);
   const configured = state.data?.overview ? true : false;
   content.innerHTML = `
-    <section class="page-intro"><div><h2>Bank connections</h2><p>Clerk asks SimpleFIN directly what each account looks like right now, then compares that with what Actual holds. A connection that quietly stops delivering data shows up here as a status change rather than as a slowly staler budget.</p></div><div class="actions"><button class="button ghost" data-action="check-connections">Check now</button><button class="button primary" data-action="open-claim">Connect SimpleFIN</button></div></section>
+    <section class="page-intro"><div><h2>Bank connections</h2><p>Clerk asks each bank provider directly what an account looks like right now, then compares that with what Actual holds. A connection that quietly stops delivering data shows up here as a status change rather than as a slowly staler budget.</p></div><div class="actions"><button class="button ghost" data-action="check-connections">Check now</button><button class="button ghost" data-action="open-claim">Connect SimpleFIN</button>${plaid?.configured ? `<button class="button primary" data-action="plaid-connect">Connect a bank</button>` : ""}</div></section>
     ${degraded.length ? `<div class="alert-banner critical"><span>!</span><div><strong>${degraded.length} connection${degraded.length === 1 ? "" : "s"} need attention</strong>${connectionRemedies(degraded)}</div></div>` : ""}
+    ${plaid?.error ? `<div class="alert-banner"><span>!</span><div><strong>Plaid could not be read</strong><p>${escapeHtml(plaid.error)}</p></div></div>` : ""}
+    ${plaidPanel(plaid)}
     <article class="panel">
       <header class="panel-head"><div><h2>Accounts</h2><p>${linked.length} linked to bank sync, ${health.length - linked.length} manual${muted.length ? `, ${muted.length} not monitored` : ""} · the switch turns Clerk's watching on or off without unlinking anything in Actual</p></div></header>
       <div class="status-list">${health.length ? health.map((item) => healthRow(item, { toggle: true })).join("") : emptyState("⇄", "No accounts checked yet", configured ? "Run a connection check to populate this list." : "Connect Actual first in Settings.")}</div>
@@ -718,6 +780,137 @@ function showAccount(accountId) {
   </div>`);
 }
 
+function plaidAccountLabel(account) {
+  return `${account.name}${account.mask ? ` ••${account.mask}` : ""}`;
+}
+
+function plaidMappingForm(item, account) {
+  const link = account.link;
+  const today = new Date().toISOString().slice(0, 10);
+  if (link) {
+    return `<div class="plaid-map-form" data-account-id="${escapeHtml(link.actual_account_id)}">
+      <div class="form-grid">
+        <div class="field"><label>Import from</label><input type="date" name="cutover_date" value="${escapeHtml(link.cutover_date || "")}" /></div>
+        <div class="field"><label>Mapping</label><div class="resolution-actions" style="min-height:39px">
+          <button class="button ghost small" data-action="plaid-cutover-save" data-account-id="${escapeHtml(link.actual_account_id)}">Save date</button>
+          <button class="button ghost small" data-action="plaid-link-toggle" data-account-id="${escapeHtml(link.actual_account_id)}" data-enabled="${link.enabled ? "0" : "1"}">${link.enabled ? "Pause" : "Resume"}</button>
+          <button class="button danger small" data-action="plaid-unmap" data-account-id="${escapeHtml(link.actual_account_id)}">Unmap</button>
+        </div></div>
+      </div></div>`;
+  }
+  const choices = (state.plaid?.actual_accounts || []).filter((candidate) => !candidate.linked_to || candidate.linked_to.external_account_id === account.id);
+  return `<div class="plaid-map-form" data-item-id="${escapeHtml(item.item_id)}" data-external-id="${escapeHtml(account.id)}">
+    <div class="form-grid">
+      <div class="field"><label>Actual account</label><select name="target" data-role="plaid-target">
+        <option value="">Choose…</option>
+        ${choices.map((candidate) => `<option value="${escapeHtml(candidate.id)}">${escapeHtml(candidate.name)}${candidate.actual_sync_source ? ` (Actual links it to ${escapeHtml(candidate.actual_sync_source === "simpleFin" ? "SimpleFIN" : candidate.actual_sync_source)})` : ""}${candidate.off_budget ? " · off budget" : ""}</option>`).join("")}
+        <option value="__new__">Create a new Actual account…</option>
+      </select></div>
+      <div class="field"><label>Import from</label><input type="date" name="cutover_date" value="${today}" /><small>Plaid transactions dated before this stay out of Actual.</small></div>
+      <div class="field full plaid-new-account" hidden><label>New account name</label><input name="new_name" value="${escapeHtml(plaidAccountLabel(account))}" maxlength="100" /><label class="check-row" style="margin-top:6px"><input type="checkbox" name="new_off_budget" /><span><strong>Off budget</strong></span></label></div>
+      <div class="field full"><button class="button primary small" data-action="plaid-map" data-item-id="${escapeHtml(item.item_id)}" data-external-id="${escapeHtml(account.id)}">Map account</button></div>
+    </div></div>`;
+}
+
+function showPlaidItem(itemId) {
+  const item = (state.plaid?.items || []).find((entry) => entry.item_id === itemId);
+  if (!item) return;
+  const [status, label] = plaidItemStatus(item);
+  const accounts = item.accounts || [];
+  const sandbox = state.plaid?.environment === "sandbox";
+  openDrawer(`${drawerHeader(label, item.institution_name || "Bank connection")}<div class="drawer-body">
+    ${item.error ? `<div class="alert-banner critical"><span>!</span><div><strong>${escapeHtml(item.error.error_code || "Plaid error")}</strong><p>${escapeHtml(item.error.display_message || item.error.error_message || item.error.message || "")}</p></div>${item.needs_repair ? `<button class="button primary small" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair</button>` : ""}</div>` : ""}
+    <section class="detail-section"><div class="detail-grid">
+      <div class="detail-stat"><span>Status</span><strong>${statusChip(status, label)}</strong></div>
+      <div class="detail-stat"><span>Bank data</span><strong>${item.last_successful_update ? escapeHtml(relativeTime(item.last_successful_update)) : "not yet"}</strong></div>
+      <div class="detail-stat"><span>Connected</span><strong>${item.created_at ? escapeHtml(relativeTime(item.created_at)) : "—"}</strong></div>
+      <div class="detail-stat"><span>Consent expires</span><strong>${item.consent_expiration_time ? escapeHtml(shortDate(item.consent_expiration_time)) : "—"}</strong></div>
+    </div></section>
+    <section class="detail-section"><h3>Accounts</h3><p class="muted" style="font-size:10px;margin:0 0 10px">Map each bank account onto the Actual account it should feed. Nothing is imported until a mapping exists, and only transactions dated on or after the import date are ever taken from Plaid.</p>
+    <div class="change-list">${accounts.length ? accounts.map((account) => `<div class="change" style="display:block">
+      <div style="display:flex;gap:10px;align-items:center"><i>◍</i><div style="min-width:0;flex:1"><strong>${escapeHtml(plaidAccountLabel(account))}<span class="muted"> · ${escapeHtml(account.subtype || account.type || "")}</span></strong><small>${account.balance_cents === null || account.balance_cents === undefined ? "No balance" : `Balance ${money(account.balance_cents)}`}${account.link ? ` · mapped to <strong>${escapeHtml((state.plaid?.actual_accounts || []).find((candidate) => candidate.id === account.link.actual_account_id)?.name || account.link.actual_account_id)}</strong>${account.link.enabled ? "" : " (paused)"}${account.link.cutover_date ? ` from ${escapeHtml(account.link.cutover_date)}` : ""}` : " · not mapped"}</small></div></div>
+      <div style="margin-top:10px">${plaidMappingForm(item, account)}</div>
+    </div>`).join("") : `<div class="change"><i>?</i><div><strong>No accounts returned</strong><small>${escapeHtml(item.error ? "Repair the connection, then check again." : "Plaid returned no accounts for this connection.")}</small></div></div>`}</div></section>
+    <div class="resolution-actions">
+      ${item.needs_repair ? `<button class="button primary" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair connection</button>` : ""}
+      ${sandbox ? `<button class="button ghost" data-action="plaid-reset-login" data-id="${escapeHtml(item.item_id)}">Break login (sandbox)</button>` : ""}
+      <button class="button danger" data-action="plaid-remove-item" data-id="${escapeHtml(item.item_id)}" data-name="${escapeHtml(item.institution_name || "this bank")}">Remove connection</button>
+    </div>
+  </div>`);
+}
+
+async function refreshPlaidDrawer(itemId) {
+  await renderAccounts();
+  if (itemId) showPlaidItem(itemId);
+}
+
+// ------------------------------------------------------------- Plaid Link
+//
+// Link runs in the browser against cdn.plaid.com. Clerk mints the token, the
+// browser hands Plaid's one-time public token straight back to Clerk, and only
+// Clerk ever holds the resulting access token. OAuth banks bounce through a
+// registered redirect URI; the token is kept in sessionStorage so Link can
+// resume with the same token when the browser comes back.
+const PLAID_LINK_STORAGE = "actual-clerk-plaid-link";
+
+async function startPlaidLink({ itemId = "" } = {}) {
+  if (!window.Plaid) return toast("Plaid Link did not load", "This page needs to reach cdn.plaid.com to open Link.", "error");
+  try {
+    const token = await api("/api/plaid/link-token", { method: "POST", body: JSON.stringify({ item_id: itemId }) });
+    try { sessionStorage.setItem(PLAID_LINK_STORAGE, JSON.stringify({ link_token: token.link_token, item_id: itemId })); } catch { /* no resume after OAuth */ }
+    openPlaidLink(token.link_token, itemId);
+  } catch (error) { toast("Could not open Plaid Link", error.message, "error"); }
+}
+
+function openPlaidLink(linkToken, itemId, receivedRedirectUri = "") {
+  const handler = window.Plaid.create({
+    token: linkToken,
+    ...(receivedRedirectUri ? { receivedRedirectUri } : {}),
+    onSuccess: async (publicToken, metadata) => {
+      try { sessionStorage.removeItem(PLAID_LINK_STORAGE); } catch { /* fine */ }
+      try {
+        if (itemId) {
+          // Update mode: the Item keeps its access token, so the public token is not exchanged.
+          const result = await api(`/api/plaid/items/${encodeURIComponent(itemId)}/repaired`, { method: "POST" });
+          toast(result.repaired ? "Connection repaired" : "Connection still needs attention", result.repaired ? "Clerk is checking the accounts again." : (result.error?.error_message || ""), result.repaired ? "success" : "error");
+          await refreshPlaidDrawer(itemId);
+        } else {
+          const result = await api("/api/plaid/exchange", { method: "POST", body: JSON.stringify({
+            public_token: publicToken,
+            institution_id: metadata?.institution?.institution_id || "",
+            institution_name: metadata?.institution?.name || "",
+            accounts: (metadata?.accounts || []).map((account) => ({ id: account.id || "", name: account.name || "", mask: account.mask || "", type: account.type || "", subtype: account.subtype || "" })),
+          }) });
+          toast("Bank connected", "Now map its accounts onto Actual accounts.");
+          await refreshPlaidDrawer(result.item.item_id);
+        }
+      } catch (error) { toast("Could not finish connecting", error.message, "error"); }
+    },
+    onExit: (error) => {
+      try { sessionStorage.removeItem(PLAID_LINK_STORAGE); } catch { /* fine */ }
+      if (error) toast("Plaid Link closed", error.display_message || error.error_message || error.error_code || "The connection was not completed.", "error");
+    },
+  });
+  handler.open();
+}
+
+async function resumePlaidLinkAfterOAuth() {
+  const params = new URLSearchParams(location.search);
+  if (!params.has("oauth_state_id")) return false;
+  let saved = null;
+  try { saved = JSON.parse(sessionStorage.getItem(PLAID_LINK_STORAGE) || "null"); } catch { saved = null; }
+  const redirectUri = location.href;
+  history.replaceState(null, "", "/#accounts");
+  if (!saved?.link_token || !window.Plaid) {
+    toast("Could not resume Plaid Link", "Start the connection again from this browser.", "error");
+    return false;
+  }
+  state.route = "accounts";
+  await renderRoute();
+  openPlaidLink(saved.link_token, saved.item_id || "", redirectUri);
+  return true;
+}
+
 async function showJob(id, { loading = true } = {}) {
   if (loading) openDrawer(`${drawerHeader("Task detail", "Loading…")}<div class="drawer-body"><div class="skeleton"></div></div>`, { jobId: id });
   try {
@@ -829,6 +1022,7 @@ async function renderSettings() {
       <nav class="settings-nav">
         <a href="#settings-actual">Actual Budget</a>
         <a href="#settings-simplefin">SimpleFIN</a>
+        <a href="#settings-plaid">Plaid</a>
         <a href="#settings-model">Local model</a>
         <a href="#settings-filing">Filing</a>
         <a href="#settings-tags">Tags</a>
@@ -849,6 +1043,15 @@ async function renderSettings() {
         <section class="panel settings-section" id="settings-simplefin"><header class="panel-head"><div><h3>SimpleFIN</h3><p class="section-description">Read-only access used to verify that each bank link is still alive. Actual keeps doing the importing.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="simplefin">Test connection</button></header><div class="panel-body"><div class="form-grid">
           ${settingInput("simplefin_access_url", "Access URL", "", { type: "password", configured: s.simplefin_access_url_configured, full: true, note: "Claim a setup token below, or paste an access URL you already hold." })}
         </div><div class="section-actions"><button class="button secondary small" type="button" data-action="open-claim">Claim a setup token</button><span class="muted" style="font-size:10px">A setup token can only be claimed once. Claiming here does not affect the token Actual already uses.</span></div></div></section>
+
+        <section class="panel settings-section" id="settings-plaid"><header class="panel-head"><div><h3>Plaid</h3><p class="section-description">The bank feed Clerk delivers itself. Connect banks on the Connections page once the keys are saved.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="plaid">Test credentials</button></header><div class="panel-body"><div class="form-grid">
+          ${settingInput("plaid_client_id", "Client ID", s.plaid_client_id, { note: "Plaid dashboard → Developers → Keys." })}
+          ${settingInput("plaid_secret", "Secret", "", { type: "password", configured: s.plaid_secret_configured, note: "Specific to the environment below." })}
+          ${settingInput("plaid_env", "Environment", s.plaid_env, { type: "select", choices: [["sandbox", "Sandbox — fake banks, unlimited"], ["production", "Production — real banks, ten lifetime connections on the Trial plan"]], note: "Changing this needs the matching secret; existing connections belong to the environment they were made in." })}
+          ${settingInput("plaid_days_requested", "History to request (days)", s.plaid_days_requested, { type: "number", min: 1, max: 730, note: "Asked for when a bank is first connected. Clerk still imports only from each account's import date." })}
+          ${settingInput("plaid_redirect_uri", "OAuth redirect URI", s.plaid_redirect_uri, { full: true, note: "Only for OAuth banks: an https URL registered in the Plaid dashboard that brings the browser back to Clerk, e.g. https://clerk.example.net/plaid-oauth" })}
+          ${settingInput("plaid_client_name", "Name shown in Link", s.plaid_client_name, { full: true })}
+        </div></div></section>
 
         <section class="panel settings-section" id="settings-model"><header class="panel-head"><div><h3>Local model</h3><p class="section-description">An OpenAI-compatible endpoint, asked one question per unfamiliar merchant.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="model">Test model</button></header><div class="panel-body"><div class="form-grid">
           ${settingInput("openai_base_url", "Base URL", s.openai_base_url, { full: true, note: "Usually ends in /v1; Clerk appends /chat/completions." })}
@@ -1076,6 +1279,80 @@ document.addEventListener("click", async (event) => {
   if (action === "copy-diagnostics") { event.preventDefault(); await copyDiagnostics(); }
   if (action === "toggle-diagnostics-redact") { event.preventDefault(); await runDiagnostics(!state.diagnosticsRedact); }
   if (action === "run-health" || action === "check-connections") enqueue("health", "Connection check");
+
+  if (action === "plaid-connect") { event.preventDefault(); await startPlaidLink(); }
+  if (action === "plaid-repair") { event.stopPropagation(); await startPlaidLink({ itemId: target.dataset.id }); }
+  if (action === "plaid-item-detail") { event.stopPropagation(); showPlaidItem(target.dataset.id); }
+  if (action === "plaid-sandbox-item") {
+    target.disabled = true;
+    try {
+      const result = await api("/api/plaid/sandbox/items", { method: "POST", body: JSON.stringify({}) });
+      toast("Sandbox bank connected", "Plaid prepares its transaction history for a minute or so.");
+      await refreshPlaidDrawer(result.item.item_id);
+    } catch (error) { toast("Could not create the sandbox bank", error.message, "error"); }
+    finally { target.disabled = false; }
+  }
+  if (action === "plaid-reset-login") {
+    event.stopPropagation();
+    if (!window.confirm("Break this sandbox connection's login?\n\nPlaid will start answering ITEM_LOGIN_REQUIRED for it, which is how the Repair flow is rehearsed.")) return;
+    try {
+      await api(`/api/plaid/sandbox/items/${encodeURIComponent(target.dataset.id)}/reset-login`, { method: "POST" });
+      toast("Login broken", "Run a connection check or open the connection to see it flagged.");
+      closeDrawer();
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not reset the login", error.message, "error"); }
+  }
+  if (action === "plaid-remove-item") {
+    event.stopPropagation();
+    const limited = state.plaid?.slots?.limit;
+    if (!window.confirm(`Remove ${target.dataset.name || "this bank"} from Plaid?\n\nIts account mappings are paused, and everything already imported into Actual stays.${limited ? " On the Trial plan this does not give the connection slot back." : ""}`)) return;
+    try {
+      const result = await api(`/api/plaid/items/${encodeURIComponent(target.dataset.id)}/remove`, { method: "POST" });
+      toast("Connection removed", result.plaid_error ? `Plaid said: ${result.plaid_error}` : `${result.links_disabled} mapping(s) paused.`);
+      closeDrawer();
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not remove the connection", error.message, "error"); }
+  }
+  if (action === "plaid-map") {
+    event.preventDefault();
+    const form = target.closest(".plaid-map-form");
+    const targetValue = form.querySelector('[name="target"]').value;
+    if (!targetValue) return toast("Choose an Actual account first", "", "error");
+    const body = { item_id: target.dataset.itemId, external_account_id: target.dataset.externalId, cutover_date: form.querySelector('[name="cutover_date"]').value || "" };
+    if (targetValue === "__new__") {
+      body.new_account = { name: form.querySelector('[name="new_name"]').value.trim(), off_budget: form.querySelector('[name="new_off_budget"]').checked };
+      if (!body.new_account.name) return toast("Name the new account", "", "error");
+    } else body.actual_account_id = targetValue;
+    target.disabled = true;
+    try {
+      await api("/api/plaid/links", { method: "POST", body: JSON.stringify(body) });
+      toast("Account mapped", "The next sync delivers this account's transactions into Actual.");
+      await refreshPlaidDrawer(target.dataset.itemId);
+    } catch (error) { toast("Could not map the account", error.message, "error"); target.disabled = false; }
+  }
+  if (action === "plaid-unmap") {
+    event.preventDefault();
+    if (!window.confirm("Forget this mapping?\n\nThe Actual account and everything imported into it stay; Clerk just stops delivering this bank account to it.")) return;
+    const itemId = state.plaid?.items?.find((item) => (item.accounts || []).some((account) => account.link?.actual_account_id === target.dataset.accountId))?.item_id;
+    try {
+      await api(`/api/plaid/links/${encodeURIComponent(target.dataset.accountId)}`, { method: "DELETE" });
+      toast("Mapping removed");
+      await refreshPlaidDrawer(itemId);
+    } catch (error) { toast("Could not remove the mapping", error.message, "error"); }
+  }
+  if (action === "plaid-link-toggle" || action === "plaid-cutover-save") {
+    event.preventDefault();
+    const form = target.closest(".plaid-map-form");
+    const body = action === "plaid-link-toggle"
+      ? { enabled: target.dataset.enabled === "1" }
+      : { cutover_date: form.querySelector('[name="cutover_date"]').value || "" };
+    const itemId = state.plaid?.items?.find((item) => (item.accounts || []).some((account) => account.link?.actual_account_id === target.dataset.accountId))?.item_id;
+    try {
+      await api(`/api/plaid/links/${encodeURIComponent(target.dataset.accountId)}`, { method: "PATCH", body: JSON.stringify(body) });
+      toast(action === "plaid-link-toggle" ? (body.enabled ? "Mapping resumed" : "Mapping paused") : "Import date saved");
+      await refreshPlaidDrawer(itemId);
+    } catch (error) { toast("Could not update the mapping", error.message, "error"); }
+  }
   if (action === "job-detail") showJob(target.dataset.id);
   if (action === "review-detail") showDecision(target.dataset.id);
   if (action === "account-detail") showAccount(target.dataset.id);
@@ -1147,6 +1424,12 @@ document.addEventListener("click", async (event) => {
   }
 });
 
+document.addEventListener("change", (event) => {
+  if (!event.target.matches('[data-role="plaid-target"]')) return;
+  const field = event.target.closest(".plaid-map-form")?.querySelector(".plaid-new-account");
+  if (field) field.hidden = event.target.value !== "__new__";
+});
+
 scrim.addEventListener("click", closeDrawer);
 document.addEventListener("keydown", (event) => {
   if (event.key !== "Escape") return;
@@ -1197,7 +1480,7 @@ content.addEventListener("submit", async (event) => {
   const data = new FormData(form);
   const values = {};
   const locked = new Set(state.settings?.environment_overrides || []);
-  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts"]);
+  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
   const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled"];
 
@@ -1206,7 +1489,7 @@ content.addEventListener("submit", async (event) => {
     values[key] = integers.has(key) ? Number.parseInt(value, 10) : decimals.has(key) ? Number.parseFloat(value) : value;
   }
   for (const key of checks) if (!locked.has(key)) values[key] = data.get(key) === "on";
-  for (const key of ["actual_password", "actual_encryption_password", "simplefin_access_url", "openai_api_key", "ntfy_token"]) {
+  for (const key of ["actual_password", "actual_encryption_password", "simplefin_access_url", "plaid_secret", "openai_api_key", "ntfy_token"]) {
     if (data.get(`clear_${key}`) === "on") values[key] = "";
     else if (!values[key]) delete values[key];
   }
@@ -1308,7 +1591,7 @@ async function initialize() {
     state.health = await api("/api/health");
     document.querySelector("#app-version").textContent = `Actual Clerk ${state.health.version}`;
   } catch { /* the main route reports the error */ }
-  await navigateFromHash();
+  if (!(await resumePlaidLinkAfterOAuth())) await navigateFromHash();
   state.poll = setTimeout(pollVisibleRoute, state.route === "activity" ? 3000 : 8000);
 }
 

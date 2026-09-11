@@ -84,11 +84,14 @@ Your budget **Sync ID** is in Actual under *Settings*, after clicking **Show adv
 
 Clerk reads whichever budgeting method you use. The setup works best on Actual's **Tracking Budget**, whose "Projected Savings" is the same arithmetic as Clerk's free money — see [Budget setup](docs/budget-setup.md).
 
-### 2. Connect SimpleFIN
+### 2. Connect a bank provider
 
-Open **Connections → Connect SimpleFIN** and paste a setup token from your SimpleFIN Bridge. Clerk claims it once and stores the resulting access URL.
+Clerk works with two kinds of bank feed:
 
-Generate a **new** token for Clerk rather than reusing the one Actual holds: a SimpleFIN setup token can only be claimed once, and Clerk's access is read-only either way. This step is optional — without it Clerk still checks freshness from Actual's own data, it just cannot see the bank's side.
+- **SimpleFIN**, which Actual imports itself. Open **Connections → Connect SimpleFIN** and paste a setup token from your SimpleFIN Bridge. Clerk claims it once and stores the resulting access URL, and uses it only to verify that each link is still alive. Generate a **new** token for Clerk rather than reusing the one Actual holds: a SimpleFIN setup token can only be claimed once, and Clerk's access is read-only either way.
+- **Plaid**, which Clerk syncs itself and delivers into Actual. Put your Plaid client id and secret in **Settings → Plaid**, then on the Connections page use **Connect a bank** and map each bank account onto an Actual account (existing or new) with the date Clerk should start importing from. Test in Plaid's sandbox first; the Trial plan's ten production connections are for life. Plaid Link loads from `cdn.plaid.com`, and OAuth banks need an https redirect URI registered in the Plaid dashboard.
+
+Both are optional. Without either, Clerk still checks freshness from Actual's own data; it just cannot see the bank's side. The migration between them is documented in [docs/plaid-migration](docs/plaid-migration/README.md).
 
 ### 3. Point it at a local model
 
@@ -187,11 +190,16 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `ACTUAL_ENCRYPTION_PASSWORD` | — | Only for end-to-end encrypted budgets |
 | `ACTUAL_VERIFY_SSL` | `true` | Disable only for a trusted self-signed server |
 
-### SimpleFIN and the model
+### Bank providers and the model
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
 | `CLERK_SIMPLEFIN_ACCESS_URL` | — | Access URL; prefer claiming a token in the UI |
+| `CLERK_PLAID_CLIENT_ID` | — | Plaid client id (Dashboard → Developers → Keys) |
+| `CLERK_PLAID_SECRET` | — | Plaid secret for the environment below |
+| `CLERK_PLAID_ENV` | `sandbox` | `sandbox` or `production` |
+| `CLERK_PLAID_DAYS_REQUESTED` | `90` | History requested when a bank is first connected (1 to 730) |
+| `CLERK_PLAID_REDIRECT_URI` | — | https URL registered in the Plaid dashboard, only for OAuth banks |
 | `CLERK_OPENAI_BASE_URL` | `http://host.docker.internal:11434/v1` | OpenAI-compatible endpoint |
 | `CLERK_OPENAI_API_KEY` | — | Only if your server requires one |
 | `CLERK_MODEL` | `qwen2.5:14b` | Model name |
@@ -292,7 +300,7 @@ Hourly is already generous: SimpleFIN itself refreshes each linked account rough
 
 - **Persistent storage:** `/app/data` holds Clerk's SQLite database and the official API's private cached copy of the budget. The cache makes restarts fast; the database holds jobs, decisions, learned merchants, health history, and settings. Clerk takes an exclusive lock on that API cache so two replicas cannot write it concurrently.
 - **Health check:** the image reports healthy once `/api/health` answers.
-- **Network:** Clerk needs to reach your Actual server, your model server, and (optionally) SimpleFIN and ntfy. `host.docker.internal` is mapped for a model running on the host.
+- **Network:** Clerk needs to reach your Actual server, your model server, and (optionally) SimpleFIN, Plaid, and ntfy. `host.docker.internal` is mapped for a model running on the host. The browser also needs `cdn.plaid.com` when connecting a bank through Plaid.
 - **Security:** Clerk has no authentication of its own. Put it behind whatever already protects your Actual instance, and do not expose it to the internet.
 
 ## Development

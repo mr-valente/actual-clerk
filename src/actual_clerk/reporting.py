@@ -53,6 +53,7 @@ def apply_bank_links(
         account["sync_source"] = str(link.get("provider") or "")
         account["external_id"] = str(link.get("external_account_id") or "")
         account["bank_name"] = str(link.get("institution") or account.get("bank_name") or "")
+        account["connection_id"] = str(link.get("item_id") or "")
         account["managed_by_clerk"] = True
     return snapshot
 
@@ -145,6 +146,7 @@ def to_actual_accounts(snapshot: dict[str, Any]) -> list[ActualAccountInfo]:
             off_budget=account["off_budget"],
             closed=account["closed"],
             managed_by_clerk=bool(account.get("managed_by_clerk", False)),
+            connection_id=str(account.get("connection_id") or ""),
         )
         for account in snapshot["accounts"]
     ]
