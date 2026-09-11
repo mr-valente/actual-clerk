@@ -56,7 +56,7 @@ server. Transaction writes are prevalidated, grouped with
 
 | Kind | Trigger | What it does |
 | --- | --- | --- |
-| `sync` | schedule, manual | Runs Actual's bank sync, re-reads the budget, rebuilds the overview, queues `categorize` and `health` |
+| `sync` | schedule, manual | Delivers Plaid connections (refresh, cursor stream, adoption, import), runs Actual's bank sync, re-reads the budget, rebuilds the overview, queues `categorize` and `health` |
 | `categorize` | after `sync`, manual | Runs the filing cascade and writes results back |
 | `health` | schedule, manual | Reads SimpleFIN directly, scores each account, alerts on transitions |
 | `digest` | daily at the configured local time | Builds and sends the morning report |

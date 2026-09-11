@@ -330,8 +330,8 @@ test('adopting a new imported id only touches rows that exist and change', async
   const api = {
     q: () => new Query(),
     aqlQuery: async () => ({ data: [
-      { id: 'pending', imported_id: 'plaid-pending', cleared: 0, date: '2026-09-08' },
-      { id: 'same', imported_id: 'plaid-same', cleared: 1, date: '2026-09-08' },
+      { id: 'pending', imported_id: 'plaid-pending', cleared: 0, date: '2026-09-08', amount: -450 },
+      { id: 'same', imported_id: 'plaid-same', cleared: 1, date: '2026-09-08', amount: -100 },
     ] }),
     batchBudgetUpdates: async callback => { await callback(); },
     updateTransaction: async (id, fields) => { written.push({ id, fields }); },
@@ -340,12 +340,12 @@ test('adopting a new imported id only touches rows that exist and change', async
   const service = new ActualService(api);
   service.initialized = true;
   const result = await service.adoptImportedIds({ updates: [
-    { transaction_id: 'pending', imported_id: 'plaid-posted', cleared: true, date: '2026-09-10' },
-    { transaction_id: 'same', imported_id: 'plaid-same', cleared: true },
+    { transaction_id: 'pending', imported_id: 'plaid-posted', cleared: true, date: '2026-09-10', amount_cents: -475 },
+    { transaction_id: 'same', imported_id: 'plaid-same', cleared: true, amount_cents: -100 },
     { transaction_id: 'gone', imported_id: 'plaid-x' },
   ] });
-  assert.deepEqual(written, [{ id: 'pending', fields: { imported_id: 'plaid-posted', cleared: true, date: '2026-09-10' } }]);
-  assert.deepEqual(result.applied, [{ id: 'pending', previous_imported_id: 'plaid-pending', fields: { imported_id: 'plaid-posted', cleared: true, date: '2026-09-10' } }]);
+  assert.deepEqual(written, [{ id: 'pending', fields: { imported_id: 'plaid-posted', cleared: true, amount: -475, date: '2026-09-10' } }]);
+  assert.deepEqual(result.applied, [{ id: 'pending', previous_imported_id: 'plaid-pending', fields: { imported_id: 'plaid-posted', cleared: true, amount: -475, date: '2026-09-10' } }]);
   assert.deepEqual(result.skipped, [{ id: 'same', reason: 'no_change' }, { id: 'gone', reason: 'deleted' }]);
   assert.equal(syncs, 1);
 });

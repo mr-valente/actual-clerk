@@ -825,14 +825,17 @@ function showPlaidItem(itemId) {
       <div class="detail-stat"><span>Bank data</span><strong>${item.last_successful_update ? escapeHtml(relativeTime(item.last_successful_update)) : "not yet"}</strong></div>
       <div class="detail-stat"><span>Connected</span><strong>${item.created_at ? escapeHtml(relativeTime(item.created_at)) : "—"}</strong></div>
       <div class="detail-stat"><span>Consent expires</span><strong>${item.consent_expiration_time ? escapeHtml(shortDate(item.consent_expiration_time)) : "—"}</strong></div>
-    </div></section>
+      <div class="detail-stat"><span>Last delivery</span><strong>${item.last_sync_at ? escapeHtml(relativeTime(item.last_sync_at)) : "never"}</strong></div>
+      <div class="detail-stat"><span>Last refresh asked</span><strong>${item.last_refresh_at ? escapeHtml(relativeTime(item.last_refresh_at)) : "never"}</strong></div>
+    </div>${item.last_error && !item.error ? `<p class="muted" style="font-size:10px;margin:8px 0 0">Last problem: ${escapeHtml(item.last_error)}</p>` : ""}</section>
     <section class="detail-section"><h3>Accounts</h3><p class="muted" style="font-size:10px;margin:0 0 10px">Map each bank account onto the Actual account it should feed. Nothing is imported until a mapping exists, and only transactions dated on or after the import date are ever taken from Plaid.</p>
     <div class="change-list">${accounts.length ? accounts.map((account) => `<div class="change" style="display:block">
-      <div style="display:flex;gap:10px;align-items:center"><i>◍</i><div style="min-width:0;flex:1"><strong>${escapeHtml(plaidAccountLabel(account))}<span class="muted"> · ${escapeHtml(account.subtype || account.type || "")}</span></strong><small>${account.balance_cents === null || account.balance_cents === undefined ? "No balance" : `Balance ${money(account.balance_cents)}`}${account.link ? ` · mapped to <strong>${escapeHtml((state.plaid?.actual_accounts || []).find((candidate) => candidate.id === account.link.actual_account_id)?.name || account.link.actual_account_id)}</strong>${account.link.enabled ? "" : " (paused)"}${account.link.cutover_date ? ` from ${escapeHtml(account.link.cutover_date)}` : ""}` : " · not mapped"}</small></div></div>
+      <div style="display:flex;gap:10px;align-items:center"><i>◍</i><div style="min-width:0;flex:1"><strong>${escapeHtml(plaidAccountLabel(account))}<span class="muted"> · ${escapeHtml(account.subtype || account.type || "")}</span></strong><small>${account.balance_cents === null || account.balance_cents === undefined ? "No balance" : `Balance ${money(account.balance_cents)}`}${account.link ? ` · mapped to <strong>${escapeHtml((state.plaid?.actual_accounts || []).find((candidate) => candidate.id === account.link.actual_account_id)?.name || account.link.actual_account_id)}</strong>${account.link.enabled ? "" : " (paused)"}${account.link.cutover_date ? ` from ${escapeHtml(account.link.cutover_date)}` : ""}${account.link.last_import_at ? ` · delivered ${escapeHtml(relativeTime(account.link.last_import_at))}` : ""}${account.link.last_error ? ` · <span class="negative">${escapeHtml(account.link.last_error.slice(0, 80))}</span>` : ""}` : " · not mapped"}</small></div></div>
       <div style="margin-top:10px">${plaidMappingForm(item, account)}</div>
     </div>`).join("") : `<div class="change"><i>?</i><div><strong>No accounts returned</strong><small>${escapeHtml(item.error ? "Repair the connection, then check again." : "Plaid returned no accounts for this connection.")}</small></div></div>`}</div></section>
     <div class="resolution-actions">
-      ${item.needs_repair ? `<button class="button primary" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair connection</button>` : ""}
+      <button class="button primary" data-action="sync-and-recheck">Sync now</button>
+      ${item.needs_repair ? `<button class="button secondary" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair connection</button>` : ""}
       ${sandbox ? `<button class="button ghost" data-action="plaid-reset-login" data-id="${escapeHtml(item.item_id)}">Break login (sandbox)</button>` : ""}
       <button class="button danger" data-action="plaid-remove-item" data-id="${escapeHtml(item.item_id)}" data-name="${escapeHtml(item.institution_name || "this bank")}">Remove connection</button>
     </div>
@@ -1051,6 +1054,17 @@ async function renderSettings() {
           ${settingInput("plaid_days_requested", "History to request (days)", s.plaid_days_requested, { type: "number", min: 1, max: 730, note: "Asked for when a bank is first connected. Clerk still imports only from each account's import date." })}
           ${settingInput("plaid_redirect_uri", "OAuth redirect URI", s.plaid_redirect_uri, { full: true, note: "Only for OAuth banks: an https URL registered in the Plaid dashboard that brings the browser back to Clerk, e.g. https://clerk.example.net/plaid-oauth" })}
           ${settingInput("plaid_client_name", "Name shown in Link", s.plaid_client_name, { full: true })}
+        </div>
+        ${settingToggle("plaid_sync_enabled", "Deliver Plaid transactions into Actual", "Every sync reads each connection's change stream and imports it through Actual's own reconciliation and rules. Off, Clerk still checks connection health.", s.plaid_sync_enabled)}
+        ${settingToggle("plaid_refresh_enabled", "Ask Plaid to refresh before reading", "Requests an on-demand extraction so a sync sees today's transactions instead of Plaid's one-to-four-times-a-day schedule. Included in the Trial plan; rate limited per connection.", s.plaid_refresh_enabled)}
+        <div class="form-grid">
+          ${settingInput("plaid_refresh_min_interval_minutes", "Refresh at most every (minutes)", s.plaid_refresh_min_interval_minutes, { type: "number", min: 1, max: 1440 })}
+          ${settingInput("plaid_refresh_wait_seconds", "Wait for the refresh up to (seconds)", s.plaid_refresh_wait_seconds, { type: "number", min: 0, max: 300, note: "Clerk polls the connection for a newer update, then reads whatever is there." })}
+          ${settingInput("plaid_adopt_window_days", "Cutover adoption window (days)", s.plaid_adopt_window_days, { type: "number", min: 0, max: 90, note: "How far either side of an account's import date a row from the previous provider may be adopted instead of duplicated." })}
+        </div>
+        <div class="check-grid">
+          ${settingCheck("plaid_delete_removed_pending", "Delete pending charges the bank withdraws", "Only while the row is still uncleared and unreconciled in Actual. A cleared row is never deleted; it is reported instead.", s.plaid_delete_removed_pending)}
+          ${settingCheck("plaid_starting_balance", "Add an opening balance to a new account", "On the first import into an empty Actual account, so it matches the bank the way Actual's own linking does.", s.plaid_starting_balance)}
         </div></div></section>
 
         <section class="panel settings-section" id="settings-model"><header class="panel-head"><div><h3>Local model</h3><p class="section-description">An OpenAI-compatible endpoint, asked one question per unfamiliar merchant.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="model">Test model</button></header><div class="panel-body"><div class="form-grid">
@@ -1480,9 +1494,9 @@ content.addEventListener("submit", async (event) => {
   const data = new FormData(form);
   const values = {};
   const locked = new Set(state.settings?.environment_overrides || []);
-  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested"]);
+  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;

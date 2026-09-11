@@ -49,6 +49,21 @@ class Settings(BaseModel):
     # Plaid dashboard that returns the browser to Clerk's own page.
     plaid_redirect_uri: str = ""
     plaid_client_name: str = Field(default="Actual Clerk", max_length=30)
+    # The sync engine. Refresh asks Plaid to extract now instead of on its own
+    # one-to-four-times-a-day schedule; Clerk then waits, bounded, for the
+    # Item to report a newer successful update before reading the stream.
+    plaid_sync_enabled: bool = True
+    plaid_refresh_enabled: bool = True
+    plaid_refresh_min_interval_minutes: int = Field(default=55, ge=1, le=1440)
+    plaid_refresh_wait_seconds: int = Field(default=45, ge=0, le=300)
+    # A pending charge the bank withdrew is deleted from Actual only while it
+    # is still uncleared and unreconciled; a cleared row is never deleted.
+    plaid_delete_removed_pending: bool = True
+    # First import into an empty Actual account adds an opening balance so the
+    # account matches the bank, the way Actual's own linking does.
+    plaid_starting_balance: bool = True
+    # How far either side of the cutover date a foreign-id row may be adopted.
+    plaid_adopt_window_days: int = Field(default=14, ge=0, le=90)
 
     # --- Local OpenAI-compatible endpoint ---------------------------------
     openai_base_url: str = "http://host.docker.internal:11434/v1"
@@ -348,6 +363,13 @@ ENVIRONMENT_FIELDS = {
     "CLERK_PLAID_DAYS_REQUESTED": "plaid_days_requested",
     "CLERK_PLAID_REDIRECT_URI": "plaid_redirect_uri",
     "CLERK_PLAID_CLIENT_NAME": "plaid_client_name",
+    "CLERK_PLAID_SYNC_ENABLED": "plaid_sync_enabled",
+    "CLERK_PLAID_REFRESH_ENABLED": "plaid_refresh_enabled",
+    "CLERK_PLAID_REFRESH_MIN_INTERVAL_MINUTES": "plaid_refresh_min_interval_minutes",
+    "CLERK_PLAID_REFRESH_WAIT_SECONDS": "plaid_refresh_wait_seconds",
+    "CLERK_PLAID_DELETE_REMOVED_PENDING": "plaid_delete_removed_pending",
+    "CLERK_PLAID_STARTING_BALANCE": "plaid_starting_balance",
+    "CLERK_PLAID_ADOPT_WINDOW_DAYS": "plaid_adopt_window_days",
     "CLERK_OPENAI_BASE_URL": "openai_base_url",
     "CLERK_OPENAI_API_KEY": "openai_api_key",
     "CLERK_MODEL": "model",

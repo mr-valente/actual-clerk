@@ -32,6 +32,7 @@ from actual_clerk.digest import build_digest, health_alert
 from actual_clerk.domain import tagging
 from actual_clerk.domain.health import evaluate_accounts, summarize
 from actual_clerk.plaid_links import read_items, readings
+from actual_clerk.plaid_sync import PlaidSyncEngine
 from actual_clerk.reporting import (
     apply_bank_links,
     budget_report,
@@ -306,6 +307,23 @@ class JobManager:
     async def _run_sync(self, job: dict[str, Any], settings: Settings) -> dict[str, Any]:
         self.database.update_job(job["id"], phase="pulling")
         result: dict[str, Any] = {}
+        today = datetime.datetime.now(settings.zone).date()
+        if settings.plaid_configured and settings.plaid_sync_enabled:
+            # Clerk is the bank-sync engine for Plaid accounts. It runs before
+            # Actual's own sync so one snapshot afterwards sees both feeds.
+            self.database.update_job(job["id"], phase="plaid_sync")
+            engine = PlaidSyncEngine(
+                self.database,
+                settings,
+                self.gateway,
+                events=lambda level, event_type, message, data=None: self.database.add_event(
+                    job["id"], level, event_type, message, data or {}
+                ),
+                today=today,
+            )
+            plaid = await engine.run()
+            if plaid["items"]:
+                result["plaid"] = plaid
         if settings.bank_sync_enabled:
             self.database.update_job(job["id"], phase="bank_sync")
             try:
@@ -329,7 +347,6 @@ class JobManager:
             await self.gateway.pull()
 
         self.database.update_job(job["id"], phase="reading")
-        today = datetime.datetime.now(settings.zone).date()
         open_review_ids = self.database.open_review_transaction_ids()
         snapshot = await self.snapshot(
             today=today, transaction_ids=open_review_ids
@@ -731,6 +748,13 @@ def _describe(kind: str, result: dict[str, Any]) -> str:
         parts = [f"{result.get('transactions', 0)} transaction(s) read"]
         if result.get("imported"):
             parts.insert(0, f"{result['imported']} imported")
+        plaid = result.get("plaid") or {}
+        if plaid.get("items"):
+            delivered = plaid.get("imported", 0) + plaid.get("updated", 0) + plaid.get("adopted", 0)
+            note = f"{delivered} delivered from Plaid"
+            if plaid.get("items_failed"):
+                note += f" ({plaid['items_failed']} connection(s) failed)"
+            parts.insert(0, note)
         if result.get("reviews_resolved"):
             parts.append(f"{result['reviews_resolved']} review(s) resolved")
         return ", ".join(parts)

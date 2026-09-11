@@ -829,3 +829,45 @@ async def test_the_health_job_reads_plaid_items_and_scores_clerk_linked_accounts
     assert database.get_plaid_item("item-ok")["status"] == "ok"
     assert database.get_plaid_item("item-ok")["institution_name"] == "First Platypus Bank"
     assert database.get_plaid_item("item-broken")["status"] == "needs_repair"
+
+
+async def test_the_sync_job_runs_the_plaid_engine_before_actuals_own_bank_sync(
+    manager, settings_manager, monkeypatch
+):
+    settings_manager.update({"plaid_client_id": "client-1", "plaid_secret": "secret-1"})
+    order: list[str] = []
+
+    async def fake_run(self):
+        order.append("plaid")
+        self.events("info", "plaid_item_synced", "Platypus: 3 imported", {"imported": 3})
+        return {"items": 1, "items_failed": 0, "imported": 3, "updated": 1, "adopted": 0,
+                "deleted": 0, "kept": 0, "starting_balances": 0, "skipped_before_cutover": 0,
+                "refreshed": 1, "not_ready": 0}
+
+    original_bank_sync = manager.gateway.bank_sync
+
+    async def bank_sync(*, run_rules=True):
+        order.append("actual")
+        return await original_bank_sync(run_rules=run_rules)
+
+    monkeypatch.setattr("actual_clerk.plaid_sync.PlaidSyncEngine.run", fake_run)
+    monkeypatch.setattr(manager.gateway, "bank_sync", bank_sync)
+    job = await run_job(manager, "sync")
+    assert job["status"] == "completed"
+    assert order == ["plaid", "actual"]
+    assert job["result"]["plaid"]["imported"] == 3
+    assert any(event["event_type"] == "plaid_item_synced" for event in job["events"])
+    completed = next(event for event in job["events"] if event["event_type"] == "completed")
+    assert completed["message"].startswith("4 delivered from Plaid")
+
+
+async def test_the_plaid_engine_is_skipped_when_plaid_sync_is_off(manager, settings_manager, monkeypatch):
+    settings_manager.update({"plaid_client_id": "client-1", "plaid_secret": "secret-1", "plaid_sync_enabled": False})
+
+    async def fake_run(self):
+        raise AssertionError("the engine must not run")
+
+    monkeypatch.setattr("actual_clerk.plaid_sync.PlaidSyncEngine.run", fake_run)
+    job = await run_job(manager, "sync")
+    assert job["status"] == "completed"
+    assert "plaid" not in job["result"]

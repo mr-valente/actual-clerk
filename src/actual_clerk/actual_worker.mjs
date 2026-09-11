@@ -814,6 +814,9 @@ export class ActualService {
       if (item.notes != null) transaction.notes = cleanString(item.notes);
       if (item.cleared != null) transaction.cleared = Boolean(item.cleared);
       if (item.category_id) transaction.category = cleanString(item.category_id);
+      // Actual marks its own opening rows this way; Clerk's opening balance
+      // for a newly linked account should read the same in every view.
+      if (item.starting_balance_flag) transaction.starting_balance_flag = true;
       return transaction;
     });
     if (!transactions.length) return { added: [], updated: [], errors: [], preview: [], dry_run: Boolean(params.dryRun) };
@@ -846,14 +849,14 @@ export class ActualService {
 
   async adoptImportedIds(params) {
     // Give an existing row a new provider id so later updates and removals
-    // find it. Optionally settles the cleared flag and date at the same time,
-    // which is what a pending-to-posted swap needs.
+    // find it. Optionally settles the cleared flag, amount, and date at the
+    // same time, which is what a pending-to-posted swap needs.
     const updates = params.updates || [];
     const ids = [...new Set(updates.map(update => cleanString(update.transaction_id)).filter(Boolean))];
     if (!ids.length) return { applied: [], skipped: [] };
     const rows = await this._query(this.api.q('transactions')
       .filter({ id: { $oneof: ids } })
-      .select(['id', 'imported_id', 'cleared', 'date']));
+      .select(['id', 'imported_id', 'cleared', 'date', 'amount']));
     const existing = new Map(rows.map(row => [cleanString(row.id), row]));
     const planned = [];
     const skipped = [];
@@ -868,6 +871,11 @@ export class ActualService {
       const importedId = cleanString(update.imported_id);
       if (importedId && importedId !== cleanString(row.imported_id)) fields.imported_id = importedId;
       if (update.cleared != null && Boolean(update.cleared) !== Boolean(row.cleared)) fields.cleared = Boolean(update.cleared);
+      if (update.amount_cents != null) {
+        const amount = Number(update.amount_cents);
+        if (!Number.isInteger(amount)) throw new Error(`Settled amount must be integer cents, got ${update.amount_cents}`);
+        if (amount !== cleanInteger(row.amount)) fields.amount = amount;
+      }
       const date = isoDate(update.date);
       if (date && date !== isoDate(row.date)) fields.date = date;
       if (!Object.keys(fields).length) {

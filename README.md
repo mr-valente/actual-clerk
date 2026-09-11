@@ -200,6 +200,13 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_PLAID_ENV` | `sandbox` | `sandbox` or `production` |
 | `CLERK_PLAID_DAYS_REQUESTED` | `90` | History requested when a bank is first connected (1 to 730) |
 | `CLERK_PLAID_REDIRECT_URI` | — | https URL registered in the Plaid dashboard, only for OAuth banks |
+| `CLERK_PLAID_SYNC_ENABLED` | `true` | Deliver Plaid transactions into Actual on every sync |
+| `CLERK_PLAID_REFRESH_ENABLED` | `true` | Ask Plaid for an on-demand refresh before reading |
+| `CLERK_PLAID_REFRESH_MIN_INTERVAL_MINUTES` | `55` | Minimum gap between refreshes per connection |
+| `CLERK_PLAID_REFRESH_WAIT_SECONDS` | `45` | How long to wait for the refresh to land before reading |
+| `CLERK_PLAID_DELETE_REMOVED_PENDING` | `true` | Delete a withdrawn pending charge while it is still uncleared |
+| `CLERK_PLAID_STARTING_BALANCE` | `true` | Add an opening balance on the first import into an empty account |
+| `CLERK_PLAID_ADOPT_WINDOW_DAYS` | `14` | Days either side of the import date a previous provider's row may be adopted |
 | `CLERK_OPENAI_BASE_URL` | `http://host.docker.internal:11434/v1` | OpenAI-compatible endpoint |
 | `CLERK_OPENAI_API_KEY` | — | Only if your server requires one |
 | `CLERK_MODEL` | `qwen2.5:14b` | Model name |
@@ -287,7 +294,9 @@ To watch the scheduled path fire on demand, set the digest time a few minutes ah
 
 Actual does not sync with your bank on its own. Its server has no scheduler — a bank sync only happens when a client asks for one, which is why your balances appear to refresh only when you open Actual in a browser. There is no setting in Actual to change that.
 
-Clerk is that client. Every sync run calls Actual's own bank sync — the same operation the browser triggers — then re-reads the budget and files whatever arrived. With `CLERK_SYNC_ENABLED` on (the default) that happens every `CLERK_SYNC_INTERVAL_MINUTES`, hourly out of the box, whether or not any browser is open.
+Clerk is that client. Every sync run first delivers any Plaid connections it holds — asking Plaid for an on-demand refresh, reading each connection's change stream from its cursor, and importing through Actual's own reconciliation and rules — then calls Actual's own bank sync for SimpleFIN-linked accounts (the same operation the browser triggers), re-reads the budget, and files whatever arrived. With `CLERK_SYNC_ENABLED` on (the default) that happens every `CLERK_SYNC_INTERVAL_MINUTES`, hourly out of the box, whether or not any browser is open.
+
+For Plaid accounts Clerk is the whole feed. Each mapping has an import date; nothing older is taken from Plaid. Pending charges arrive uncleared and settle in place when they post, a charge the bank withdraws is removed only while it is still uncleared, and the first import into an empty account adds an opening balance so it matches the bank.
 
 The connection detail's **Sync bank and recheck** action runs that native bank
 sync first and then scores the refreshed balances. A plain connection check is
