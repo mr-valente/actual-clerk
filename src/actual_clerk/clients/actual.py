@@ -450,3 +450,116 @@ class ActualGateway:
 
     async def diagnostics(self) -> dict[str, Any]:
         return await self._call("diagnostics")
+
+    # ---------------------------------------------------------- bank links
+    #
+    # The primitives Clerk needs to manage bank links itself: what Actual
+    # links today, detaching an account, attaching a SimpleFIN account back
+    # onto an existing one, and importing transactions from a provider Actual
+    # does not know. Each is a thin call; the worker owns the Actual semantics.
+
+    async def list_accounts_detailed(self) -> list[dict[str, Any]]:
+        return list(await self._call("listAccountsDetailed") or [])
+
+    async def account_transactions(
+        self,
+        account_id: str,
+        *,
+        start: datetime.date | None = None,
+        end: datetime.date | None = None,
+    ) -> list[dict[str, Any]]:
+        rows = await self._call(
+            "accountTransactions",
+            {
+                "accountId": account_id,
+                "start": start.isoformat() if start else "",
+                "end": end.isoformat() if end else "",
+            },
+        )
+        result = []
+        for raw in rows or []:
+            row = dict(raw)
+            date = _parse_date(row.get("date"))
+            if date is None:
+                continue
+            row["date"] = date
+            result.append(row)
+        return result
+
+    async def unlink_account(self, account_id: str) -> dict[str, Any]:
+        """Detach bank sync from an account. The account and its rows stay."""
+        return await self._call("unlinkAccount", {"accountId": account_id})
+
+    async def simplefin_server_status(self) -> dict[str, Any]:
+        return await self._call("simpleFinServerStatus")
+
+    async def simplefin_server_accounts(self) -> dict[str, Any]:
+        return await self._call("simpleFinServerAccounts")
+
+    async def link_simplefin_account(
+        self,
+        external_account: dict[str, Any],
+        *,
+        account_id: str = "",
+        off_budget: bool = False,
+        starting_date: datetime.date | None = None,
+        starting_balance_cents: int | None = None,
+    ) -> dict[str, Any]:
+        """Attach a SimpleFIN account to an existing (or new) Actual account."""
+        return await self._call(
+            "linkSimpleFinAccount",
+            {
+                "externalAccount": dict(external_account),
+                "accountId": account_id,
+                "offBudget": off_budget,
+                "startingDate": starting_date.isoformat() if starting_date else "",
+                "startingBalance": starting_balance_cents,
+            },
+        )
+
+    async def set_server_secret(self, name: str, value: str | None) -> dict[str, Any]:
+        """Store (or, with ``None``, delete) a secret on the Actual server."""
+        return await self._call("setServerSecret", {"name": name, "value": value})
+
+    async def create_account(
+        self, name: str, *, off_budget: bool = False, initial_balance_cents: int | None = None
+    ) -> dict[str, Any]:
+        return await self._call(
+            "createAccount",
+            {"name": name, "offBudget": off_budget, "initialBalance": initial_balance_cents},
+        )
+
+    async def import_transactions(
+        self, account_id: str, transactions: Sequence[dict[str, Any]], *, dry_run: bool = False
+    ) -> dict[str, Any]:
+        """Run Actual's own import (id match, fuzzy match, rules) for one account."""
+        if not transactions:
+            return {"added": [], "updated": [], "errors": [], "preview": [], "dry_run": dry_run}
+        payload = []
+        for item in transactions:
+            row = dict(item)
+            if isinstance(row.get("date"), datetime.date):
+                row["date"] = row["date"].isoformat()
+            payload.append(row)
+        return await self._call(
+            "importTransactions",
+            {"accountId": account_id, "transactions": payload, "dryRun": dry_run},
+        )
+
+    async def delete_transactions(self, transaction_ids: Sequence[str]) -> dict[str, Any]:
+        ids = sorted({str(item) for item in transaction_ids if item})
+        if not ids:
+            return {"deleted": [], "missing": []}
+        return await self._call("deleteTransactions", {"transactionIds": ids})
+
+    async def adopt_imported_ids(self, updates: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """Point existing rows at new provider ids (and settle cleared/date)."""
+        if not updates:
+            return {"applied": [], "skipped": []}
+        payload = []
+        for item in updates:
+            row = dict(item)
+            if isinstance(row.get("date"), datetime.date):
+                row["date"] = row["date"].isoformat()
+            payload.append(row)
+        return await self._call("adoptImportedIds", {"updates": payload})

@@ -38,6 +38,14 @@ There is no Redis and no external task service. SQLite runs in WAL mode with sho
 
 The API package and server version are exposed in gateway status and diagnostics. Connection-setting changes restart the worker into a cache keyed by server URL and sync ID. `ACTUAL_VERIFY_SSL=false` is scoped to the child process rather than weakening TLS for Clerk's other clients.
 
+Besides the documented methods, the object `init()` returns carries `send`,
+which reaches Actual's internal server handlers. Clerk uses a small, tested set
+of them to manage bank links itself: `account-unlink`,
+`simplefin-accounts-link`, `simplefin-status`, `simplefin-accounts`,
+`accounts-get`, and `secret-set` (for the SimpleFIN token only). The exact API
+pin is what makes this safe; the worker contract tests name every handler and
+argument shape. See [the Plaid migration notes](plaid-migration/README.md).
+
 Everything the gateway returns is a plain dictionary. Nothing outside
 `clients/actual.py` knows about Node or Actual's query objects, which is what
 lets the budget report, health checks, and categorizer be tested without a
@@ -101,6 +109,8 @@ Balances are compared like with like. Actual's headline balance counts every tra
 An imported transfer rule creates a special provenance case. Actual immediately generates the linked row on the other account, and that counterpart can inherit the source row's cleared flag despite having no `financial_id` from its own bank. Clerk finds only this asymmetric shape — generated half without an import id, linked half with one — and looks for a small subset of recent candidates that exactly explains the gap. It holds that amount out only if the adjusted cleared balance agrees with SimpleFIN within tolerance; otherwise the ordinary cleared balance remains authoritative and the mismatch is still tested. Old unmatched transfer rows are ineligible, and when the destination import reconciles a generated row it gains a `financial_id` and falls out automatically.
 
 A raw `drifted` result is not immediately public. SQLite retains it as a candidate while the account continues to expose its non-drift status; only a mismatch present in three successively newer SimpleFIN `balance-date` values is promoted into `account_health`, the transition ledger, dashboard alarm, digest, and ntfy alert. Re-reading or receiving an older timestamp leaves the count unchanged, and any intervening matching check deletes the candidate. This is deliberately specific to drift: an authentication error, missing account, or stale bank timestamp is actionable on its first observation.
+
+The provider is a property of the account, not of Clerk. An account Actual links itself carries Actual's sync source (`simpleFin`); an account whose feed Clerk delivers (Plaid) is overlaid from Clerk's own `bank_links` table onto every snapshot, and health only compares an account with readings and errors from its own provider.
 
 Monitoring is per account and opt-out, stored in Clerk rather than written into the budget. An unmonitored account is still measured and still displayed — its real reading is kept as `underlying_status` — but reports as `muted`, which is outside the alerting statuses, excluded from the degraded count and the digest, and exempt from the staleness check. A legacy account that sees one transaction a year is not a broken connection.
 

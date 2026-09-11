@@ -8,6 +8,7 @@ the picture.
 from __future__ import annotations
 
 import datetime
+from collections.abc import Sequence
 from typing import Any
 
 from actual_clerk.config import Settings
@@ -18,11 +19,42 @@ from actual_clerk.domain.budget import (
     month_bounds,
 )
 from actual_clerk.domain.health import (
+    SIMPLEFIN,
     ActualAccountInfo,
-    SimpleFinAccountInfo,
+    RemoteAccountInfo,
     StuckImportInfo,
     UnconfirmedTransferInfo,
 )
+
+
+def apply_bank_links(
+    snapshot: dict[str, Any], links: Sequence[dict[str, Any]]
+) -> dict[str, Any]:
+    """Overlay the bank links Clerk manages onto a budget snapshot, in place.
+
+    Actual only knows about the links it holds itself. An account whose feed
+    Clerk delivers looks like a manual account to Actual, so its provider,
+    external id, and institution are taken from Clerk's own link table. What
+    Actual said is kept under ``actual_sync_source`` for the migration views.
+    """
+
+    by_account = {
+        str(link.get("actual_account_id") or ""): link
+        for link in links
+        if link.get("enabled", True)
+    }
+    for account in snapshot.get("accounts") or []:
+        account.setdefault("actual_sync_source", account.get("sync_source", ""))
+        account.setdefault("actual_external_id", account.get("external_id", ""))
+        account.setdefault("managed_by_clerk", False)
+        link = by_account.get(str(account.get("id") or ""))
+        if not link:
+            continue
+        account["sync_source"] = str(link.get("provider") or "")
+        account["external_id"] = str(link.get("external_account_id") or "")
+        account["bank_name"] = str(link.get("institution") or account.get("bank_name") or "")
+        account["managed_by_clerk"] = True
+    return snapshot
 
 
 def to_category_infos(snapshot: dict[str, Any]) -> list[CategoryInfo]:
@@ -112,16 +144,21 @@ def to_actual_accounts(snapshot: dict[str, Any]) -> list[ActualAccountInfo]:
             last_transaction_date=account.get("last_transaction_date"),
             off_budget=account["off_budget"],
             closed=account["closed"],
+            managed_by_clerk=bool(account.get("managed_by_clerk", False)),
         )
         for account in snapshot["accounts"]
     ]
 
 
-def to_simplefin_accounts(payload: dict[str, Any] | None) -> list[SimpleFinAccountInfo]:
+def to_remote_accounts(
+    payload: dict[str, Any] | None, *, provider: str = SIMPLEFIN
+) -> list[RemoteAccountInfo]:
+    """Convert one provider's account payload into health readings."""
+
     if not payload:
         return []
     return [
-        SimpleFinAccountInfo(
+        RemoteAccountInfo(
             id=account["id"],
             name=account["name"],
             org_name=account.get("org_name", ""),
@@ -131,9 +168,14 @@ def to_simplefin_accounts(payload: dict[str, Any] | None) -> list[SimpleFinAccou
             available_cents=account.get("available_cents"),
             last_transaction_date=account.get("last_transaction_date"),
             currency=account.get("currency", "USD"),
+            provider=str(account.get("provider") or provider),
         )
         for account in payload.get("accounts", [])
     ]
+
+
+def to_simplefin_accounts(payload: dict[str, Any] | None) -> list[RemoteAccountInfo]:
+    return to_remote_accounts(payload, provider=SIMPLEFIN)
 
 
 def budget_report(

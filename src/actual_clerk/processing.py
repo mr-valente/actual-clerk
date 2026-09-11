@@ -14,6 +14,7 @@ import contextlib
 import datetime
 import logging
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 from actual_clerk.categorize import (
@@ -30,6 +31,7 @@ from actual_clerk.digest import build_digest, health_alert
 from actual_clerk.domain import tagging
 from actual_clerk.domain.health import evaluate_accounts, summarize
 from actual_clerk.reporting import (
+    apply_bank_links,
     budget_report,
     freshness,
     to_actual_accounts,
@@ -163,6 +165,16 @@ class JobManager:
     def settings_changed(self) -> None:
         self.gateway.settings_changed()
         self.wake()
+
+    async def snapshot(
+        self,
+        *,
+        today: datetime.date | None = None,
+        transaction_ids: Sequence[str] = (),
+    ) -> dict[str, Any]:
+        """Read the budget and overlay the bank links Clerk manages itself."""
+        snapshot = await self.gateway.snapshot(today=today, transaction_ids=transaction_ids)
+        return apply_bank_links(snapshot, self.database.list_bank_links(enabled_only=True))
 
     async def enqueue(
         self, kind: str, *, trigger: str = "manual", params: dict[str, Any] | None = None
@@ -316,7 +328,7 @@ class JobManager:
         self.database.update_job(job["id"], phase="reading")
         today = datetime.datetime.now(settings.zone).date()
         open_review_ids = self.database.open_review_transaction_ids()
-        snapshot = await self.gateway.snapshot(
+        snapshot = await self.snapshot(
             today=today, transaction_ids=open_review_ids
         )
         review_resolutions = _reconcile_open_reviews(
@@ -343,7 +355,7 @@ class JobManager:
         today = datetime.datetime.now(settings.zone).date()
         self.database.update_job(job["id"], phase="reading")
         open_review_ids = self.database.open_review_transaction_ids()
-        snapshot = await self.gateway.snapshot(
+        snapshot = await self.snapshot(
             today=today, transaction_ids=open_review_ids
         )
         review_resolutions = _reconcile_open_reviews(
@@ -423,7 +435,7 @@ class JobManager:
         if settings.rule_promotion_enabled:
             promotions = self._suggest_rules(result.applied, stored, settings)
 
-        refreshed = await self.gateway.snapshot(today=today)
+        refreshed = await self.snapshot(today=today)
         await self._refresh_overview(refreshed, settings, today)
         summary = result.summary()
         summary["written"] = len(applied_ids)
@@ -448,7 +460,7 @@ class JobManager:
     async def _run_health(self, job: dict[str, Any], settings: Settings) -> dict[str, Any]:
         today = datetime.datetime.now(settings.zone).date()
         self.database.update_job(job["id"], phase="reading")
-        snapshot = await self.gateway.snapshot(today=today)
+        snapshot = await self.snapshot(today=today)
 
         remote_payload: dict[str, Any] | None = None
         simplefin_error = ""
@@ -524,7 +536,7 @@ class JobManager:
             return {"skipped": f"already sent for {local_date} {slot}"}
         try:
             today = local_now.date()
-            snapshot = await self.gateway.snapshot(today=today)
+            snapshot = await self.snapshot(today=today)
             overview = await self._refresh_overview(snapshot, settings, today)
             previous_digest = self.database.latest_digest()
             payload = build_digest(
@@ -656,7 +668,7 @@ class JobManager:
         """Read the budget and rebuild the overview outside the job queue."""
         settings = self.settings_manager.get()
         today = datetime.datetime.now(settings.zone).date()
-        snapshot = await self.gateway.snapshot(today=today)
+        snapshot = await self.snapshot(today=today)
         return await self._refresh_overview(snapshot, settings, today)
 
 

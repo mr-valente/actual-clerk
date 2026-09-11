@@ -496,3 +496,78 @@ def test_several_stuck_imports_are_totalled_from_the_oldest():
     assert result.stuck_import_count == 2
     assert result.stuck_import_cents == -425
     assert result.oldest_stuck_import_date == (TODAY - datetime.timedelta(days=40)).isoformat()
+
+
+# ------------------------------------------------------------ providers
+
+
+def test_an_account_is_only_compared_with_readings_from_its_own_provider():
+    """A Plaid-managed account must not be matched by a SimpleFIN reading with the same id."""
+    plaid_account = actual_account(
+        "Card", sync_source="plaid", external_id="acc-1", managed_by_clerk=True
+    )
+    simplefin_reading = remote_account("Card", id="acc-1", balance_cents=1)
+    plaid_reading = remote_account("Card", id="acc-1", provider="plaid", balance_cents=100000)
+    [result] = evaluate([plaid_account], [simplefin_reading, plaid_reading])
+    assert result.status == "ok"
+    assert result.remote_balance_cents == 100000
+    assert result.provider_label == "Plaid"
+    assert result.managed_by_clerk is True
+    assert result.as_dict()["sync_source"] == "plaid"
+
+
+def test_a_provider_that_returned_nothing_is_not_treated_as_missing_the_account():
+    """SimpleFIN answering says nothing about an account Plaid feeds."""
+    plaid_account = actual_account("Card", sync_source="plaid", external_id="acc-1")
+    [result] = evaluate([plaid_account], [remote_account("Other", id="sf-other")])
+    assert result.status != "missing"
+    assert any("Plaid is not configured" in signal for signal in result.signals)
+
+
+def test_a_provider_that_answered_is_configured_whatever_the_flags_say():
+    plaid_account = actual_account("Card", sync_source="plaid", external_id="acc-1")
+    [result] = evaluate(
+        [plaid_account], [remote_account("Card", id="acc-1", provider="plaid")],
+        simplefin_configured=False,
+    )
+    assert result.status == "ok"
+    assert not any("not configured" in signal for signal in result.signals)
+
+
+def test_errors_are_scoped_to_their_provider():
+    accounts = [
+        actual_account("Checking"),
+        actual_account("Card", sync_source="plaid", external_id="acc-1"),
+    ]
+    remote = [
+        remote_account("Checking"),
+        remote_account("Card", id="acc-1", provider="plaid", connection_id="item-1"),
+    ]
+    by_name = {
+        item.account_name: item
+        for item in evaluate(
+            accounts,
+            remote,
+            [{"provider": "plaid", "conn_id": "item-1", "msg": "Login required"}],
+        )
+    }
+    assert by_name["Card"].status == "error"
+    assert by_name["Card"].detail == "Login required"
+    assert by_name["Checking"].status == "ok"
+
+
+def test_missing_and_stale_wording_names_the_provider():
+    plaid_account = actual_account("Card", sync_source="plaid", external_id="acc-1")
+    [missing] = evaluate(
+        [plaid_account], [remote_account("Other", id="acc-2", provider="plaid")]
+    )
+    assert missing.status == "missing"
+    assert missing.detail.startswith("Plaid did not return")
+    assert missing.as_dict()["status_label"] == "Not returned by the bank"
+    [stale] = evaluate(
+        [plaid_account],
+        [remote_account("Card", id="acc-1", provider="plaid",
+                        balance_date=NOW - datetime.timedelta(days=5))],
+    )
+    assert stale.status == "stale"
+    assert stale.detail.startswith("Plaid's balance is")

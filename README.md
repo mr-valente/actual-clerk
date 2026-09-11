@@ -307,7 +307,9 @@ uv run actual-clerk          # http://localhost:8080
 ```
 
 Node 20 or newer is required for a source checkout; the container includes
-Node 22. `@actual-app/api` is pinned exactly and its npm lockfile is committed.
+Node 22. Without Node on the host, `scripts/worker-tests.sh` runs the worker
+suite inside a `node:22` container. `@actual-app/api` is pinned exactly and its
+npm lockfile is committed.
 The Python suite and worker contract suite run without an Actual server, a
 SimpleFIN account, or a model. A container build additionally verifies that the
 official API and its native SQLite dependency load in the shipped runtime.

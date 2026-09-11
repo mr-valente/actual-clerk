@@ -181,11 +181,92 @@ CREATE TABLE IF NOT EXISTS snapshots (
     payload_json TEXT NOT NULL,
     updated_at REAL NOT NULL
 );
+
+-- Bank connections Clerk manages itself (Plaid). Actual never sees these:
+-- from its side a Clerk-synced account is a manual account, and the link
+-- lives here. The access token is stored like every other Clerk secret.
+CREATE TABLE IF NOT EXISTS plaid_items (
+    item_id TEXT PRIMARY KEY,
+    environment TEXT NOT NULL DEFAULT 'sandbox',
+    institution_id TEXT NOT NULL DEFAULT '',
+    institution_name TEXT NOT NULL DEFAULT '',
+    access_token TEXT NOT NULL,
+    cursor TEXT NOT NULL DEFAULT '',
+    status TEXT NOT NULL DEFAULT 'ok',
+    last_error TEXT NOT NULL DEFAULT '',
+    last_refresh_at REAL,
+    last_sync_at REAL,
+    last_successful_update TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+-- One row per Actual account whose bank feed Clerk delivers. `cutover_date`
+-- is the first date Clerk imports from the provider; earlier history belongs
+-- to whatever fed the account before.
+CREATE TABLE IF NOT EXISTS bank_links (
+    actual_account_id TEXT PRIMARY KEY,
+    provider TEXT NOT NULL,
+    item_id TEXT NOT NULL DEFAULT '',
+    external_account_id TEXT NOT NULL,
+    external_name TEXT NOT NULL DEFAULT '',
+    mask TEXT NOT NULL DEFAULT '',
+    account_type TEXT NOT NULL DEFAULT '',
+    account_subtype TEXT NOT NULL DEFAULT '',
+    institution TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    cutover_date TEXT NOT NULL DEFAULT '',
+    last_import_at REAL,
+    last_error TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_bank_links_external
+ON bank_links(provider, external_account_id);
+
+-- Every time Clerk gives an existing Actual row a new provider id (a
+-- pending-to-posted swap, or a SimpleFIN row adopted at cutover).
+CREATE TABLE IF NOT EXISTS import_adoptions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    actual_account_id TEXT NOT NULL,
+    transaction_id TEXT NOT NULL,
+    previous_imported_id TEXT NOT NULL DEFAULT '',
+    imported_id TEXT NOT NULL,
+    reason TEXT NOT NULL,
+    created_at REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS ix_import_adoptions_created ON import_adoptions(created_at DESC);
 """
 
 
 def _json(value: Any) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str)
+
+
+_PLAID_ITEM_DEFAULTS: dict[str, Any] = {
+    "environment": "sandbox",
+    "institution_id": "",
+    "institution_name": "",
+    "cursor": "",
+    "status": "ok",
+    "last_error": "",
+    "last_refresh_at": None,
+    "last_sync_at": None,
+    "last_successful_update": "",
+}
+
+_BANK_LINK_DEFAULTS: dict[str, Any] = {
+    "item_id": "",
+    "external_name": "",
+    "mask": "",
+    "account_type": "",
+    "account_subtype": "",
+    "institution": "",
+    "enabled": 1,
+    "cutover_date": "",
+    "last_import_at": None,
+    "last_error": "",
+}
 
 
 class Database:
@@ -1151,6 +1232,222 @@ class Database:
         return item
 
     # -------------------------------------------------------------- dashboard
+
+    # --------------------------------------------------------- bank links
+
+    PLAID_ITEM_FIELDS = (
+        "environment",
+        "institution_id",
+        "institution_name",
+        "access_token",
+        "cursor",
+        "status",
+        "last_error",
+        "last_refresh_at",
+        "last_sync_at",
+        "last_successful_update",
+    )
+
+    def upsert_plaid_item(self, item: dict[str, Any]) -> dict[str, Any]:
+        item_id = str(item.get("item_id") or "")
+        if not item_id:
+            raise ValueError("A Plaid item id is required")
+        now = time.time()
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM plaid_items WHERE item_id=?", (item_id,)
+            ).fetchone()
+            merged = dict(existing) if existing else {"item_id": item_id, "created_at": now}
+            for field in self.PLAID_ITEM_FIELDS:
+                if field in item:
+                    merged[field] = item[field]
+            if not merged.get("access_token"):
+                raise ValueError("A Plaid access token is required")
+            merged["updated_at"] = now
+            columns = ["item_id", "created_at", "updated_at", *self.PLAID_ITEM_FIELDS]
+            assignments = ", ".join(f"{name}=excluded.{name}" for name in columns[2:])
+            connection.execute(
+                f"INSERT INTO plaid_items({','.join(columns)}) "
+                f"VALUES({','.join('?' for _ in columns)}) "
+                f"ON CONFLICT(item_id) DO UPDATE SET {assignments}",
+                [merged.get(column) if column in merged else _PLAID_ITEM_DEFAULTS.get(column)
+                 for column in columns],
+            )
+        return self.get_plaid_item(item_id) or merged
+
+    def update_plaid_item(self, item_id: str, **fields: Any) -> dict[str, Any] | None:
+        unknown = set(fields) - set(self.PLAID_ITEM_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown Plaid item fields: {', '.join(sorted(unknown))}")
+        if not fields:
+            return self.get_plaid_item(item_id)
+        assignments = ", ".join(f"{name}=?" for name in fields)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE plaid_items SET {assignments}, updated_at=? WHERE item_id=?",
+                [*fields.values(), time.time(), item_id],
+            )
+        return self.get_plaid_item(item_id)
+
+    def get_plaid_item(self, item_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM plaid_items WHERE item_id=?", (item_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_plaid_items(self, *, include_removed: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM plaid_items"
+        if not include_removed:
+            query += " WHERE status != 'removed'"
+        with self.connect() as connection:
+            rows = connection.execute(query + " ORDER BY created_at").fetchall()
+        return [dict(row) for row in rows]
+
+    def remove_plaid_item(self, item_id: str) -> int:
+        """Mark an item removed and disable every link that depended on it."""
+        now = time.time()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE plaid_items SET status='removed', updated_at=? WHERE item_id=?",
+                (now, item_id),
+            )
+            cursor = connection.execute(
+                "UPDATE bank_links SET enabled=0, updated_at=? WHERE item_id=? AND enabled=1",
+                (now, item_id),
+            )
+        return cursor.rowcount
+
+    BANK_LINK_FIELDS = (
+        "provider",
+        "item_id",
+        "external_account_id",
+        "external_name",
+        "mask",
+        "account_type",
+        "account_subtype",
+        "institution",
+        "enabled",
+        "cutover_date",
+        "last_import_at",
+        "last_error",
+    )
+
+    def upsert_bank_link(self, link: dict[str, Any]) -> dict[str, Any]:
+        account_id = str(link.get("actual_account_id") or "")
+        if not account_id:
+            raise ValueError("An Actual account id is required")
+        now = time.time()
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM bank_links WHERE actual_account_id=?", (account_id,)
+            ).fetchone()
+            merged = (
+                dict(existing)
+                if existing
+                else {"actual_account_id": account_id, "created_at": now, "enabled": 1}
+            )
+            for field in self.BANK_LINK_FIELDS:
+                if field in link:
+                    merged[field] = link[field]
+            if not merged.get("provider") or not merged.get("external_account_id"):
+                raise ValueError("A bank link needs a provider and an external account id")
+            merged["enabled"] = 1 if merged.get("enabled", 1) else 0
+            merged["updated_at"] = now
+            columns = ["actual_account_id", "created_at", "updated_at", *self.BANK_LINK_FIELDS]
+            # An explicit upsert on the primary key: OR REPLACE would silently
+            # delete another account's link on a (provider, external id) clash
+            # instead of refusing it.
+            assignments = ", ".join(f"{name}=excluded.{name}" for name in columns[2:])
+            connection.execute(
+                f"INSERT INTO bank_links({','.join(columns)}) "
+                f"VALUES({','.join('?' for _ in columns)}) "
+                f"ON CONFLICT(actual_account_id) DO UPDATE SET {assignments}",
+                [merged.get(column) if column in merged else _BANK_LINK_DEFAULTS.get(column)
+                 for column in columns],
+            )
+        return self.get_bank_link(account_id) or merged
+
+    def update_bank_link(self, account_id: str, **fields: Any) -> dict[str, Any] | None:
+        unknown = set(fields) - set(self.BANK_LINK_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown bank link fields: {', '.join(sorted(unknown))}")
+        if not fields:
+            return self.get_bank_link(account_id)
+        if "enabled" in fields:
+            fields["enabled"] = 1 if fields["enabled"] else 0
+        assignments = ", ".join(f"{name}=?" for name in fields)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE bank_links SET {assignments}, updated_at=? WHERE actual_account_id=?",
+                [*fields.values(), time.time(), account_id],
+            )
+        return self.get_bank_link(account_id)
+
+    def get_bank_link(self, account_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM bank_links WHERE actual_account_id=?", (account_id,)
+            ).fetchone()
+        return self._bank_link_row(row) if row else None
+
+    def list_bank_links(
+        self, *, provider: str | None = None, enabled_only: bool = False
+    ) -> list[dict[str, Any]]:
+        clauses = []
+        params: list[Any] = []
+        if provider:
+            clauses.append("provider=?")
+            params.append(provider)
+        if enabled_only:
+            clauses.append("enabled=1")
+        query = "SELECT * FROM bank_links"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        with self.connect() as connection:
+            rows = connection.execute(query + " ORDER BY created_at", params).fetchall()
+        return [self._bank_link_row(row) for row in rows]
+
+    def delete_bank_link(self, account_id: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM bank_links WHERE actual_account_id=?", (account_id,)
+            )
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _bank_link_row(row: sqlite3.Row) -> dict[str, Any]:
+        link = dict(row)
+        link["enabled"] = bool(link.get("enabled", 1))
+        return link
+
+    def record_adoption(
+        self,
+        *,
+        account_id: str,
+        transaction_id: str,
+        previous_imported_id: str,
+        imported_id: str,
+        reason: str,
+    ) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO import_adoptions(actual_account_id,transaction_id,"
+                "previous_imported_id,imported_id,reason,created_at) VALUES(?,?,?,?,?,?)",
+                (account_id, transaction_id, previous_imported_id, imported_id, reason, time.time()),
+            )
+
+    def list_adoptions(self, *, account_id: str | None = None, limit: int = 100) -> list[dict[str, Any]]:
+        query = "SELECT * FROM import_adoptions"
+        params: list[Any] = []
+        if account_id:
+            query += " WHERE actual_account_id=?"
+            params.append(account_id)
+        query += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
 
     def counts(self) -> dict[str, int]:
         with self.connect() as connection:

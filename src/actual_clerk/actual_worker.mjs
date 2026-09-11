@@ -245,16 +245,29 @@ export class ActualService {
     this.initialized = false;
     this.loadedBudget = null;
     this.serverVersion = '';
+    // The object `init()` returns. Besides the documented methods it carries
+    // `send`, which reaches every server handler -- the only route to
+    // linking, unlinking, and server secrets. Actual exposes the same bridge
+    // as the deprecated `api.internal`, kept here as the fallback.
+    this.lib = null;
+  }
+
+  async _send(handler, args = {}) {
+    const bridge = this.lib?.send ? this.lib : this.api.internal;
+    if (typeof bridge?.send !== 'function') {
+      throw new Error('The official Actual API did not expose its handler bridge');
+    }
+    return bridge.send(handler, args);
   }
 
   async initialize(params) {
     if (this.initialized) throw new Error('The Actual API worker is already initialized');
-    await this.api.init({
+    this.lib = (await this.api.init({
       serverURL: params.serverUrl,
       password: params.password,
       dataDir: params.dataDir,
       verbose: false,
-    });
+    })) || null;
     this.initialized = true;
 
     let budgets = await this.api.getBudgets();
@@ -588,6 +601,293 @@ export class ActualService {
     return account ? { id: account.id, name: account.name } : null;
   }
 
+  // ------------------------------------------------------------ bank links
+  //
+  // Everything below exists so Clerk can manage bank links itself: list what
+  // Actual links today, detach an account, attach a SimpleFIN account back
+  // onto an existing one, and import transactions from a provider Actual does
+  // not know (Plaid). The internal handlers are reached through `_send`; the
+  // package version is pinned exactly, and the worker contract tests pin the
+  // handler names and argument shapes.
+
+  async listAccountsDetailed() {
+    // The AQL view of `accounts` hides the link columns (bank, balances), so
+    // this reads Actual's own account handler, which joins the bank row.
+    await this.api.sync();
+    const rows = await this._send('accounts-get');
+    return (rows || []).filter(row => !row.tombstone).map(row => ({
+      id: cleanString(row.id),
+      name: cleanString(row.name),
+      off_budget: Boolean(row.offbudget),
+      closed: Boolean(row.closed),
+      sync_source: cleanString(row.account_sync_source),
+      external_id: cleanString(row.account_id),
+      official_name: cleanString(row.official_name),
+      mask: cleanString(row.mask),
+      bank_id: cleanString(row.bank),
+      bank_name: cleanString(row.bankName),
+      last_sync: cleanString(row.last_sync) || null,
+      bank_sync_status: cleanString(row.bank_sync_status),
+      balance_current: row.balance_current == null ? null : cleanInteger(row.balance_current),
+      balance_available: row.balance_available == null ? null : cleanInteger(row.balance_available),
+      balance_limit: row.balance_limit == null ? null : cleanInteger(row.balance_limit),
+    }));
+  }
+
+  async _accountRow(accountId) {
+    const id = cleanString(accountId);
+    if (!id) throw new Error('An Actual account id is required');
+    const rows = await this._query(this.api.q('accounts')
+      .filter({ id })
+      .select(['id', 'name', 'offbudget', 'closed', 'account_id', 'account_sync_source']));
+    if (!rows.length) throw new Error(`Actual account ${id} was not found`);
+    return rows[0];
+  }
+
+  async accountTransactions(params) {
+    const accountId = cleanString(params.accountId);
+    if (!accountId) throw new Error('An Actual account id is required');
+    const filter = { account: accountId };
+    const start = isoDate(params.start);
+    const end = isoDate(params.end);
+    if (start || end) {
+      filter.date = {};
+      if (start) filter.date.$gte = start;
+      if (end) filter.date.$lte = end;
+    }
+    const rows = await this._query(this.api.q('transactions')
+      .filter(filter)
+      .select([
+        'id',
+        'date',
+        { amount_cents: 'amount' },
+        { payee_name: 'payee.name' },
+        { imported_description: 'imported_payee' },
+        'imported_id',
+        'notes',
+        { category_id: 'category' },
+        'cleared',
+        'reconciled',
+        'transfer_id',
+        'is_parent',
+        'is_child',
+        'starting_balance_flag',
+      ]));
+    return rows.map(row => ({
+      id: cleanString(row.id),
+      date: isoDate(row.date),
+      amount_cents: cleanInteger(row.amount_cents),
+      payee_name: cleanString(row.payee_name),
+      imported_description: cleanString(row.imported_description),
+      imported_id: cleanString(row.imported_id),
+      notes: cleanString(row.notes),
+      category_id: cleanString(row.category_id) || null,
+      cleared: Boolean(row.cleared),
+      reconciled: Boolean(row.reconciled),
+      is_transfer: Boolean(row.transfer_id),
+      is_parent: Boolean(row.is_parent),
+      is_child: Boolean(row.is_child),
+      is_starting_balance: Boolean(row.starting_balance_flag),
+    }));
+  }
+
+  async unlinkAccount(params) {
+    // Actual's own unlink: clears the link columns and leaves the account and
+    // every transaction in place. Nothing is sent to SimpleFIN.
+    const before = await this._accountRow(params.accountId);
+    await this._send('account-unlink', { id: cleanString(before.id) });
+    await this.api.sync();
+    return {
+      id: cleanString(before.id),
+      name: cleanString(before.name),
+      previous_sync_source: cleanString(before.account_sync_source),
+      previous_external_id: cleanString(before.account_id),
+    };
+  }
+
+  async simpleFinServerStatus() {
+    const response = await this._send('simplefin-status');
+    const data = response?.data ?? response ?? {};
+    return {
+      configured: Boolean(data.configured),
+      error: cleanString(response?.error || data.error_code || ''),
+    };
+  }
+
+  async simpleFinServerAccounts() {
+    // The Actual server answers with SimpleFIN's own account shape. Reduce it
+    // to what a link needs, and keep the raw org identity for `findOrCreateBank`.
+    const response = await this._send('simplefin-accounts');
+    const data = response?.data ?? response ?? {};
+    if (data.error_code || data.error_type || response?.error) {
+      return {
+        accounts: [],
+        error: cleanString(data.error_code || data.error_type || response.error),
+        reason: cleanString(data.reason || ''),
+      };
+    }
+    const accounts = (data.accounts || []).map(account => {
+      const org = account.org || {};
+      return {
+        account_id: cleanString(account.id),
+        name: cleanString(account.name),
+        institution: cleanString(org.name),
+        org_domain: cleanString(org.domain),
+        org_id: cleanString(org.id || org['sfin-url']),
+        balance: cleanString(account.balance),
+        currency: cleanString(account.currency),
+        balance_date: account['balance-date'] ?? null,
+      };
+    });
+    return { accounts, error: '', reason: '' };
+  }
+
+  async linkSimpleFinAccount(params) {
+    // Attach a SimpleFIN account to an existing Actual account (or create a
+    // new one when no `accountId` is given). Actual immediately runs a first
+    // sync from `startingDate`; an account that already holds transactions
+    // gets no synthetic starting balance.
+    const external = params.externalAccount || {};
+    const externalAccount = {
+      account_id: cleanString(external.account_id || external.id),
+      name: cleanString(external.name),
+      institution: cleanString(external.institution) || null,
+      orgDomain: cleanString(external.org_domain || external.orgDomain) || null,
+      orgId: cleanString(external.org_id || external.orgId) || null,
+    };
+    if (!externalAccount.account_id) throw new Error('A SimpleFIN account id is required to link');
+    const upgradingId = cleanString(params.accountId) || undefined;
+    if (upgradingId) await this._accountRow(upgradingId);
+    const request = {
+      externalAccount,
+      upgradingId,
+      offBudget: Boolean(params.offBudget),
+    };
+    const startingDate = isoDate(params.startingDate);
+    if (startingDate) request.startingDate = startingDate;
+    if (params.startingBalance != null) request.startingBalance = cleanInteger(params.startingBalance);
+    await this._send('simplefin-accounts-link', request);
+    await this.api.sync();
+    const accounts = await this.listAccountsDetailed();
+    const linked = accounts.find(account => upgradingId
+      ? account.id === upgradingId
+      : account.external_id === externalAccount.account_id && account.sync_source === 'simpleFin');
+    return linked || { id: upgradingId || '', external_id: externalAccount.account_id, sync_source: 'simpleFin' };
+  }
+
+  async setServerSecret(params) {
+    // Only the SimpleFIN token is ever managed from here. A null value
+    // deletes the secret on the Actual server.
+    const name = cleanString(params.name);
+    if (name !== 'simplefin_token') throw new Error(`Refusing to manage server secret ${name || '(blank)'}`);
+    const value = params.value == null ? null : cleanString(params.value);
+    const response = await this._send('secret-set', { name, value });
+    if (response?.error) {
+      throw new Error(`Actual refused the ${name} secret: ${cleanString(response.reason || response.error)}`);
+    }
+    return { name, cleared: value === null };
+  }
+
+  async createAccount(params) {
+    const name = cleanString(params.name).trim();
+    if (!name) throw new Error('An account name is required');
+    const initialBalance = params.initialBalance == null ? undefined : cleanInteger(params.initialBalance);
+    const id = await this.api.createAccount({ name, offbudget: Boolean(params.offBudget) }, initialBalance);
+    await this.api.sync();
+    return { id: cleanString(id), name, off_budget: Boolean(params.offBudget) };
+  }
+
+  async importTransactions(params) {
+    // Actual's own reconciliation: match by imported_id, then fuzzy, then run
+    // rules. The caller decides what belongs in the batch; nothing here filters.
+    const accountId = cleanString(params.accountId);
+    if (!accountId) throw new Error('An Actual account id is required');
+    const transactions = (params.transactions || []).map(item => {
+      const amount = Number(item.amount_cents ?? item.amount);
+      if (!Number.isInteger(amount)) throw new Error(`Import amount must be integer cents, got ${item.amount_cents ?? item.amount}`);
+      const date = isoDate(item.date);
+      if (!date) throw new Error('Import date is required');
+      const transaction = { date, amount };
+      if (item.payee_name != null) transaction.payee_name = cleanString(item.payee_name);
+      if (item.imported_payee != null) transaction.imported_payee = cleanString(item.imported_payee);
+      if (item.imported_id != null) transaction.imported_id = cleanString(item.imported_id);
+      if (item.notes != null) transaction.notes = cleanString(item.notes);
+      if (item.cleared != null) transaction.cleared = Boolean(item.cleared);
+      if (item.category_id) transaction.category = cleanString(item.category_id);
+      return transaction;
+    });
+    if (!transactions.length) return { added: [], updated: [], errors: [], preview: [], dry_run: Boolean(params.dryRun) };
+    const dryRun = Boolean(params.dryRun);
+    const result = await this.api.importTransactions(accountId, transactions, { defaultCleared: true, dryRun });
+    if (!dryRun) await this.api.sync();
+    return {
+      added: (result?.added || []).map(cleanString),
+      updated: (result?.updated || []).map(cleanString),
+      errors: (result?.errors || []).map(error => cleanString(error?.message || error)),
+      preview: result?.updatedPreview || [],
+      dry_run: dryRun,
+    };
+  }
+
+  async deleteTransactions(params) {
+    const ids = [...new Set((params.transactionIds || []).map(cleanString).filter(Boolean))];
+    if (!ids.length) return { deleted: [], missing: [] };
+    const rows = await this._query(this.api.q('transactions').filter({ id: { $oneof: ids } }).select(['id']));
+    const present = new Set(rows.map(row => cleanString(row.id)));
+    const deleted = ids.filter(id => present.has(id));
+    if (deleted.length) {
+      await this.api.batchBudgetUpdates(async () => {
+        for (const id of deleted) await this.api.deleteTransaction(id);
+      });
+      await this.api.sync();
+    }
+    return { deleted, missing: ids.filter(id => !present.has(id)) };
+  }
+
+  async adoptImportedIds(params) {
+    // Give an existing row a new provider id so later updates and removals
+    // find it. Optionally settles the cleared flag and date at the same time,
+    // which is what a pending-to-posted swap needs.
+    const updates = params.updates || [];
+    const ids = [...new Set(updates.map(update => cleanString(update.transaction_id)).filter(Boolean))];
+    if (!ids.length) return { applied: [], skipped: [] };
+    const rows = await this._query(this.api.q('transactions')
+      .filter({ id: { $oneof: ids } })
+      .select(['id', 'imported_id', 'cleared', 'date']));
+    const existing = new Map(rows.map(row => [cleanString(row.id), row]));
+    const planned = [];
+    const skipped = [];
+    for (const update of updates) {
+      const id = cleanString(update.transaction_id);
+      const row = existing.get(id);
+      if (!row) {
+        skipped.push({ id, reason: 'deleted' });
+        continue;
+      }
+      const fields = {};
+      const importedId = cleanString(update.imported_id);
+      if (importedId && importedId !== cleanString(row.imported_id)) fields.imported_id = importedId;
+      if (update.cleared != null && Boolean(update.cleared) !== Boolean(row.cleared)) fields.cleared = Boolean(update.cleared);
+      const date = isoDate(update.date);
+      if (date && date !== isoDate(row.date)) fields.date = date;
+      if (!Object.keys(fields).length) {
+        skipped.push({ id, reason: 'no_change' });
+        continue;
+      }
+      planned.push({ id, fields, previous_imported_id: cleanString(row.imported_id) });
+    }
+    if (planned.length) {
+      await this.api.batchBudgetUpdates(async () => {
+        for (const update of planned) await this.api.updateTransaction(update.id, update.fields);
+      });
+      await this.api.sync();
+    }
+    return {
+      applied: planned.map(update => ({ id: update.id, previous_imported_id: update.previous_imported_id, fields: update.fields })),
+      skipped,
+    };
+  }
+
   async diagnostics() {
     const preferenceRows = await this._query(this.api.q('preferences').filter({ id: 'budgetType' }).select(['id', 'value']));
     const budgetType = preferenceRows[0]?.value ?? null;
@@ -631,6 +931,17 @@ export class ActualService {
       createCategoryRule: () => this.createCategoryRule(params),
       findAccount: () => this.findAccount(params),
       diagnostics: () => this.diagnostics(),
+      listAccountsDetailed: () => this.listAccountsDetailed(),
+      accountTransactions: () => this.accountTransactions(params),
+      unlinkAccount: () => this.unlinkAccount(params),
+      simpleFinServerStatus: () => this.simpleFinServerStatus(),
+      simpleFinServerAccounts: () => this.simpleFinServerAccounts(),
+      linkSimpleFinAccount: () => this.linkSimpleFinAccount(params),
+      setServerSecret: () => this.setServerSecret(params),
+      createAccount: () => this.createAccount(params),
+      importTransactions: () => this.importTransactions(params),
+      deleteTransactions: () => this.deleteTransactions(params),
+      adoptImportedIds: () => this.adoptImportedIds(params),
     };
     if (!methods[method]) throw new Error(`Unknown Actual worker method: ${method}`);
     if (method !== 'initialize' && !this.initialized) throw new Error('The Actual API worker is not initialized');

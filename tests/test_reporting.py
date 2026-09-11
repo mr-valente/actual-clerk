@@ -132,3 +132,52 @@ def test_missing_simplefin_data_converts_to_nothing():
         {"accounts": [{"id": "sf1", "name": "Checking", "balance_cents": 100, "org_name": "Bank"}]}
     )
     assert converted.org_name == "Bank"
+
+
+def test_clerk_managed_links_overlay_the_snapshot_and_keep_what_actual_said():
+    from actual_clerk.reporting import apply_bank_links, to_actual_accounts
+
+    snapshot = {
+        "accounts": [
+            {"id": "acct-1", "name": "Card", "sync_source": "", "external_id": "",
+             "bank_name": "", "balance_cents": 0, "last_sync": None, "off_budget": False,
+             "closed": False},
+            {"id": "acct-2", "name": "Checking", "sync_source": "simpleFin",
+             "external_id": "sf-2", "bank_name": "Bank", "balance_cents": 0,
+             "last_sync": None, "off_budget": False, "closed": False},
+        ],
+        "transactions": [],
+    }
+    apply_bank_links(
+        snapshot,
+        [
+            {"actual_account_id": "acct-1", "provider": "plaid",
+             "external_account_id": "plaid-1", "institution": "Platypus", "enabled": True},
+            {"actual_account_id": "acct-2", "provider": "plaid",
+             "external_account_id": "plaid-2", "enabled": False},
+        ],
+    )
+    card, checking = snapshot["accounts"]
+    assert card["sync_source"] == "plaid"
+    assert card["external_id"] == "plaid-1"
+    assert card["bank_name"] == "Platypus"
+    assert card["managed_by_clerk"] is True
+    assert card["actual_sync_source"] == ""
+    # A disabled link changes nothing.
+    assert checking["sync_source"] == "simpleFin"
+    assert checking["managed_by_clerk"] is False
+    assert checking["actual_sync_source"] == "simpleFin"
+    infos = {item.id: item for item in to_actual_accounts(snapshot)}
+    assert infos["acct-1"].managed_by_clerk is True
+    assert infos["acct-1"].sync_source == "plaid"
+    assert infos["acct-2"].managed_by_clerk is False
+
+
+def test_remote_accounts_carry_their_provider():
+    from actual_clerk.reporting import to_remote_accounts
+
+    [reading] = to_remote_accounts({"accounts": [{"id": "p", "name": "Card"}]}, provider="plaid")
+    assert reading.provider == "plaid"
+    [reading] = to_remote_accounts({"accounts": [{"id": "p", "name": "Card", "provider": "x"}]})
+    assert reading.provider == "x"
+    assert to_simplefin_accounts({"accounts": [{"id": "s", "name": "C"}]})[0].provider == "simpleFin"

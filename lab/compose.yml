@@ -1,0 +1,55 @@
+# A throwaway copy of the live Actual + Clerk stack for Plaid work.
+#
+#   docker compose -f lab/compose.yml up -d --build
+#
+# `lab/data/actual` and `lab/data/clerk` are copies of the live data (ignored
+# by git). `lab/.env` holds the Actual password, budget sync ID, and the Plaid
+# sandbox credentials. Nothing here talks to the live containers; notifications
+# and the local model are switched off so the lab cannot send a real digest or
+# load the model server.
+services:
+  actual-lab:
+    image: actualbudget/actual-server:26.9.0
+    container_name: actual-lab
+    volumes:
+      - ./data/actual:/data
+    environment:
+      - TZ=America/New_York
+    ports:
+      - "30130:5006"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "src/scripts/health-check.js"]
+      start_period: 10s
+      start_interval: 2s
+      interval: 1m
+
+  clerk-lab:
+    build: ..
+    image: actual-clerk:lab
+    container_name: clerk-lab
+    init: true
+    depends_on:
+      actual-lab:
+        condition: service_healthy
+    ports:
+      - "30131:8080"
+    volumes:
+      - ./data/clerk:/app/data
+    env_file:
+      - path: .env
+        required: true
+    environment:
+      TZ: America/New_York
+      ACTUAL_URL: http://actual-lab:5006
+      CLERK_NOTIFICATIONS_ENABLED: "false"
+      CLERK_AI_ENABLED: "false"
+      CLERK_DIGEST_ENABLED: "false"
+      CLERK_LOG_LEVEL: DEBUG
+      # Plaid sandbox (Stage 2 onwards). Read from lab/.env.
+      CLERK_PLAID_ENV: sandbox
+      CLERK_PLAID_CLIENT_ID: ${PLAID_CLIENT_ID}
+      CLERK_PLAID_SECRET: ${PLAID_SECRET}
+    extra_hosts:
+      - host.docker.internal:host-gateway
+    restart: unless-stopped

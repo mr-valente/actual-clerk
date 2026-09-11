@@ -307,7 +307,7 @@ async def diagnostics(request: Request, redact: bool = Query(False)) -> dict[str
     probe: dict[str, Any] | None = None
     snapshot_error = ""
     try:
-        snapshot = await gateway.snapshot(today=today)
+        snapshot = await _jobs(request).snapshot(today=today)
         probe = await gateway.diagnostics()
     except ActualGatewayError as exc:
         snapshot_error = str(exc)

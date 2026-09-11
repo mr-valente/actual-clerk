@@ -3,6 +3,8 @@ from __future__ import annotations
 import sqlite3
 import time
 
+import pytest
+
 from actual_clerk.db import Database
 
 
@@ -566,3 +568,92 @@ def test_a_digest_ledger_written_before_slots_existed_is_carried_over(data_dir):
     # Starting again must not duplicate the rows or lose them.
     database.initialize()
     assert len(database.list_digests()) == 1
+
+
+# ------------------------------------------------------------ bank links
+
+
+def test_plaid_items_round_trip_and_hide_their_token_only_by_convention(database):
+    item = database.upsert_plaid_item(
+        {"item_id": "item-1", "access_token": "access-sandbox-1", "institution_name": "Platypus"}
+    )
+    assert item["status"] == "ok"
+    assert item["cursor"] == ""
+    assert item["environment"] == "sandbox"
+    database.update_plaid_item("item-1", cursor="cursor-2", last_sync_at=1.0)
+    stored = database.get_plaid_item("item-1")
+    assert stored["cursor"] == "cursor-2"
+    assert stored["access_token"] == "access-sandbox-1"
+    # Upserting again keeps what was not mentioned.
+    database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-sandbox-2"})
+    assert database.get_plaid_item("item-1")["cursor"] == "cursor-2"
+    assert [row["item_id"] for row in database.list_plaid_items()] == ["item-1"]
+    with pytest.raises(ValueError):
+        database.update_plaid_item("item-1", bogus=1)
+    with pytest.raises(ValueError):
+        database.upsert_plaid_item({"item_id": "item-2"})
+
+
+def test_bank_links_are_keyed_by_actual_account_and_unique_per_external_account(database):
+    link = database.upsert_bank_link(
+        {
+            "actual_account_id": "acct-1",
+            "provider": "plaid",
+            "item_id": "item-1",
+            "external_account_id": "plaid-1",
+            "cutover_date": "2026-09-01",
+        }
+    )
+    assert link["enabled"] is True
+    assert link["cutover_date"] == "2026-09-01"
+    with pytest.raises(sqlite3.IntegrityError):
+        database.upsert_bank_link(
+            {"actual_account_id": "acct-2", "provider": "plaid", "external_account_id": "plaid-1"}
+        )
+    database.update_bank_link("acct-1", enabled=False, last_error="paused")
+    assert database.get_bank_link("acct-1")["enabled"] is False
+    assert database.list_bank_links(enabled_only=True) == []
+    assert [row["actual_account_id"] for row in database.list_bank_links(provider="plaid")] == [
+        "acct-1"
+    ]
+    with pytest.raises(ValueError):
+        database.upsert_bank_link({"actual_account_id": "acct-3", "provider": "plaid"})
+    assert database.delete_bank_link("acct-1") is True
+    assert database.delete_bank_link("acct-1") is False
+
+
+def test_removing_an_item_disables_every_link_that_depended_on_it(database):
+    database.upsert_plaid_item({"item_id": "item-1", "access_token": "t"})
+    for index in (1, 2):
+        database.upsert_bank_link(
+            {
+                "actual_account_id": f"acct-{index}",
+                "provider": "plaid",
+                "item_id": "item-1",
+                "external_account_id": f"plaid-{index}",
+            }
+        )
+    database.upsert_bank_link(
+        {"actual_account_id": "acct-9", "provider": "plaid", "item_id": "item-2",
+         "external_account_id": "plaid-9"}
+    )
+    assert database.remove_plaid_item("item-1") == 2
+    assert database.list_plaid_items() == []
+    assert database.list_plaid_items(include_removed=True)[0]["status"] == "removed"
+    assert {row["actual_account_id"] for row in database.list_bank_links(enabled_only=True)} == {
+        "acct-9"
+    }
+
+
+def test_adoptions_are_logged_newest_first(database):
+    database.record_adoption(
+        account_id="acct-1", transaction_id="t1", previous_imported_id="sf-1",
+        imported_id="plaid-1", reason="cutover",
+    )
+    database.record_adoption(
+        account_id="acct-1", transaction_id="t2", previous_imported_id="plaid-p",
+        imported_id="plaid-posted", reason="posted",
+    )
+    rows = database.list_adoptions(account_id="acct-1")
+    assert [row["reason"] for row in rows] == ["posted", "cutover"]
+    assert database.list_adoptions(account_id="other") == []

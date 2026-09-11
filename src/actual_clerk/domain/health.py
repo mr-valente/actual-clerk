@@ -1,19 +1,42 @@
 """Whether each bank connection is actually still working.
 
-A SimpleFIN connection does not announce that it has broken. It simply stops
+A bank connection does not announce that it has broken. It simply stops
 returning fresh data, and Actual keeps showing the last balance it saw as if
-nothing were wrong. Clerk compares three independent signals -- what SimpleFIN
-reports right now, how old that report is, and what Actual holds -- so a silent
-failure shows up as a status change instead of as a slowly staler budget.
+nothing were wrong. Clerk compares three independent signals -- what the
+provider reports right now, how old that report is, and what Actual holds -- so
+a silent failure shows up as a status change instead of as a slowly staler
+budget.
+
+The provider is a property of the account, not of Clerk. An account Actual
+links itself carries Actual's sync source (SimpleFIN); an account whose feed
+Clerk delivers carries Clerk's (Plaid). Every remote reading and every error
+names its provider, and an account is only ever compared with readings from
+its own.
 """
 
 from __future__ import annotations
 
 import datetime
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from itertools import combinations
 from typing import Any
+
+# Actual's own sync-source keys, plus the one Clerk adds.
+SIMPLEFIN = "simpleFin"
+PLAID = "plaid"
+PROVIDER_LABELS = {
+    SIMPLEFIN: "SimpleFIN",
+    PLAID: "Plaid",
+    "goCardless": "GoCardless",
+    "pluggyai": "Pluggy.ai",
+    "akahu": "Akahu",
+    "enableBanking": "Enable Banking",
+}
+
+
+def provider_label(provider: str) -> str:
+    return PROVIDER_LABELS.get(provider or "", provider or "the bank provider")
 
 # Worst first: an account's overall status is the most serious signal it has,
 # and this order is also the order accounts are listed in. A manual account is
@@ -38,7 +61,7 @@ STATUS_LABELS = {
     "ok": "Connected",
     "muted": "Not monitored",
     "error": "Connection error",
-    "missing": "Not returned by SimpleFIN",
+    "missing": "Not returned by the bank",
     "stale": "Stale data",
     "drifted": "Balance mismatch",
     "no_transactions": "No recent transactions",
@@ -98,6 +121,9 @@ class ActualAccountInfo:
     last_transaction_date: datetime.date | None = None
     off_budget: bool = False
     closed: bool = False
+    # True when Clerk, not Actual, delivers this account's bank feed. The
+    # sync_source then names Clerk's provider rather than Actual's.
+    managed_by_clerk: bool = False
 
     @property
     def cleared_cents(self) -> int:
@@ -113,7 +139,9 @@ class ActualAccountInfo:
 
 
 @dataclass(frozen=True)
-class SimpleFinAccountInfo:
+class RemoteAccountInfo:
+    """One provider's current reading of one account."""
+
     id: str
     name: str
     org_name: str = ""
@@ -123,6 +151,11 @@ class SimpleFinAccountInfo:
     available_cents: int | None = None
     last_transaction_date: datetime.date | None = None
     currency: str = "USD"
+    provider: str = SIMPLEFIN
+
+
+# The original name, kept for callers and tests written against SimpleFIN.
+SimpleFinAccountInfo = RemoteAccountInfo
 
 
 @dataclass
@@ -135,6 +168,8 @@ class AccountHealth:
     institution: str = ""
     external_id: str = ""
     sync_source: str = ""
+    provider_label: str = ""
+    managed_by_clerk: bool = False
     actual_balance_cents: int = 0
     actual_cleared_balance_cents: int = 0
     uncleared_balance_cents: int = 0
@@ -225,17 +260,24 @@ def worst_status(statuses: Sequence[str]) -> str:
 def evaluate_accounts(
     *,
     accounts: Sequence[ActualAccountInfo],
-    remote_accounts: Sequence[SimpleFinAccountInfo] = (),
+    remote_accounts: Sequence[RemoteAccountInfo] = (),
     errors: Sequence[dict[str, Any]] = (),
     now: datetime.datetime | None = None,
     simplefin_configured: bool = True,
+    providers: Mapping[str, bool] | None = None,
     balance_stale_hours: int = 36,
     balance_tolerance_cents: int = 100,
     transaction_stale_days: int = 4,
     stuck_import_days: int = STUCK_IMPORT_DAYS,
     unmonitored_ids: set[str] | None = None,
 ) -> list[AccountHealth]:
-    """Score every Actual account against what SimpleFIN reports right now.
+    """Score every Actual account against what its provider reports right now.
+
+    `providers` says which providers Clerk can ask directly (provider key to
+    configured flag); `simplefin_configured` is the older spelling of the
+    SimpleFIN entry. A provider that returned any reading or error is treated
+    as configured whatever the flags say. Readings and errors carry a
+    `provider`, and an account is only compared with its own provider's.
 
     Accounts named in `unmonitored_ids` are still measured -- the numbers stay
     visible -- but report as `muted` so they never raise an alert or count as
@@ -245,23 +287,30 @@ def evaluate_accounts(
     now = now or datetime.datetime.now(datetime.UTC)
     unmonitored_ids = unmonitored_ids or set()
     today = now.date()
-    remote_by_id = {account.id: account for account in remote_accounts}
+    configured = {SIMPLEFIN: simplefin_configured, **(providers or {})}
+    remote_by_key = {(account.provider, account.id): account for account in remote_accounts}
     errors_by_account, errors_by_connection, general_errors = _index_errors(errors)
+    providers_with_payload = {account.provider for account in remote_accounts} | {
+        _error_provider(error) for error in errors
+    }
+    for provider in providers_with_payload:
+        configured.setdefault(provider, True)
 
     results: list[AccountHealth] = []
     for account in accounts:
         if account.closed:
             continue
+        provider = account.sync_source
         health = _evaluate_one(
             account,
-            remote_by_id.get(account.external_id) if account.external_id else None,
+            remote_by_key.get((provider, account.external_id)) if account.external_id else None,
             errors_by_account=errors_by_account,
             errors_by_connection=errors_by_connection,
             general_errors=general_errors,
             now=now,
             today=today,
-            simplefin_configured=simplefin_configured,
-            have_remote_payload=bool(remote_accounts) or bool(errors),
+            provider_configured=bool(configured.get(provider, False)),
+            have_remote_payload=provider in providers_with_payload,
             balance_stale_hours=balance_stale_hours,
             balance_tolerance_cents=balance_tolerance_cents,
             transaction_stale_days=transaction_stale_days,
@@ -279,37 +328,47 @@ def evaluate_accounts(
     return results
 
 
+def _error_provider(error: dict[str, Any]) -> str:
+    return str(error.get("provider") or SIMPLEFIN)
+
+
+ErrorKey = tuple[str, str]
+
+
 def _index_errors(
     errors: Sequence[dict[str, Any]],
-) -> tuple[dict[str, list[str]], dict[str, list[str]], list[str]]:
-    by_account: dict[str, list[str]] = {}
-    by_connection: dict[str, list[str]] = {}
-    general: list[str] = []
+) -> tuple[dict[ErrorKey, list[str]], dict[ErrorKey, list[str]], dict[str, list[str]]]:
+    """Group reported problems by (provider, account), (provider, connection), and provider."""
+
+    by_account: dict[ErrorKey, list[str]] = {}
+    by_connection: dict[ErrorKey, list[str]] = {}
+    general: dict[str, list[str]] = {}
     for error in errors:
         message = str(error.get("message") or error.get("msg") or error.get("code") or "").strip()
         if not message:
             continue
+        provider = _error_provider(error)
         account_id = str(error.get("account_id") or "")
         connection_id = str(error.get("conn_id") or error.get("connection_id") or "")
         if account_id:
-            by_account.setdefault(account_id, []).append(message)
+            by_account.setdefault((provider, account_id), []).append(message)
         elif connection_id:
-            by_connection.setdefault(connection_id, []).append(message)
+            by_connection.setdefault((provider, connection_id), []).append(message)
         else:
-            general.append(message)
+            general.setdefault(provider, []).append(message)
     return by_account, by_connection, general
 
 
 def _evaluate_one(
     account: ActualAccountInfo,
-    remote: SimpleFinAccountInfo | None,
+    remote: RemoteAccountInfo | None,
     *,
-    errors_by_account: dict[str, list[str]],
-    errors_by_connection: dict[str, list[str]],
-    general_errors: list[str],
+    errors_by_account: dict[ErrorKey, list[str]],
+    errors_by_connection: dict[ErrorKey, list[str]],
+    general_errors: dict[str, list[str]],
     now: datetime.datetime,
     today: datetime.date,
-    simplefin_configured: bool,
+    provider_configured: bool,
     have_remote_payload: bool,
     balance_stale_hours: int,
     balance_tolerance_cents: int,
@@ -335,6 +394,8 @@ def _evaluate_one(
     days_since = (
         (today - account.last_transaction_date).days if account.last_transaction_date else None
     )
+    provider = account.sync_source
+    label = provider_label(provider)
 
     health = AccountHealth(
         account_id=account.id,
@@ -343,7 +404,9 @@ def _evaluate_one(
         detail="",
         institution=remote.org_name if remote else account.bank_name,
         external_id=account.external_id,
-        sync_source=account.sync_source,
+        sync_source=provider,
+        provider_label=label if provider else "",
+        managed_by_clerk=account.managed_by_clerk,
         actual_balance_cents=account.balance_cents,
         actual_cleared_balance_cents=account.cleared_cents,
         uncleared_balance_cents=account.uncleared_cents,
@@ -363,24 +426,24 @@ def _evaluate_one(
         health.signals = ["Manual account"]
         return health
 
-    account_errors = errors_by_account.get(account.external_id, [])
+    account_errors = errors_by_account.get((provider, account.external_id), [])
     connection_errors = (
-        errors_by_connection.get(remote.connection_id, []) if remote else []
+        errors_by_connection.get((provider, remote.connection_id), []) if remote else []
     )
     reported = account_errors + connection_errors
     if reported:
         for message in reported:
             flag("error", message)
-    elif general_errors and not remote:
-        for message in general_errors:
+    elif general_errors.get(provider) and not remote:
+        for message in general_errors[provider]:
             flag("error", message)
 
-    if not simplefin_configured:
-        note("SimpleFIN is not configured in Clerk, so only Actual's own data is checked.")
+    if not provider_configured:
+        note(f"{label} is not configured in Clerk, so only Actual's own data is checked.")
     elif remote is None and have_remote_payload and not reported:
         flag(
             "missing",
-            "SimpleFIN did not return this account. The bank link was most likely removed or revoked."
+            f"{label} did not return this account. The bank link was most likely removed or revoked."
         )
 
     if remote is not None:
@@ -391,7 +454,7 @@ def _evaluate_one(
             if age_hours > balance_stale_hours:
                 flag(
                     "stale",
-                    f"SimpleFIN's balance is {age_hours / 24:.1f} days old; the bank has stopped "
+                    f"{label}'s balance is {age_hours / 24:.1f} days old; the bank has stopped "
                     "refreshing this account."
                 )
         # Compare like with like: the bank reports what it has posted, so the
@@ -410,7 +473,7 @@ def _evaluate_one(
         # Do not broadly distrust transfers or Actual's cleared flag. Apply the
         # provenance adjustment only when it explains the entire mismatch: the
         # linked source was imported from its bank, this account's generated
-        # half was not, and SimpleFIN agrees with the ledger without that half.
+        # half was not, and the provider agrees with the ledger without that half.
         if (
             transfer_count > 0
             and abs(raw_drift) > balance_tolerance_cents
