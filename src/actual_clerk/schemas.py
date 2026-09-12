@@ -39,6 +39,9 @@ class BulkResolveRequest(BaseModel):
     ids: list[str] = Field(min_length=1, max_length=2000)
     action: Literal["accept", "dismiss", "recategorize"]
     category_id: str | None = None
+    # Also declare a rule: from now on this merchant is filed here without
+    # asking, whatever the evidence says.
+    always: bool = False
 
     @model_validator(mode="after")
     def category_required_for_recategorize(self) -> BulkResolveRequest:
@@ -54,6 +57,7 @@ class ClaimSetupTokenRequest(BaseModel):
 class ResolveDecisionRequest(BaseModel):
     action: Literal["accept", "dismiss", "recategorize"]
     category_id: str | None = None
+    always: bool = False
 
     @model_validator(mode="after")
     def category_required_for_recategorize(self) -> ResolveDecisionRequest:
@@ -62,8 +66,35 @@ class ResolveDecisionRequest(BaseModel):
         return self
 
 
-class ResolveRuleRequest(BaseModel):
-    action: Literal["create", "decline"]
+class ResolveProposalRequest(BaseModel):
+    action: Literal["accept", "decline"]
+
+
+class CreateRuleRequest(BaseModel):
+    """Declare where a merchant belongs, by the name a statement shows or by key."""
+
+    merchant: str = Field(default="", max_length=200)
+    merchant_key: str = Field(default="", max_length=200)
+    category_id: str = Field(min_length=1, max_length=100)
+    account_id: str = Field(default="", max_length=100)
+    match: Literal["exact", "family"] = "exact"
+
+    @field_validator("merchant", "merchant_key")
+    @classmethod
+    def collapse(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @model_validator(mode="after")
+    def something_to_match(self) -> CreateRuleRequest:
+        if not self.merchant and not self.merchant_key:
+            raise ValueError("name the merchant")
+        return self
+
+
+class UpdateRuleRequest(BaseModel):
+    category_id: str | None = Field(default=None, max_length=100)
+    status: Literal["active", "paused", "retired"] | None = None
+    match: Literal["exact", "family"] | None = None
 
 
 class MonitoringRequest(BaseModel):

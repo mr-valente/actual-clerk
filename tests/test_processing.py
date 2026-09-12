@@ -303,21 +303,42 @@ async def test_filing_that_is_switched_off_does_nothing(manager, settings_manage
     assert manager.gateway.updates == []
 
 
-async def test_a_settled_merchant_is_promoted_to_a_rule(manager, settings_manager):
+async def test_a_settled_merchant_becomes_a_rule_proposal(manager, settings_manager):
     settings_manager.update({"ai_enabled": False, "rule_promote_after": 2})
     manager.database.record_memory("blue bottle coffee", "cat-coffee", "Coffee")
     job = await run_job(manager, "categorize")
-    assert job["result"]["rule_suggestions"] == 1
-    [suggestion] = manager.database.list_rule_suggestions()
-    assert suggestion["category_id"] == "cat-coffee"
-    assert suggestion["match_value"] == "Blue Bottle Coffee"
+    assert job["result"]["rule_proposals"] == 1
+    [proposal] = manager.database.list_proposals()
+    assert proposal["kind"] == "rule"
+    assert proposal["payload"]["category_id"] == "cat-coffee"
+    assert proposal["evidence"]["observations"] == 2
+    # Nothing was written into Actual's rules.
+    assert manager.database.list_rule_suggestions() == []
 
 
-async def test_rule_promotion_can_be_switched_off(manager, settings_manager):
+async def test_rule_proposals_can_be_switched_off(manager, settings_manager):
     settings_manager.update({"ai_enabled": False, "rule_promotion_enabled": False})
     job = await run_job(manager, "categorize")
-    assert job["result"]["rule_suggestions"] == 0
-    assert manager.database.list_rule_suggestions() == []
+    assert job["result"]["rule_proposals"] == 0
+    assert manager.database.list_proposals() == []
+
+
+async def test_a_rule_files_without_memory_and_counts_its_work(manager, settings_manager):
+    settings_manager.update({"ai_enabled": False, "apply_mode": "review"})
+    rule = manager.database.upsert_rule(
+        merchant_key="blue bottle coffee", category_id="cat-dining", category_name="Dining"
+    )
+    job = await run_job(manager, "categorize")
+    assert job["result"]["applied"] == 1
+    assert job["result"]["by_source"] == {"rule": 1}
+    assert manager.gateway.updates[0]["category_id"] == "cat-dining"
+    [recorded] = manager.database.list_decisions()
+    assert recorded["source"] == "rule"
+    assert recorded["rationale"]["rule"]["id"] == rule["id"]
+    # The rule is the user's word: it is counted, not learned from.
+    assert manager.database.get_rule(rule["id"])["applied_count"] == 1
+    assert manager.database.memory_for("blue bottle coffee") == []
+    assert manager.database.list_proposals() == []
 
 
 # ---------------------------------------------------------------- health job

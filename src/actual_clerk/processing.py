@@ -21,7 +21,7 @@ from actual_clerk import anticipated
 from actual_clerk.categorize import (
     STATUS_APPLIED,
     Categorizer,
-    rule_promotion_candidates,
+    rule_proposal_candidates,
 )
 from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
 from actual_clerk.clients.ntfy import NotificationError, NtfyClient
@@ -32,6 +32,7 @@ from actual_clerk.db import Database
 from actual_clerk.digest import build_digest, health_alert
 from actual_clerk.domain import tagging
 from actual_clerk.domain.health import evaluate_accounts, summarize
+from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook
 from actual_clerk.plaid_links import read_items, readings
 from actual_clerk.plaid_sync import PlaidSyncEngine
 from actual_clerk.reporting import (
@@ -405,6 +406,7 @@ class JobManager:
         )
 
         stored = _stored_memory(self.database, snapshot)
+        rules = RuleBook.from_rows(self.database.active_rules())
         categorizer = Categorizer(settings)
         try:
             self.database.update_job(job["id"], phase="classifying")
@@ -413,6 +415,8 @@ class JobManager:
                 today=today,
                 lookback_days=lookback,
                 stored_memory=[row for rows in stored.values() for row in rows],
+                rules=rules,
+                aliases=self.database.alias_map(),
                 exclude_transaction_ids=(
                     None
                     if retry_reviews
@@ -452,40 +456,72 @@ class JobManager:
         applied_ids = set(write_result["applied"])
         skipped = {item["id"]: item["reason"] for item in write_result["skipped"]}
 
+        rules_applied: dict[str, int] = {}
         for proposal in result.proposals:
             if proposal.status == STATUS_APPLIED and proposal.transaction_id in skipped:
                 proposal.status = "skipped"
                 proposal.rationale["skipped_reason"] = skipped[proposal.transaction_id]
             self.database.add_decision(proposal.as_decision(job["id"]))
-            if proposal.status == STATUS_APPLIED and proposal.transaction_id in applied_ids:
-                self.database.record_memory(
-                    proposal.merchant_key, proposal.category_id or "", proposal.category_name
-                )
+            if proposal.status != STATUS_APPLIED or proposal.transaction_id not in applied_ids:
+                continue
+            if proposal.source == SOURCE_RULE:
+                # A rule is the user's word already; counting its work is
+                # bookkeeping for the Intelligence page, not evidence.
+                if proposal.rule_id:
+                    rules_applied[proposal.rule_id] = rules_applied.get(proposal.rule_id, 0) + 1
+                continue
+            self.database.record_memory(
+                proposal.merchant_key, proposal.category_id or "", proposal.category_name
+            )
+        self.database.record_rules_applied(rules_applied)
 
         self.database.update_job(job["id"], current=len(applied_ids))
         promotions = 0
         if settings.rule_promotion_enabled:
-            promotions = self._suggest_rules(result.applied, stored, settings)
+            promotions = self._propose_rules(result.applied, stored, settings, rules)
 
         refreshed = await self.snapshot(today=today)
         await self._refresh_overview(refreshed, settings, today)
         summary = result.summary()
         summary["written"] = len(applied_ids)
-        summary["rule_suggestions"] = promotions
+        summary["rule_proposals"] = promotions
         summary["lookback_days"] = lookback
         summary["full_history"] = full
         summary["review_retry"] = retry_reviews
         summary["reviews_resolved"] = sum(review_resolutions.values())
         return summary
 
-    def _suggest_rules(
-        self, applied: list[Any], stored: dict[str, list[dict[str, Any]]], settings: Settings
+    def _propose_rules(
+        self,
+        applied: list[Any],
+        stored: dict[str, list[dict[str, Any]]],
+        settings: Settings,
+        rules: RuleBook,
     ) -> int:
+        """Ask for a rule wherever the evidence has become settled enough."""
         created = 0
-        for candidate in rule_promotion_candidates(
-            applied, stored, promote_after=settings.rule_promote_after
+        for candidate in rule_proposal_candidates(
+            applied, stored, promote_after=settings.rule_promote_after, rules=rules
         ):
-            if self.database.suggest_rule(**candidate):
+            proposal_id = self.database.add_proposal(
+                kind="rule",
+                merchant_key=candidate["merchant_key"],
+                payload={
+                    "merchant_key": candidate["merchant_key"],
+                    "merchant_label": candidate["merchant_label"],
+                    "category_id": candidate["category_id"],
+                    "category_name": candidate["category_name"],
+                },
+                evidence={
+                    "observations": candidate["observations"],
+                    "descriptors": candidate["descriptors"],
+                    "reason": (
+                        f"Filed as {candidate['category_name']} "
+                        f"{candidate['observations']} times without exception."
+                    ),
+                },
+            )
+            if proposal_id:
                 created += 1
         return created
 

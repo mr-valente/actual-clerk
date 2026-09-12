@@ -1,6 +1,6 @@
 # Actual Clerk architecture
 
-Actual Clerk is a sidecar. Actual Budget remains the system of record: Clerk reads the budget, writes categories, tags, and rules back through Actual's own sync protocol, and keeps only the state it needs to be durable, reviewable, and safe to retry.
+Actual Clerk is a sidecar. Actual Budget remains the system of record: Clerk reads the budget, writes categories and tags back through Actual's own sync protocol, and keeps only the state it needs to be durable, reviewable, and safe to retry. What a merchant *means* is Clerk's to know: the simple payee-to-category rules live in Clerk (see [Intelligence](intelligence/plan.md)), and Actual keeps only the rules that do something other than pick a category.
 
 ## Reference review
 
@@ -17,7 +17,7 @@ That local file is not safe for concurrent writers, so **every read and every wr
 ```text
 Browser UI
     |
-FastAPI JSON API ---- SQLite (jobs, decisions, memory, health, digests, settings)
+FastAPI JSON API ---- SQLite (jobs, decisions, rules, proposals, memory, health, digests, settings)
     |
 Single durable job worker
     +---- ActualGateway  (async serializer and worker supervisor)
@@ -69,22 +69,40 @@ Actual's server runs no scheduler of its own, so a bank sync only happens when a
 
 ## The filing cascade
 
-Clerk answers the cheapest reliable question first. A single consistent exact
-prior filing is useful enough to propose without a model call, but it remains
-review-only until it satisfies the configured observation and confidence
-thresholds; related-key matching never uses this provisional path.
+Clerk answers the cheapest reliable question first. Rules and evidence are
+read through one resolver (`domain/intelligence.py`) that the filing cascade
+and anticipated charges share; the model is only ever consulted by the
+cascade, after the resolver has nothing.
 
-1. **Memory.** Merchant descriptors are normalized to a stable key (`SQ *BLUE BOTTLE 4471`, `TST* Blue Bottle Coffee`, and `BLUE BOTTLE COFFEE #4471 OAKLAND CA` all become `blue bottle coffee`). Evidence is built from the user's own categorized history, recency-weighted with a nine-month half-life, plus Clerk's own applied decisions and any explicit corrections, which count triple. Confidence is the weighted share of the dominant category multiplied by a saturation curve over the raw sighting count — the two are tracked separately so old evidence loses influence without ceasing to be evidence.
-2. **Model.** A merchant with no usable history goes to the local model **once per merchant, not once per transaction**. The model receives the budget's existing categories as a numbered list and answers with a number, which removes every failure mode that comes from asking a small local model to reproduce a UUID. It also receives the user's own comparable filings, because a category tree is a personal document: `Costco` belongs under Groceries in one budget and Household in another. Even a high-confidence answer remains a proposal: model confidence never authorizes a first-time merchant write.
-3. **Review.** Every model proposal and anything else not settled from reliable merchant history is queued for a human rather than guessed at. Approval records memory, allowing later transactions from that merchant to use the automatic memory path when its evidence meets the configured thresholds.
+1. **Rules.** A rule is `merchant key -> category`, declared by a person: by
+   hand on the Intelligence page, by *Always* on a review, by *Make it a
+   rule* on a decision, or by accepting a proposal. Its confidence is 1.0 by
+   definition. It applies without thresholds and regardless of `apply_mode`,
+   which governs what Clerk may do with *learned* evidence. A rule may be
+   scoped to one account, and may match its merchant's store variants
+   (`family`) rather than the exact key. A rule whose category no longer
+   exists in Actual is skipped rather than repaired by guesswork.
+2. **Memory.** Merchant descriptors are normalized to a stable key (`SQ *BLUE BOTTLE 4471`, `TST* Blue Bottle Coffee`, and `BLUE BOTTLE COFFEE #4471 OAKLAND CA` all become `blue bottle coffee`). Evidence is built from the user's own categorized history, recency-weighted with a nine-month half-life, plus Clerk's own applied decisions and any explicit corrections, which count triple. Confidence is the weighted share of the dominant category multiplied by a saturation curve over the raw sighting count — the two are tracked separately so old evidence loses influence without ceasing to be evidence. A single consistent exact prior filing is proposed without a model call, but stays review-only until it satisfies the configured observation and confidence thresholds; related-key matching never uses this provisional path.
+3. **Model.** A merchant with no usable history goes to the local model **once per merchant, not once per transaction**. The model receives the budget's existing categories as a numbered list and answers with a number, which removes every failure mode that comes from asking a small local model to reproduce a UUID. It also receives the user's own comparable filings, because a category tree is a personal document: `Costco` belongs under Groceries in one budget and Household in another. Even a high-confidence answer remains a proposal: model confidence never authorizes a first-time merchant write.
+4. **Review.** Every model proposal and anything else not settled from a rule or reliable merchant history is queued for a human rather than guessed at. Approval records memory, allowing later transactions from that merchant to use the automatic memory path when its evidence meets the configured thresholds.
 
-Actual's rules are not re-implemented. Actual applies them during import, so a transaction that reaches Clerk uncategorized is one no rule claimed.
+Alias resolution runs before all four steps: a key the alias table maps to
+another (a phone notification's "Valve" for the bank's "Steam") is looked up
+under the canonical key first, then under its own.
 
-### Promotion back into Actual
+### Proposals
 
-The cascade runs in reverse too. When Clerk has filed the same merchant the same way `rule_promote_after` times, it offers to write a native Actual rule. Once that rule exists, Actual applies it on import and the answer costs nothing — no memory lookup, no model call, no Clerk involvement at all.
+The cascade runs in reverse too. When Clerk has filed the same merchant the
+same way `rule_promote_after` times by memory or approval, it records a
+*proposal* to make that a rule, shown on the Intelligence page with its
+evidence. Accepting it declares the rule; declining it closes the question
+for that merchant. Clerk never declares a rule on its own, and it no longer
+writes rules into Actual: the merchant key is what a rule matches, so a key
+that only exists after normalization is as good as any other.
 
-Promotion requires a match value that appears **verbatim** in the payee name. A key that only exists after normalization — an alias, a joined hyphen — is never promoted, because a rule that can never fire is worse than no rule. Very short matches are refused as well: a rule containing `UBER` would swallow rides and meal delivery alike.
+Transactions a rule filed are counted against the rule rather than learned
+from: the rule is already the user's word, and feeding it back into memory
+would only make the evidence agree with itself.
 
 ## Tagging
 
@@ -172,7 +190,7 @@ the bank feed remains the record. See
 - One active job per kind: a second sync request while a sync is running is a duplicate, not a queue.
 - A category the user set by hand between proposal and write always wins. Clerk's write re-reads the live transaction and skips it rather than overwriting; only an explicit human instruction from the review screen overwrites.
 - Resolving a review claims the row before writing, so a double click cannot produce a double write. A failed write hands the claim back.
-- Rule creation claims its suggestion the same way; a failure leaves the suggestion open.
+- Accepting a proposal claims it the same way; a proposal that cannot be acted on is handed back open.
 - The digest is claimed once per local date *and scheduled time*, and the claim is released if delivery fails, so neither a retry nor the next one is blocked. Keying it to the date alone made the scheduled path untestable — a digest that failed to arrive could only be tried again the following day — while giving no extra protection, because the delivery time is what a person means by "once a day". Moving the time asks for a delivery at the new time; leaving it alone still yields exactly one. A row claimed before scheduled times were recorded still blocks the whole date, so an upgrade cannot re-send a digest that already went out.
 - The morning report's header is a fixed, user-named string, carries ntfy's newspaper emoji tag, and keeps every figure in the body. A header that changes with the numbers cannot be recognised at a glance, and a body that reports everything is one nobody reads — so each block is individually switchable, including one opt-in list containing every monitored bank-linked account balance, while the alert priority is derived from the state itself and is not affected by what is displayed. The body uses bold, Markdown-compatible section labels and lists that render richly in ntfy's web app and remain understandable as plain text in phone clients.
 - Every delivered digest stores ntfy's own acknowledgement — server, topic, and message id. `delivered` alone cannot distinguish a message that reached the topic someone is watching from one accepted onto a topic nobody is subscribed to, which is precisely the question asked when a digest is recorded as sent but never seen.
@@ -184,7 +202,7 @@ the bank feed remains the record. See
 
 ## UI information architecture
 
-Four focused views: overview, review, connections, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Review groups transactions awaiting a decision by merchant, so one choice settles every transaction from that merchant, and lists rules worth promoting. Connections shows per-account health and the full transition history. Activity separates filing decisions from the longer run history with explicit tabs and opens on decisions by default.
+Five focused views: overview, review, intelligence, connections, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Review groups transactions awaiting a decision by merchant, so one choice settles every transaction from that merchant; *Always* settles it and declares a rule. Intelligence holds everything Clerk knows and everything it wants to know: the rules, the proposals waiting for an answer, and how much it has learned. Connections shows per-account health and the full transition history. Activity separates filing decisions from the longer run history with explicit tabs and opens on decisions by default.
 
 The build-free web client serves its HTML with revalidation and references its
 JavaScript, CSS, and favicon with one SHA-256 fingerprint derived from every

@@ -11,7 +11,9 @@ const state = {
   route: "overview",
   data: null,
   reviews: [],
-  rules: [],
+  intelligence: null,
+  ruleSearch: "",
+  showRetiredRules: false,
   accounts: null,
   decisions: [],
   jobs: [],
@@ -29,6 +31,7 @@ const state = {
 const pageMeta = {
   overview: ["Budget", "Overview"],
   review: ["Needs a decision", "Review"],
+  intelligence: ["What Clerk knows", "Intelligence"],
   accounts: ["Bank sync", "Connections"],
   activity: ["History", "Activity"],
   settings: ["Configuration", "Settings"],
@@ -301,18 +304,6 @@ function healthRow(item, { actions = true, toggle = false } = {}) {
   </article>`;
 }
 
-function ruleRow(item) {
-  return `<article class="data-row rule-row">
-    <span class="mark">⚡</span>
-    <div class="row-title"><strong>${escapeHtml(item.merchant_label || item.merchant_key)} → ${escapeHtml(item.category_name)}</strong><small>Matches payees containing “${escapeHtml(item.match_value)}” · ${item.observations} consistent decision(s)</small></div>
-    <div class="row-meta">Created ${relativeTime(item.created_at)}</div>
-    <div class="row-actions">
-      <button class="button ghost small" data-action="rule-decline" data-id="${escapeHtml(item.id)}">No thanks</button>
-      <button class="button primary small" data-action="rule-create" data-id="${escapeHtml(item.id)}">Create rule</button>
-    </div>
-  </article>`;
-}
-
 function jobRow(job, { actions = true } = {}) {
   const retryable = ["failed", "cancelled"].includes(job.status);
   return `<article class="data-row job-row clickable" data-action="job-detail" data-id="${escapeHtml(job.id)}">
@@ -340,7 +331,7 @@ function jobSummary(job) {
 
 function decisionRow(item) {
   return `<article class="data-row decision-row clickable" data-action="review-detail" data-id="${escapeHtml(item.id)}">
-    <span class="mark ${escapeHtml(item.source)}">${{ memory: "↺", model: "✦", unresolved: "?" }[item.source] || "•"}</span>
+    <span class="mark ${escapeHtml(item.source)}">${{ rule: "⚡", memory: "↺", model: "✦", unresolved: "?" }[item.source] || "•"}</span>
     <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${shortDate(item.transaction_date)} · <span class="money">${money(item.amount_cents)}</span> · ${escapeHtml(item.account_name)}</small></div>
     <div class="row-meta"><strong>${escapeHtml(item.category_name || item.proposed_category || "—")}</strong><br /><span>${escapeHtml(titleCase(item.source))} · ${percent(item.confidence)}</span></div>
     <div>${statusChip(item.status)}</div>
@@ -357,7 +348,8 @@ function updateChrome() {
   document.querySelectorAll("[data-route]").forEach((item) => item.classList.toggle("active", item.dataset.route === state.route));
   if (!state.data) return;
   const counts = state.data.counts || {};
-  setBadge("nav-review-count", (counts.needs_review || 0) + (counts.rule_suggestions || 0));
+  setBadge("nav-review-count", counts.needs_review || 0);
+  setBadge("nav-intelligence-count", counts.proposals || 0);
   setBadge("nav-health-count", counts.degraded_accounts || 0);
   const pill = document.querySelector("#automation-pill");
   pill.classList.toggle("off", !state.data.sync_enabled);
@@ -386,6 +378,7 @@ async function renderRoute({ quiet = false } = {}) {
     }
     if (state.route === "overview") await renderOverview();
     if (state.route === "review") await renderReview();
+    if (state.route === "intelligence") await renderIntelligence();
     if (state.route === "accounts") await renderAccounts();
     if (state.route === "activity") await renderActivity();
     if (state.route === "settings") await renderSettings();
@@ -533,24 +526,20 @@ function reviewGroupRow(group) {
       ${!group.suggestion_id && group.proposed ? `<button class="button secondary small" data-action="create-category" data-name="${escapeHtml(group.proposed)}" title="The model found no existing category for this merchant">+ ${escapeHtml(group.proposed)}</button>` : ""}
       <button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(group.items[0].id)}">Why</button>
       <button class="button ghost small" data-action="review-dismiss-group" data-ids="${escapeHtml(ids)}">Skip</button>
+      <button class="button secondary small" data-action="review-accept-group" data-always="1" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}" data-suggestion-id="${escapeHtml(suggestedId)}" title="Apply this category and make it a rule, so this merchant is always filed here without asking" ${suggestedId && group.key && !group.key.startsWith(" ") ? "" : "disabled"}>Always</button>
       <button class="button primary small" data-action="review-accept-group" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}" data-suggestion-id="${escapeHtml(suggestedId)}" ${suggestedId ? "" : "disabled"}>Apply${group.items.length > 1 ? ` ${group.items.length}` : ""}</button>
     </div>
   </article>`;
 }
 
 async function renderReview() {
-  [state.reviews, state.rules] = await Promise.all([api("/api/reviews"), api("/api/rules")]);
-  const suggestions = state.rules;
+  state.reviews = await api("/api/reviews");
   const groups = groupReviews(state.reviews);
   const allIds = state.reviews.map((item) => item.id).join(",");
   const withSuggestion = groups.filter((group) => group.suggestion_id).length;
   content.innerHTML = `
-    <section class="page-intro"><div><h2>Review</h2><p>Clerk can automatically follow reliable merchant history, but every first-time merchant requires your approval. Retry waiting items after changing the model or fixing classification; catch up older history only when you want to search beyond the normal recent window.</p></div><div class="actions"><button class="button ghost" data-action="catch-up">Catch up older history</button><button class="button primary" data-action="retry-reviews" ${state.reviews.length ? "" : "disabled"}>Retry review queue${state.reviews.length ? ` (${state.reviews.length})` : ""}</button></div></section>
-    ${suggestions.length ? `<article class="panel">
-      <header class="panel-head"><div><h2>Rules worth promoting</h2><p>Merchants Clerk has filed the same way repeatedly. A native Actual rule handles them at import, before Clerk or any model is involved.</p></div>${statusChip("suggested", `${suggestions.length} suggested`)}</header>
-      <div class="status-list">${suggestions.map(ruleRow).join("")}</div>
-    </article>` : ""}
-    <article class="panel review-panel" style="margin-top:18px">
+    <section class="page-intro"><div><h2>Review</h2><p>Clerk follows your rules and reliable merchant history on its own; every first-time merchant requires your approval. <strong>Apply</strong> files these transactions and teaches Clerk; <strong>Always</strong> also makes a rule, so the merchant is never asked about again. Retry waiting items after changing the model; catch up older history only to search beyond the normal recent window.</p></div><div class="actions"><button class="button ghost" data-action="catch-up">Catch up older history</button><button class="button primary" data-action="retry-reviews" ${state.reviews.length ? "" : "disabled"}>Retry review queue${state.reviews.length ? ` (${state.reviews.length})` : ""}</button></div></section>
+    <article class="panel review-panel">
       <header class="panel-head">
         <div><h2>Waiting on you</h2><p>${state.reviews.length} transaction${state.reviews.length === 1 ? "" : "s"} across ${groups.length} merchant${groups.length === 1 ? "" : "s"}${withSuggestion ? ` · ${withSuggestion} with a suggestion ready` : ""}</p></div>
         ${state.reviews.length ? `<div class="actions"><button class="button ghost small" data-action="review-dismiss-all" data-ids="${escapeHtml(allIds)}">Skip all ${state.reviews.length}</button></div>` : ""}
@@ -560,6 +549,129 @@ async function renderReview() {
       </div>` : ""}
       <div class="status-list">${groups.length ? groups.map(reviewGroupRow).join("") : emptyState("✓", "Nothing is waiting", "Known merchants with reliable history can be filed automatically. Every first-time merchant appears here for approval.")}</div>
     </article>`;
+}
+
+
+// --------------------------------------------------------------- intelligence
+
+function categoryOptions(categories, selectedId = "", { blank = "" } = {}) {
+  const groups = new Map();
+  for (const category of categories) {
+    const group = category.group_name || "";
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(category);
+  }
+  const options = [...groups.entries()].map(([group, items]) => `<optgroup label="${escapeHtml(group)}">${items.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === selectedId ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</optgroup>`).join("");
+  return `${blank ? `<option value="" ${selectedId ? "" : "selected"}>${escapeHtml(blank)}</option>` : ""}${options}`;
+}
+
+function proposalRow(item, categories) {
+  const body = item.payload || {};
+  const evidence = item.evidence || {};
+  const known = categories.some((category) => category.id === body.category_id);
+  const descriptors = (evidence.descriptors || []).filter((d) => d && d !== body.merchant_label).slice(0, 2);
+  const title = item.kind === "rule"
+    ? `${body.merchant_label || body.merchant_key || item.merchant_key} → ${body.category_name || "?"}`
+    : `${titleCase(item.kind)} · ${item.merchant_key}`;
+  const detail = item.kind === "rule"
+    ? `Make it a rule? ${escapeHtml(evidence.reason || "")}${descriptors.length ? ` Seen as ${escapeHtml(descriptors.join(", "))}.` : ""}${known ? "" : " The category is no longer in Actual."}`
+    : escapeHtml(evidence.reason || "");
+  return `<article class="data-row rule-row">
+    <span class="mark">?</span>
+    <div class="row-title"><strong>${escapeHtml(title)}</strong><small>${detail}</small></div>
+    <div class="row-meta">${evidence.observations ? `${evidence.observations} consistent filing(s)<br />` : ""}asked ${relativeTime(item.created_at)}</div>
+    <div class="row-actions">
+      <button class="button ghost small" data-action="proposal-decline" data-id="${escapeHtml(item.id)}">No</button>
+      <button class="button primary small" data-action="proposal-accept" data-id="${escapeHtml(item.id)}" ${item.kind === "rule" && known ? "" : "disabled"}>Make the rule</button>
+    </div>
+  </article>`;
+}
+
+function ruleRow(item, categories, accounts) {
+  const known = categories.some((category) => category.id === item.category_id);
+  const account = accounts.find((entry) => entry.id === item.account_id);
+  const scope = item.account_id ? (account ? account.name : "an account no longer in Actual") : "any account";
+  const source = { user: "made by you", proposal: "from a proposal you accepted", imported: "imported from Actual" }[item.source] || item.source;
+  const status = item.status === "active" ? (known ? ["ok", "Active"] : ["error", "Needs a category"]) : item.status === "paused" ? ["muted", "Paused"] : ["muted", "Retired"];
+  const actions = item.status === "retired"
+    ? `<button class="button ghost small" data-action="rule-status" data-status="active" data-id="${escapeHtml(item.id)}">Reinstate</button>`
+    : `${item.status === "active"
+      ? `<button class="button ghost small" data-action="rule-status" data-status="paused" data-id="${escapeHtml(item.id)}" title="Keep the rule but stop applying it">Pause</button>`
+      : `<button class="button ghost small" data-action="rule-status" data-status="active" data-id="${escapeHtml(item.id)}">Resume</button>`}
+      <button class="button ghost small" data-action="rule-status" data-status="retired" data-id="${escapeHtml(item.id)}">Retire</button>`;
+  return `<article class="data-row rule-row" data-rule-search="${escapeHtml(`${item.merchant_label} ${item.merchant_key} ${item.category_name}`.toLocaleLowerCase())}">
+    <span class="mark rule">⚡</span>
+    <div class="row-title"><strong>${escapeHtml(item.merchant_label || item.merchant_key)}</strong><small>matches “${escapeHtml(item.merchant_key)}”${item.match === "family" ? " and its store variants" : ""} · ${escapeHtml(scope)} · ${escapeHtml(source)}</small></div>
+    <div class="row-meta">${item.status === "retired"
+      ? `<strong>${escapeHtml(item.category_name || "—")}</strong>`
+      : `<select class="select-inline" data-action="rule-category" data-id="${escapeHtml(item.id)}" title="The category this rule files into">${known ? "" : `<option value="${escapeHtml(item.category_id)}" selected>${escapeHtml(item.category_name || "Missing category")} (gone)</option>`}${categoryOptions(categories, item.category_id)}</select>`}<br /><span>${item.applied_count ? `filed ${item.applied_count} · last ${relativeTime(item.last_applied_at)}` : "not used yet"}${item.disputed_count ? ` · ${item.disputed_count} disputed` : ""}</span></div>
+    <div class="health-state">${statusChip(status[0], status[1])}</div>
+    <div class="row-actions">${actions}</div>
+  </article>`;
+}
+
+function filterRuleRows() {
+  const query = state.ruleSearch.trim().toLocaleLowerCase();
+  document.querySelectorAll("[data-rule-search]").forEach((row) => {
+    row.hidden = Boolean(query) && !row.dataset.ruleSearch.includes(query);
+  });
+}
+
+async function renderIntelligence() {
+  const page = await api(`/api/intelligence${state.showRetiredRules ? "?include_retired=true" : ""}`);
+  if (state.route !== "intelligence") return;
+  state.intelligence = page;
+  const categories = page.categories || [];
+  const accounts = page.accounts || [];
+  const proposals = page.proposals || [];
+  const rules = page.rules || [];
+  const live = rules.filter((rule) => rule.status !== "retired");
+  const retired = rules.filter((rule) => rule.status === "retired");
+  const counts = page.counts || {};
+  const activeElement = document.activeElement;
+  const restoreSearchFocus = activeElement?.id === "rule-search";
+  content.innerHTML = `
+    <section class="page-intro"><div><h2>Intelligence</h2><p>Everything Clerk knows about what your transactions mean, and everything it wants to know. A <strong>rule</strong> is your word: it files a merchant without thresholds, before any evidence or model is consulted. Clerk proposes rules from what it has filed consistently, and never makes one on its own.</p></div><div class="actions"><a class="button ghost" href="#review">Review queue</a></div></section>
+    <section class="grid intel-grid" style="margin-bottom:18px">
+      <article class="metric-card"><span class="metric-icon">⚡</span><span class="metric-label">Rules</span><div class="metric-value">${counts.rules || 0}</div><span class="metric-note">${live.length - (counts.rules || 0) > 0 ? `${live.length - (counts.rules || 0)} paused · ` : ""}applied before evidence or the model</span></article>
+      <article class="metric-card ${proposals.length ? "warning" : ""}"><span class="metric-icon">?</span><span class="metric-label">Proposals</span><div class="metric-value">${proposals.length}</div><span class="metric-note">questions waiting for you</span></article>
+      <article class="metric-card"><span class="metric-icon">↺</span><span class="metric-label">Merchants learned</span><div class="metric-value">${counts.memory_merchants || 0}</div><span class="metric-note">from decisions Clerk applied or you approved</span></article>
+    </section>
+    ${proposals.length ? `<article class="panel">
+      <header class="panel-head"><div><h2>Proposals</h2><p>Merchants Clerk has filed the same way often enough to ask whether that should be a rule.</p></div>${statusChip("suggested", `${proposals.length} waiting`)}</header>
+      <div class="status-list">${proposals.map((item) => proposalRow(item, categories)).join("")}</div>
+    </article>` : ""}
+    <article class="panel" style="margin-top:18px">
+      <header class="panel-head"><div><h2>Rules</h2><p>A merchant is matched on the key its statement name becomes, so one rule covers every store number and processor prefix. Rules apply even when known merchants are set to propose-only.</p></div><div class="panel-actions"><a href="#" class="button ghost small" data-action="rules-show-retired">${state.showRetiredRules ? "Hide retired" : "Show retired"}</a></div></header>
+      <form class="toolbar" id="rule-form" autocomplete="off">
+        <input class="search-input" name="merchant" type="text" placeholder="Merchant, as the statement shows it" required maxlength="200" aria-label="Merchant" />
+        <span class="muted" id="rule-key-preview" style="font-size:10px;min-width:120px"></span>
+        <select class="select-inline" name="category_id" required aria-label="Category">${categoryOptions(categories, "", { blank: "Category…" })}</select>
+        <select class="select-inline" name="account_id" aria-label="Account scope"><option value="">Any account</option>${accounts.map((account) => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} only</option>`).join("")}</select>
+        <label class="muted" style="font-size:10px;display:flex;gap:6px;align-items:center" title="Also match keys that add a store or city to this one, e.g. “starbucks seattle” for “starbucks”"><input type="checkbox" name="family" /> store variants</label>
+        <button class="button primary small" type="submit">Add rule</button>
+      </form>
+      <div class="toolbar"><input class="search-input" id="rule-search" type="search" value="${escapeHtml(state.ruleSearch)}" placeholder="Filter rules" aria-label="Filter rules" /><span class="muted" style="font-size:11px">${live.length} rule${live.length === 1 ? "" : "s"}${retired.length ? ` · ${retired.length} retired` : ""}</span></div>
+      <div class="status-list" id="rule-list">${live.length ? live.map((item) => ruleRow(item, categories, accounts)).join("") : emptyState("⚡", "No rules yet", "Use Always on a review, Make it a rule on a decision, or add one here. Rules Clerk proposes appear above once a merchant has been filed the same way a few times.")}</div>
+      ${state.showRetiredRules && retired.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Retired</h3><p>No longer applied. Reinstate one to bring it back.</p></div></header><div class="status-list">${retired.map((item) => ruleRow(item, categories, accounts)).join("")}</div>` : ""}
+    </article>`;
+  if (state.ruleSearch) filterRuleRows();
+  if (restoreSearchFocus) {
+    const search = document.querySelector("#rule-search");
+    search?.focus();
+    search?.setSelectionRange(search.value.length, search.value.length);
+  }
+}
+
+let ruleKeyPreviewTimer = null;
+async function previewRuleKey(text) {
+  const preview = document.querySelector("#rule-key-preview");
+  if (!preview) return;
+  if (!text.trim()) { preview.textContent = ""; return; }
+  try {
+    const result = await api(`/api/intelligence/merchant?text=${encodeURIComponent(text)}`);
+    preview.textContent = result.merchant_key ? `matches “${result.merchant_key}”` : "nothing left to match on";
+  } catch { preview.textContent = ""; }
 }
 
 // ------------------------------------------------- anticipated charges
@@ -579,7 +691,7 @@ function chargeLabel(item) {
 
 function categoryChip(item) {
   if (!item.category_id) return `<span class="status-chip muted" title="No category yet: counted as discretionary until one is known">Uncategorized</span>`;
-  const how = item.category_source === "taught" ? "taught" : `from memory · ${percent(item.category_confidence || 0)}`;
+  const how = item.category_source === "taught" ? "taught" : item.category_source === "rule" ? "by a rule you set" : `from memory · ${percent(item.category_confidence || 0)}`;
   return `<span class="status-chip ok" title="${escapeHtml(how)}">${escapeHtml(item.category_name || item.category_id)}</span>`;
 }
 
@@ -854,8 +966,11 @@ async function showDecision(id) {
       <div class="resolution-actions detail-section">
         ${actualUrl ? `<a class="button ghost" href="${escapeHtml(actualUrl)}" target="_blank" rel="noreferrer">Open Actual ↗</a>` : ""}
         ${item.merchant_key ? `<button class="button ghost" data-action="forget-merchant" data-key="${escapeHtml(item.merchant_key)}">Forget this merchant</button>` : ""}
+        ${item.merchant_key && item.category_id && item.status !== "needs_review" && item.source !== "rule" ? `<button class="button secondary" data-action="rule-make" data-key="${escapeHtml(item.merchant_key)}" data-label="${escapeHtml(item.payee_name || "")}" data-category-id="${escapeHtml(item.category_id)}" title="Always file this merchant as ${escapeHtml(item.category_name)}">Make it a rule</button>` : ""}
+        ${item.status === "needs_review" && item.merchant_key && item.category_id ? `<button class="button secondary" data-action="review-accept" data-always="1" data-id="${escapeHtml(item.id)}" title="Apply the proposal and make it a rule">Apply and always</button>` : ""}
         ${item.status === "needs_review" ? `<button class="button primary" data-action="review-accept" data-id="${escapeHtml(item.id)}">Apply proposal</button>` : ""}
       </div>
+      ${rationale.rule ? `<section class="detail-section"><h3>Rule</h3><div class="change-list"><div class="change"><i>⚡</i><div><strong>Filed by a rule you set${rationale.rule.account_id ? " for this account" : ""}</strong><small>Matches “${escapeHtml(rationale.matched_key || rationale.rule.merchant_key)}”${rationale.rule.match === "family" ? " and its store variants" : ""}${rationale.alias ? `, reached through the alias “${escapeHtml(rationale.alias)}”` : ""}. <a href="#intelligence">Manage rules</a></small></div></div></div></section>` : ""}
       ${memory ? `<section class="detail-section"><h3>Memory evidence</h3><div class="change-list"><div class="change"><i>↺</i><div><strong>${memory.observations} prior sighting(s), ${percent(memory.share)} agreement</strong><small>Matched on “${escapeHtml(memory.matched_key)}”${memory.exact ? "" : " by merchant prefix"}. Confidence ${percent(memory.confidence)}.</small></div></div>${evidence.map((entry) => `<div class="change"><i>·</i><div><strong>${escapeHtml(entry.category_name || entry.category_id)}</strong><small>${percent(entry.share)} of this merchant's history · ${entry.sightings} sighting(s)</small></div></div>`).join("")}</div></section>` : ""}
       ${(rationale.examples || []).length ? `<section class="detail-section"><h3>Examples given to the model</h3><p class="muted" style="font-size:10px">${escapeHtml(rationale.examples.filter(Boolean).join(", "))}</p></section>` : ""}
       <section class="detail-section"><h3>Raw record</h3><pre class="code-block">${escapeHtml(JSON.stringify({ merchant_key: item.merchant_key, source: item.source, status: item.status, rationale }, null, 2))}</pre></section>
@@ -1311,8 +1426,8 @@ async function renderSettings() {
             ${settingInput("ai_example_count", "Examples shown to the model", s.ai_example_count, { type: "number", min: 0, max: 40, note: "Your own filed transactions, which is what makes the model match your habits." })}
             ${settingInput("category_candidate_limit", "Categories offered to the model", s.category_candidate_limit, { type: "number", min: 10, max: 400 })}
           </div>
-          ${settingToggle("rule_promotion_enabled", "Suggest Actual rules for settled merchants", "After the same merchant is filed the same way a few times, Clerk offers to write a native Actual rule so the answer costs nothing.", s.rule_promotion_enabled)}
-          <div class="form-grid">${settingInput("rule_promote_after", "Consistent decisions before suggesting a rule", s.rule_promote_after, { type: "number", min: 2, max: 25, full: true })}</div>
+          ${settingToggle("rule_promotion_enabled", "Propose rules for settled merchants", "After the same merchant is filed the same way a few times, Clerk asks under Intelligence whether to make it a rule. Only you can say yes.", s.rule_promotion_enabled)}
+          <div class="form-grid">${settingInput("rule_promote_after", "Consistent decisions before proposing a rule", s.rule_promote_after, { type: "number", min: 2, max: 25, full: true })}</div>
         </div></section>
 
         <section class="panel settings-section" id="settings-tags"><header class="panel-head"><div><h3>Tags</h3><p class="section-description">Written into transaction notes as #tags, which is how Actual stores them.</p></div></header><div class="panel-body">
@@ -1397,26 +1512,28 @@ async function enqueue(kind, label, extra = {}) {
   } catch (error) { toast(`Could not start ${label.toLowerCase()}`, error.message, "error"); }
 }
 
-async function resolveReviewGroup(idList, action, categoryId) {
+async function resolveReviewGroup(idList, action, categoryId, always = false) {
   const ids = (idList || "").split(",").filter(Boolean);
   if (!ids.length) return;
   try {
-    const body = { ids, action, ...(categoryId ? { category_id: categoryId } : {}) };
+    const body = { ids, action, always, ...(categoryId ? { category_id: categoryId } : {}) };
     const result = await api("/api/reviews/resolve", { method: "POST", body: JSON.stringify(body) });
     if (action === "dismiss") toast("Skipped", `${result.resolved} transaction(s) will not be asked about again.`);
     else if (!result.resolved) toast("Nothing to change", "Those transactions were already resolved or removed in Actual.");
+    else if (result.rules) toast("Applied, and now a rule", `${result.resolved} transaction(s) categorized. This merchant is filed here from now on; the rule lives under Intelligence.`);
     else toast("Applied in Actual", `${result.resolved} transaction(s) categorized, and Clerk will remember this merchant.`);
     closeDrawer();
     await renderRoute({ quiet: true });
   } catch (error) { toast("Could not apply", error.message, "error"); }
 }
 
-async function resolveReview(id, action, categoryId) {
+async function resolveReview(id, action, categoryId, always = false) {
   try {
-    const body = { action, ...(categoryId ? { category_id: categoryId } : {}) };
+    const body = { action, always, ...(categoryId ? { category_id: categoryId } : {}) };
     const result = await api(`/api/reviews/${id}/resolve`, { method: "POST", body: JSON.stringify(body) });
     if (result.status === "skipped") toast("Nothing to change", "The transaction was removed in Actual.");
     else if (action === "dismiss") toast("Skipped", "Clerk will not ask about this transaction again.");
+    else if (result.rule) toast("Applied, and now a rule", `${result.category_name || "Category"} saved. This merchant is filed here from now on; the rule lives under Intelligence.`);
     else toast("Applied in Actual", `${result.category_name || "Category"} saved, and Clerk will remember it.`);
     closeDrawer();
     await renderRoute({ quiet: true });
@@ -1679,7 +1796,7 @@ document.addEventListener("click", async (event) => {
     event.stopPropagation();
     const select = document.querySelector(`[data-role="review-category"][data-id="${CSS.escape(target.dataset.id)}"]`);
     const chosen = select?.value || "";
-    await resolveReview(target.dataset.id, chosen ? "recategorize" : "accept", chosen || undefined);
+    await resolveReview(target.dataset.id, chosen ? "recategorize" : "accept", chosen || undefined, target.dataset.always === "1");
   }
   if (action === "review-dismiss") { event.stopPropagation(); await resolveReview(target.dataset.id, "dismiss"); }
   if (action === "review-accept-group") {
@@ -1687,7 +1804,7 @@ document.addEventListener("click", async (event) => {
     const picker = document.querySelector(`[data-role="review-category"][data-id="${CSS.escape(target.dataset.key)}"]`);
     const chosen = picker?.dataset.value || "";
     const corrected = chosen && chosen !== (target.dataset.suggestionId || "");
-    await resolveReviewGroup(target.dataset.ids, corrected ? "recategorize" : "accept", chosen || undefined);
+    await resolveReviewGroup(target.dataset.ids, corrected ? "recategorize" : "accept", chosen || undefined, target.dataset.always === "1");
   }
   if (action === "review-dismiss-group") {
     event.stopPropagation();
@@ -1700,14 +1817,41 @@ document.addEventListener("click", async (event) => {
     await resolveReviewGroup(target.dataset.ids, "dismiss");
   }
 
-  if (action === "rule-create" || action === "rule-decline") {
-    const create = action === "rule-create";
+  if (action === "proposal-accept" || action === "proposal-decline") {
+    event.stopPropagation();
+    const accept = action === "proposal-accept";
     target.disabled = true;
     try {
-      await api(`/api/rules/${target.dataset.id}/resolve`, { method: "POST", body: JSON.stringify({ action: create ? "create" : "decline" }) });
-      toast(create ? "Rule created in Actual" : "Suggestion dismissed", create ? "Actual now applies it during import." : "");
+      await api(`/api/intelligence/proposals/${encodeURIComponent(target.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: accept ? "accept" : "decline" }) });
+      toast(accept ? "Rule made" : "Proposal declined", accept ? "This merchant is filed there from now on." : "Clerk will not ask this again.");
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not resolve the proposal", error.message, "error"); target.disabled = false; }
+  }
+  if (action === "rule-status") {
+    event.stopPropagation();
+    const next = target.dataset.status;
+    if (next === "retired" && !window.confirm("Retire this rule?\n\nClerk stops filing the merchant by it and falls back to what it has learned. The rule stays listed under retired rules so it can be reinstated.")) return;
+    target.disabled = true;
+    try {
+      await api(`/api/intelligence/rules/${encodeURIComponent(target.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ status: next }) });
+      toast({ active: "Rule active", paused: "Rule paused", retired: "Rule retired" }[next] || "Rule updated");
       await renderRoute({ quiet: true });
     } catch (error) { toast("Could not update the rule", error.message, "error"); target.disabled = false; }
+  }
+  if (action === "rule-make") {
+    event.stopPropagation();
+    target.disabled = true;
+    try {
+      const result = await api("/api/intelligence/rules", { method: "POST", body: JSON.stringify({ merchant_key: target.dataset.key, merchant: target.dataset.label || "", category_id: target.dataset.categoryId }) });
+      toast("Rule made", `${result.rule.merchant_label || result.rule.merchant_key} is filed as ${result.rule.category_name} from now on.`);
+      closeDrawer();
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not make the rule", error.message, "error"); target.disabled = false; }
+  }
+  if (action === "rules-show-retired") {
+    event.preventDefault();
+    state.showRetiredRules = !state.showRetiredRules;
+    await renderIntelligence();
   }
 
   if (action === "forget-merchant") {
@@ -1790,6 +1934,26 @@ categoryForm.addEventListener("submit", async (event) => {
 });
 
 content.addEventListener("submit", async (event) => {
+  if (event.target.id !== "rule-form") return;
+  event.preventDefault();
+  const form = event.target;
+  const data = new FormData(form);
+  const button = form.querySelector('[type="submit"]');
+  button.disabled = true;
+  try {
+    const result = await api("/api/intelligence/rules", { method: "POST", body: JSON.stringify({
+      merchant: String(data.get("merchant") || ""),
+      category_id: String(data.get("category_id") || ""),
+      account_id: String(data.get("account_id") || ""),
+      match: data.get("family") === "on" ? "family" : "exact",
+    }) });
+    toast("Rule made", `“${result.rule.merchant_key}” is filed as ${result.rule.category_name} from now on.`);
+    await renderIntelligence();
+  } catch (error) { toast("Could not make the rule", error.message, "error"); }
+  finally { button.disabled = false; }
+});
+
+content.addEventListener("submit", async (event) => {
   if (event.target.id !== "settings-form") return;
   event.preventDefault();
   const form = event.target;
@@ -1850,6 +2014,20 @@ content.addEventListener("change", async (event) => {
 });
 
 content.addEventListener("change", async (event) => {
+  const select = event.target.closest('[data-action="rule-category"]');
+  if (!select) return;
+  select.disabled = true;
+  try {
+    await api(`/api/intelligence/rules/${encodeURIComponent(select.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ category_id: select.value }) });
+    toast("Rule changed", "The next filing run uses the new category.");
+    await renderIntelligence();
+  } catch (error) {
+    toast("Could not change the rule", error.message, "error");
+    select.disabled = false;
+  }
+});
+
+content.addEventListener("change", async (event) => {
   const teach = event.target.closest('[data-action="anticipated-teach-category"]');
   if (teach) {
     teach.disabled = true;
@@ -1886,6 +2064,15 @@ content.addEventListener("input", (event) => {
     state.decisionSearch = event.target.value;
     filterDecisionRows();
   }
+  if (event.target.id === "rule-search") {
+    state.ruleSearch = event.target.value;
+    filterRuleRows();
+  }
+  if (event.target.form?.id === "rule-form" && event.target.name === "merchant") {
+    clearTimeout(ruleKeyPreviewTimer);
+    const text = event.target.value;
+    ruleKeyPreviewTimer = setTimeout(() => previewRuleKey(text), 250);
+  }
   const picker = event.target.closest(".category-picker");
   if (picker && event.target.matches('[data-role="category-picker-search"]')) {
     filterCategoryPicker(picker);
@@ -1921,6 +2108,7 @@ window.addEventListener("hashchange", navigateFromHash);
 async function pollVisibleRoute() {
   try {
     if (document.hidden || state.route === "settings" || document.querySelector(".category-picker.open")) return;
+    if (state.route === "intelligence" && document.querySelector("#rule-form [name=merchant]")?.value) return;
     if (state.route === "activity") {
       await renderActivity({ poll: true, refreshDrawer: Boolean(state.openJobId) });
     } else if (!drawer.classList.contains("open")) {

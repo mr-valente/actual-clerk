@@ -27,6 +27,7 @@ from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
 from actual_clerk.config import TIMEZONE_CHOSEN_KEY, SettingsManager, data_directory
 from actual_clerk.db import Database
 from actual_clerk.diagnostics import build_report
+from actual_clerk.domain.merchants import merchant_label, normalize_merchant
 from actual_clerk.plaid_links import describe, public_item, read_items
 from actual_clerk.plaid_sync import PlaidSyncEngine
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
@@ -35,6 +36,7 @@ from actual_clerk.schemas import (
     ClaimSetupTokenRequest,
     CreateCategoryRequest,
     CreateLinkRequest,
+    CreateRuleRequest,
     EnqueueRequest,
     ExchangeRequest,
     ForwardNotificationRequest,
@@ -44,13 +46,14 @@ from actual_clerk.schemas import (
     MonitoringRequest,
     RegisterSourceRequest,
     ResolveDecisionRequest,
-    ResolveRuleRequest,
+    ResolveProposalRequest,
     SandboxItemRequest,
     ServerTokenRequest,
     SettingsPatch,
     TeachAliasRequest,
     TeachCategoryRequest,
     UpdateLinkRequest,
+    UpdateRuleRequest,
     UpdateSourceRequest,
 )
 
@@ -135,7 +138,15 @@ def _serialize_job(job: dict[str, Any]) -> dict[str, Any]:
 
 def _serialize_record(record: dict[str, Any]) -> dict[str, Any]:
     result = dict(record)
-    for field in ("created_at", "resolved_at", "checked_at", "since", "last_seen"):
+    for field in (
+        "created_at",
+        "resolved_at",
+        "checked_at",
+        "since",
+        "last_seen",
+        "updated_at",
+        "last_applied_at",
+    ):
         if field in result:
             result[field] = _timestamp(result.get(field))
     return result
@@ -419,13 +430,6 @@ async def decision(decision_id: str, request: Request) -> dict[str, Any]:
     return _serialize_record(item)
 
 
-@app.get("/api/rules")
-async def rule_suggestions(request: Request) -> list[dict[str, Any]]:
-    return [
-        _serialize_record(item) for item in _database(request).list_rule_suggestions(limit=100)
-    ]
-
-
 @app.get("/api/jobs")
 async def list_jobs(
     request: Request,
@@ -537,16 +541,32 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
         raise
 
     applied = set(result["applied"])
+    declared: set[str] = set()
     for _decision_id, pending, category_id in claimed:
         if pending["transaction_id"] not in applied:
             continue
+        category_name = _category_name(database, category_id) or pending["category_name"]
         database.record_memory(
             pending["merchant_key"],
             category_id,
-            _category_name(database, category_id) or pending["category_name"],
+            category_name,
             correction=payload.action == "recategorize",
         )
-    return {"status": "applied", "resolved": len(applied), "skipped": len(result["skipped"])}
+        if payload.always and pending["merchant_key"] and pending["merchant_key"] not in declared:
+            declared.add(pending["merchant_key"])
+            _declare_rule(
+                database,
+                merchant_key=pending["merchant_key"],
+                merchant_label=pending.get("payee_name") or "",
+                category_id=category_id,
+                category_name=category_name,
+            )
+    return {
+        "status": "applied",
+        "resolved": len(applied),
+        "skipped": len(result["skipped"]),
+        "rules": len(declared),
+    }
 
 
 @app.post("/api/reviews/{decision_id}/resolve")
@@ -612,7 +632,21 @@ async def resolve_review(
         category_name,
         correction=payload.action == "recategorize",
     )
-    return {"status": "applied", "category_id": category_id, "category_name": category_name}
+    rule = None
+    if payload.always and pending["merchant_key"]:
+        rule = _declare_rule(
+            database,
+            merchant_key=pending["merchant_key"],
+            merchant_label=pending.get("payee_name") or "",
+            category_id=category_id,
+            category_name=category_name,
+        )
+    return {
+        "status": "applied",
+        "category_id": category_id,
+        "category_name": category_name,
+        "rule": _serialize_record(rule) if rule else None,
+    }
 
 
 def _category_name(database: Database, category_id: str) -> str:
@@ -623,28 +657,159 @@ def _category_name(database: Database, category_id: str) -> str:
     return ""
 
 
-@app.post("/api/rules/{rule_id}/resolve")
-async def resolve_rule(
-    rule_id: str, payload: ResolveRuleRequest, request: Request
+def _declare_rule(
+    database: Database,
+    *,
+    merchant_key: str,
+    category_id: str,
+    category_name: str,
+    merchant_label: str = "",
+    account_id: str = "",
+    match: str = "exact",
+    source: str = "user",
+) -> dict[str, Any] | None:
+    """Write the user's word and withdraw any open question it answers."""
+    rule = database.upsert_rule(
+        merchant_key=merchant_key,
+        category_id=category_id,
+        category_name=category_name,
+        account_id=account_id,
+        match=match,
+        merchant_label=merchant_label,
+        source=source,
+    )
+    if rule:
+        database.close_proposals_for(merchant_key, kind="rule")
+    return rule
+
+
+# --------------------------------------------------------------- intelligence
+#
+# Everything Clerk knows about what a transaction means, and everything it
+# wants to know: rules the user declared, questions Clerk is asking, and the
+# merchants and aliases it has learned. Nothing here touches Actual.
+
+
+@app.get("/api/intelligence")
+async def intelligence(
+    request: Request, include_retired: bool = Query(False)
 ) -> dict[str, Any]:
     database = _database(request)
-    if payload.action == "decline":
-        database.resolve_rule_suggestion(rule_id, "declined")
-        return {"status": "declined"}
-    suggestion = database.claim_rule_suggestion(rule_id)
-    if not suggestion:
-        raise HTTPException(status_code=409, detail="This suggestion has already been resolved")
-    try:
-        created = await _gateway(request).create_category_rule(
-            match_value=suggestion["match_value"],
-            category_id=suggestion["category_id"],
-            run_immediately=False,
+    snapshot = database.get_snapshot(OVERVIEW_SNAPSHOT) or {}
+    statuses = ("active", "paused", "retired") if include_retired else ("active", "paused")
+    return {
+        "rules": [_serialize_record(rule) for rule in database.list_rules(statuses=statuses)],
+        "proposals": [
+            _serialize_record(proposal) for proposal in database.list_proposals(limit=200)
+        ],
+        "aliases": [_serialize_record(alias) for alias in database.list_aliases()],
+        "counts": {
+            **database.counts(),
+            "memory_merchants": database.memory_size(),
+        },
+        "categories": snapshot.get("categories", []),
+        "accounts": [
+            {"id": account["id"], "name": account["name"]}
+            for account in snapshot.get("accounts", [])
+            if not account.get("closed")
+        ],
+    }
+
+
+@app.get("/api/intelligence/merchant")
+async def intelligence_merchant(text: str = Query(default="", max_length=200)) -> dict[str, Any]:
+    """Show what a merchant name becomes, so a rule is made on the key it will match."""
+    return {"merchant_key": normalize_merchant(text), "label": merchant_label(text)}
+
+
+@app.post("/api/intelligence/rules", status_code=status.HTTP_201_CREATED)
+async def create_rule(payload: CreateRuleRequest, request: Request) -> dict[str, Any]:
+    database = _database(request)
+    key = payload.merchant_key or normalize_merchant(payload.merchant)
+    if not key:
+        raise HTTPException(
+            status_code=422, detail="That name is all decoration; nothing is left to match on"
         )
-    except ActualGatewayError:
-        database.resolve_rule_suggestion(rule_id, "suggested")
-        raise
-    database.resolve_rule_suggestion(rule_id, "created")
-    return {"status": "created", "rule": created}
+    name = _category_name(database, payload.category_id)
+    if not name:
+        raise HTTPException(status_code=404, detail="That category is not in the last snapshot")
+    rule = _declare_rule(
+        database,
+        merchant_key=key,
+        merchant_label=merchant_label(payload.merchant) or key,
+        category_id=payload.category_id,
+        category_name=name,
+        account_id=payload.account_id,
+        match=payload.match,
+    )
+    return {"rule": _serialize_record(rule)}
+
+
+def _rule_or_404(request: Request, rule_id: str) -> dict[str, Any]:
+    rule = _database(request).get_rule(rule_id)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Rule not found")
+    return rule
+
+
+@app.patch("/api/intelligence/rules/{rule_id}")
+async def update_rule(rule_id: str, payload: UpdateRuleRequest, request: Request) -> dict[str, Any]:
+    database = _database(request)
+    _rule_or_404(request, rule_id)
+    changes: dict[str, Any] = {}
+    if payload.category_id is not None:
+        name = _category_name(database, payload.category_id)
+        if not name:
+            raise HTTPException(status_code=404, detail="That category is not in the last snapshot")
+        changes["category_id"] = payload.category_id
+        changes["category_name"] = name
+    if payload.status is not None:
+        changes["status"] = payload.status
+    if payload.match is not None:
+        changes["match"] = payload.match
+    return {"rule": _serialize_record(database.update_rule(rule_id, **changes))}
+
+
+@app.delete("/api/intelligence/rules/{rule_id}")
+async def retire_rule(rule_id: str, request: Request) -> dict[str, Any]:
+    """Retire a rule. The row stays, so a mistake can be undone from the page."""
+    _rule_or_404(request, rule_id)
+    rule = _database(request).update_rule(rule_id, status="retired")
+    return {"rule": _serialize_record(rule)}
+
+
+@app.post("/api/intelligence/proposals/{proposal_id}/resolve")
+async def resolve_proposal(
+    proposal_id: str, payload: ResolveProposalRequest, request: Request
+) -> dict[str, Any]:
+    database = _database(request)
+    proposal = database.claim_proposal(proposal_id)
+    if not proposal:
+        raise HTTPException(status_code=409, detail="This proposal has already been resolved")
+    if payload.action == "decline":
+        database.resolve_proposal(proposal_id, "declined")
+        return {"status": "declined"}
+    body = proposal["payload"]
+    if proposal["kind"] == "rule":
+        category_name = _category_name(database, body.get("category_id", "")) or body.get(
+            "category_name", ""
+        )
+        rule = _declare_rule(
+            database,
+            merchant_key=body.get("merchant_key") or proposal["merchant_key"],
+            merchant_label=body.get("merchant_label", ""),
+            category_id=body.get("category_id", ""),
+            category_name=category_name,
+            account_id=body.get("account_id", ""),
+            source="proposal",
+        )
+        if rule is None:
+            database.resolve_proposal(proposal_id, "open")
+            raise HTTPException(status_code=422, detail="The proposal no longer names a category")
+        database.resolve_proposal(proposal_id, "accepted")
+        return {"status": "accepted", "rule": _serialize_record(rule)}
+    database.resolve_proposal(proposal_id, "open")
+    raise HTTPException(status_code=422, detail=f"Clerk cannot act on a {proposal['kind']} proposal yet")
 
 
 @app.post("/api/categories", status_code=status.HTTP_201_CREATED)

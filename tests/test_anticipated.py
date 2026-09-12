@@ -431,6 +431,29 @@ def test_an_alias_lets_the_bank_s_history_categorize_the_phone_s_name(database, 
     assert current["category_source"] == "memory"
 
 
+def test_a_rule_categorizes_a_charge_ahead_of_contradicting_history(database, settings):
+    database.upsert_rule(merchant_key="steam", category_id="cat-coffee", category_name="Coffee")
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $19.99 at Steam was approved.",
+    )
+    anticipated.reconcile(database, steam_history(), settings, today=TODAY)
+    current = database.get_anticipated_charge(row["id"])
+    assert current["category_id"] == "cat-coffee"
+    assert current["category_source"] == "rule"
+    assert current["category_confidence"] == 1.0
+
+
+def test_a_rule_scoped_to_another_account_does_not_reach_this_charge(database, settings):
+    database.upsert_rule(merchant_key="steam", category_id="cat-coffee", account_id="acct-other")
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $19.99 at Steam was approved.",
+    )
+    anticipated.reconcile(database, steam_history(), settings, today=TODAY)
+    assert database.get_anticipated_charge(row["id"])["category_source"] == "memory"
+
+
 def test_settling_learns_the_alias_and_the_next_notification_matches_by_merchant(database, settings):
     src = source(database)
     first, _ = anticipated.record_notification(

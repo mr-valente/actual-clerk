@@ -366,52 +366,139 @@ async def test_a_missing_review_is_a_404(client):
     assert (await client.post("/api/reviews/nope/resolve", json={"action": "dismiss"})).status_code == 404
 
 
-# --------------------------------------------------------------------- rules
+# -------------------------------------------------------------- intelligence
 
 
-def rule_row(database):
-    database.suggest_rule(
-        merchant_key="blue bottle",
-        merchant_label="Blue Bottle",
-        category_id="cat-coffee",
-        category_name="Coffee",
-        match_value="BLUE BOTTLE",
-        observations=3,
+def snapshot_with_categories(client):
+    client.database.set_snapshot(
+        OVERVIEW_SNAPSHOT,
+        {
+            "budget": {},
+            "categories": [
+                {"id": "cat-coffee", "name": "Coffee", "group_name": "Everyday", "is_income": False},
+                {"id": "cat-dining", "name": "Dining", "group_name": "Everyday", "is_income": False},
+            ],
+            "accounts": [{"id": "acct-1", "name": "Checking", "closed": False}],
+            "health": [],
+        },
     )
-    return database.list_rule_suggestions()[0]
 
 
-async def test_creating_a_promoted_rule_hands_it_to_actual(client, gateway):
-    suggestion = rule_row(client.database)
-    response = await client.post(f"/api/rules/{suggestion['id']}/resolve", json={"action": "create"})
-    assert response.json()["status"] == "created"
-    assert gateway.rules == [
-        {"id": "rule-1", "match_value": "BLUE BOTTLE", "category_id": "cat-coffee"}
-    ]
-    assert (await client.get("/api/rules")).json() == []
+async def test_a_rule_is_declared_on_the_key_a_name_becomes(client):
+    snapshot_with_categories(client)
+    response = await client.post(
+        "/api/intelligence/rules",
+        json={"merchant": "SQ *BLUE BOTTLE 4471", "category_id": "cat-coffee"},
+    )
+    assert response.status_code == 201
+    rule = response.json()["rule"]
+    assert rule["merchant_key"] == "blue bottle"
+    assert rule["merchant_label"] == "SQ *BLUE BOTTLE 4471"
+    assert rule["category_name"] == "Coffee"
+    assert rule["status"] == "active"
+    assert rule["source"] == "user"
+    page = (await client.get("/api/intelligence")).json()
+    assert [item["id"] for item in page["rules"]] == [rule["id"]]
+    assert page["counts"]["rules"] == 1
+    assert [category["id"] for category in page["categories"]] == ["cat-coffee", "cat-dining"]
 
 
-async def test_declining_a_rule_leaves_actual_untouched(client, gateway):
-    suggestion = rule_row(client.database)
-    response = await client.post(f"/api/rules/{suggestion['id']}/resolve", json={"action": "decline"})
+async def test_a_rule_needs_a_category_actual_has_and_a_name_with_something_in_it(client):
+    snapshot_with_categories(client)
+    missing = await client.post(
+        "/api/intelligence/rules", json={"merchant": "Blue Bottle", "category_id": "cat-nope"}
+    )
+    assert missing.status_code == 404
+    empty = await client.post(
+        "/api/intelligence/rules", json={"merchant": "1234", "category_id": "cat-coffee"}
+    )
+    assert empty.status_code == 422
+    blank = await client.post("/api/intelligence/rules", json={"category_id": "cat-coffee"})
+    assert blank.status_code == 422
+
+
+async def test_the_key_preview_shows_what_a_name_becomes(client):
+    body = (await client.get("/api/intelligence/merchant", params={"text": "TST* Blue Bottle"})).json()
+    assert body == {"merchant_key": "blue bottle", "label": "TST* Blue Bottle"}
+
+
+async def test_a_rule_can_be_paused_recategorized_and_retired(client):
+    snapshot_with_categories(client)
+    rule = (await client.post(
+        "/api/intelligence/rules", json={"merchant": "Blue Bottle", "category_id": "cat-coffee"}
+    )).json()["rule"]
+    paused = await client.patch(f"/api/intelligence/rules/{rule['id']}", json={"status": "paused"})
+    assert paused.json()["rule"]["status"] == "paused"
+    changed = await client.patch(
+        f"/api/intelligence/rules/{rule['id']}", json={"category_id": "cat-dining", "match": "family"}
+    )
+    assert changed.json()["rule"]["category_name"] == "Dining"
+    assert changed.json()["rule"]["match"] == "family"
+    assert (await client.patch(f"/api/intelligence/rules/{rule['id']}", json={"category_id": "nope"})).status_code == 404
+    retired = await client.delete(f"/api/intelligence/rules/{rule['id']}")
+    assert retired.json()["rule"]["status"] == "retired"
+    assert (await client.get("/api/intelligence")).json()["rules"] == []
+    listed = (await client.get("/api/intelligence", params={"include_retired": "true"})).json()
+    assert listed["rules"][0]["status"] == "retired"
+    assert (await client.delete("/api/intelligence/rules/nope")).status_code == 404
+
+
+async def test_accepting_a_rule_proposal_declares_the_rule(client):
+    snapshot_with_categories(client)
+    proposal_id = client.database.add_proposal(
+        kind="rule",
+        merchant_key="blue bottle",
+        payload={"merchant_key": "blue bottle", "merchant_label": "Blue Bottle", "category_id": "cat-coffee", "category_name": "Coffee"},
+        evidence={"observations": 3},
+    )
+    page = (await client.get("/api/intelligence")).json()
+    assert page["proposals"][0]["evidence"] == {"observations": 3}
+    response = await client.post(f"/api/intelligence/proposals/{proposal_id}/resolve", json={"action": "accept"})
+    assert response.json()["status"] == "accepted"
+    assert response.json()["rule"]["source"] == "proposal"
+    assert client.database.active_rules()[0]["merchant_key"] == "blue bottle"
+    assert (await client.get("/api/intelligence")).json()["proposals"] == []
+    again = await client.post(f"/api/intelligence/proposals/{proposal_id}/resolve", json={"action": "accept"})
+    assert again.status_code == 409
+
+
+async def test_declining_a_proposal_declares_nothing(client):
+    proposal_id = client.database.add_proposal(kind="rule", merchant_key="blue bottle", payload={"category_id": "cat-coffee"})
+    response = await client.post(f"/api/intelligence/proposals/{proposal_id}/resolve", json={"action": "decline"})
     assert response.json() == {"status": "declined"}
-    assert gateway.rules == []
+    assert client.database.active_rules() == []
+    assert client.database.list_proposals(status="declined")[0]["id"] == proposal_id
 
 
-async def test_a_rule_is_created_only_once(client, gateway):
-    suggestion = rule_row(client.database)
-    await client.post(f"/api/rules/{suggestion['id']}/resolve", json={"action": "create"})
-    second = await client.post(f"/api/rules/{suggestion['id']}/resolve", json={"action": "create"})
-    assert second.status_code == 409
-    assert len(gateway.rules) == 1
+async def test_applying_a_review_with_always_declares_a_rule_and_withdraws_the_question(client, gateway):
+    snapshot_with_categories(client)
+    client.database.add_proposal(kind="rule", merchant_key="blue bottle", payload={})
+    decision_id = client.database.add_decision(decision())
+    response = await client.post(
+        f"/api/reviews/{decision_id}/resolve",
+        json={"action": "recategorize", "category_id": "cat-dining", "always": True},
+    )
+    assert response.status_code == 200
+    rule = response.json()["rule"]
+    assert rule["merchant_key"] == "blue bottle"
+    assert rule["category_id"] == "cat-dining"
+    assert gateway.updates[0]["category_id"] == "cat-dining"
+    assert client.database.list_proposals() == []
 
 
-async def test_a_failed_rule_creation_leaves_the_suggestion_open(client, gateway):
-    suggestion = rule_row(client.database)
-    gateway.error = ActualGatewayError("Actual is down")
-    response = await client.post(f"/api/rules/{suggestion['id']}/resolve", json={"action": "create"})
-    assert response.status_code == 502
-    assert len((await client.get("/api/rules")).json()) == 1
+async def test_applying_a_merchant_with_always_declares_one_rule_for_the_group(client, gateway):
+    snapshot_with_categories(client)
+    ids = [client.database.add_decision(decision(transaction_id=f"txn-{n}")) for n in range(3)]
+    response = await client.post(
+        "/api/reviews/resolve", json={"ids": ids, "action": "accept", "always": True}
+    )
+    assert response.json()["rules"] == 1
+    assert len(client.database.active_rules()) == 1
+    assert client.database.active_rules()[0]["category_id"] == "cat-coffee"
+
+
+async def test_the_old_actual_rule_endpoints_are_gone(client):
+    assert (await client.get("/api/rules")).status_code == 404
 
 
 # ------------------------------------------------------------------ settings
@@ -755,7 +842,7 @@ async def test_a_whole_merchant_is_applied_in_one_write(client, gateway):
         "/api/reviews/resolve", json={"ids": ids, "action": "accept"}
     )
     assert response.status_code == 200
-    assert response.json() == {"status": "applied", "resolved": 3, "skipped": 0}
+    assert response.json() == {"status": "applied", "resolved": 3, "skipped": 0, "rules": 0}
     assert len(gateway.updates) == 3, "one batch, not one call per transaction"
     assert {item["transaction_id"] for item in gateway.updates} == {"txn-0", "txn-1", "txn-2"}
     for decision_id in ids:

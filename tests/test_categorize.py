@@ -10,10 +10,11 @@ from actual_clerk.categorize import (
     Proposal,
     candidate_categories,
     group_by_merchant,
-    rule_promotion_candidates,
+    rule_proposal_candidates,
     select_targets,
 )
 from actual_clerk.clients.openai_compatible import ModelError
+from actual_clerk.domain.intelligence import RuleBook
 
 from .factories import FakeModel, account, category, snapshot, transaction
 
@@ -435,15 +436,16 @@ def proposal(merchant_key, label, category_id="cat-coffee", status="applied"):
     )
 
 
-def test_a_merchant_filed_enough_times_earns_a_rule():
+def test_a_merchant_filed_enough_times_earns_a_rule_proposal():
     proposals = [proposal("blue bottle coffee", "BLUE BOTTLE COFFEE 4471") for _ in range(3)]
-    [candidate] = rule_promotion_candidates(proposals, {}, promote_after=3)
+    [candidate] = rule_proposal_candidates(proposals, {}, promote_after=3)
     assert candidate["category_id"] == "cat-coffee"
-    assert candidate["match_value"] == "BLUE BOTTLE COFFEE"
+    assert candidate["merchant_key"] == "blue bottle coffee"
+    assert candidate["descriptors"] == ["BLUE BOTTLE COFFEE 4471"]
     assert candidate["observations"] == 3
 
 
-def test_prior_stored_hits_count_towards_promotion():
+def test_prior_stored_hits_count_towards_a_proposal():
     proposals = [proposal("blue bottle coffee", "BLUE BOTTLE COFFEE 4471")]
     stored = {
         "blue bottle coffee": [
@@ -451,40 +453,96 @@ def test_prior_stored_hits_count_towards_promotion():
             {"category_id": "cat-dining", "hits": 1},
         ]
     }
-    [candidate] = rule_promotion_candidates(proposals, stored, promote_after=3)
+    [candidate] = rule_proposal_candidates(proposals, stored, promote_after=3)
     assert candidate["observations"] == 5
 
 
-def test_too_little_evidence_earns_no_rule():
+def test_too_little_evidence_earns_no_proposal():
     proposals = [proposal("blue bottle coffee", "BLUE BOTTLE COFFEE 4471") for _ in range(2)]
-    assert rule_promotion_candidates(proposals, {}, promote_after=3) == []
+    assert rule_proposal_candidates(proposals, {}, promote_after=3) == []
 
 
-def test_a_merchant_filed_two_different_ways_earns_no_rule():
+def test_a_merchant_filed_two_different_ways_earns_no_proposal():
     proposals = [
         proposal("target", "TARGET 0455", category_id="cat-groceries"),
         proposal("target", "TARGET 0455", category_id="cat-dining"),
         proposal("target", "TARGET 0455", category_id="cat-groceries"),
     ]
-    assert rule_promotion_candidates(proposals, {}, promote_after=2) == []
+    assert rule_proposal_candidates(proposals, {}, promote_after=2) == []
 
 
-def test_a_rule_that_could_never_fire_is_not_offered():
-    """The alias table produces keys the statement never actually contained."""
-    proposals = [proposal("amazon", "AMZN Mktp US*2X4B95TY3") for _ in range(3)]
-    [candidate] = rule_promotion_candidates(proposals, {}, promote_after=3)
-    assert candidate["match_value"] == "AMZN Mktp"
-
-    unmatchable = [proposal("7eleven", "7-ELEVEN 33445") for _ in range(3)]
-    assert rule_promotion_candidates(unmatchable, {}, promote_after=3) == []
+def test_a_normalized_only_key_can_still_become_a_clerk_rule():
+    """Clerk rules match on the key, so an alias-produced key is as good as any."""
+    proposals = [proposal("7eleven", "7-ELEVEN 33445") for _ in range(3)]
+    [candidate] = rule_proposal_candidates(proposals, {}, promote_after=3)
+    assert candidate["merchant_key"] == "7eleven"
 
 
-def test_only_applied_proposals_count_towards_a_rule():
+def test_a_merchant_with_a_rule_is_not_asked_about_again():
+    proposals = [proposal("blue bottle coffee", "BLUE BOTTLE COFFEE") for _ in range(3)]
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "blue bottle coffee", "category_id": "cat-coffee"}])
+    assert rule_proposal_candidates(proposals, {}, promote_after=3, rules=rules) == []
+
+
+def test_transactions_filed_by_a_rule_do_not_count_towards_a_proposal():
+    proposals = [proposal("blue bottle coffee", "BLUE BOTTLE COFFEE") for _ in range(3)]
+    for item in proposals:
+        item.source = "rule"
+    assert rule_proposal_candidates(proposals, {}, promote_after=3) == []
+
+
+def test_only_applied_proposals_count_towards_a_proposal():
     proposals = [
         proposal("blue bottle coffee", "BLUE BOTTLE COFFEE", status="needs_review")
         for _ in range(4)
     ]
-    assert rule_promotion_candidates(proposals, {}, promote_after=3) == []
+    assert rule_proposal_candidates(proposals, {}, promote_after=3) == []
+
+
+# --------------------------------------------------------------------- rules
+
+
+async def test_a_rule_files_a_merchant_without_evidence_or_a_model(settings):
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "blue bottle coffee", "category_id": "cat-coffee", "category_name": "Coffee"}])
+    result = await run(settings, snapshot(transactions=pending_coffee()), rules=rules)
+    [item] = result.proposals
+    assert item.status == "applied"
+    assert item.source == "rule"
+    assert item.confidence == 1.0
+    assert item.rule_id == "r1"
+    assert item.rationale["rule"]["id"] == "r1"
+    assert result.model_calls == 0
+
+
+async def test_a_rule_applies_even_in_review_mode(settings):
+    settings = settings.model_copy(update={"apply_mode": "review"})
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "blue bottle coffee", "category_id": "cat-coffee"}])
+    result = await run(settings, snapshot(transactions=pending_coffee()), rules=rules)
+    assert result.proposals[0].status == "applied"
+
+
+async def test_a_rule_beats_contradicting_history(settings):
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "blue bottle coffee", "category_id": "cat-dining", "category_name": "Dining"}])
+    snap = snapshot(transactions=coffee_history(4) + pending_coffee())
+    result = await run(settings, snap, rules=rules)
+    assert result.proposals[0].category_id == "cat-dining"
+    assert result.proposals[0].source == "rule"
+
+
+async def test_a_rule_for_a_category_actual_no_longer_has_does_not_file(settings):
+    settings = settings.model_copy(update={"ai_enabled": False})
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "blue bottle coffee", "category_id": "cat-gone"}])
+    result = await run(settings, snapshot(transactions=pending_coffee()), rules=rules)
+    assert result.proposals[0].source == "unresolved"
+    assert result.proposals[0].status == "needs_review"
+
+
+async def test_an_alias_lets_a_rule_for_the_banks_name_file_the_other_name(settings):
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "steam", "category_id": "cat-coffee"}])
+    pending = [transaction(TODAY, -1999, payee="Valve")]
+    result = await run(settings, snapshot(transactions=pending), rules=rules, aliases={"valve": "steam"})
+    assert result.proposals[0].source == "rule"
+    assert result.proposals[0].rationale["alias"] == "steam"
 
 
 # ------------------------------------------------------------------ summary

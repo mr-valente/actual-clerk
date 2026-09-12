@@ -5,7 +5,7 @@ import sqlite3
 import threading
 import time
 import uuid
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
 ACTIVE_STATUSES = ("queued", "running", "retry_wait")
@@ -311,6 +311,49 @@ CREATE TABLE IF NOT EXISTS merchant_aliases (
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
+
+-- What the user has declared: this merchant belongs in that category. A rule
+-- is the user's word, so it carries no confidence column: it is 1.0 by
+-- definition and applies without thresholds. Only a person creates one, by
+-- hand, by accepting a proposal, or by importing it from Actual.
+CREATE TABLE IF NOT EXISTS merchant_rules (
+    id TEXT PRIMARY KEY,
+    merchant_key TEXT NOT NULL,
+    account_id TEXT NOT NULL DEFAULT '',
+    match TEXT NOT NULL DEFAULT 'exact',
+    category_id TEXT NOT NULL,
+    category_name TEXT NOT NULL DEFAULT '',
+    merchant_label TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'user',
+    status TEXT NOT NULL DEFAULT 'active',
+    actual_rule_id TEXT NOT NULL DEFAULT '',
+    actual_rule_json TEXT NOT NULL DEFAULT '',
+    actual_status TEXT NOT NULL DEFAULT '',
+    applied_count INTEGER NOT NULL DEFAULT 0,
+    disputed_count INTEGER NOT NULL DEFAULT 0,
+    last_applied_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_merchant_rules_live
+ON merchant_rules(merchant_key, account_id) WHERE status IN ('active', 'paused');
+CREATE INDEX IF NOT EXISTS ix_merchant_rules_status ON merchant_rules(status, updated_at DESC);
+
+-- What Clerk wants to know. Each row is one change Clerk would like to make
+-- to its own knowledge, with the evidence for it, waiting for a person.
+CREATE TABLE IF NOT EXISTS proposals (
+    id TEXT PRIMARY KEY,
+    kind TEXT NOT NULL,
+    merchant_key TEXT NOT NULL DEFAULT '',
+    payload_json TEXT NOT NULL DEFAULT '{}',
+    evidence_json TEXT NOT NULL DEFAULT '{}',
+    status TEXT NOT NULL DEFAULT 'open',
+    created_at REAL NOT NULL,
+    resolved_at REAL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_proposal_open
+ON proposals(kind, merchant_key) WHERE status = 'open';
+CREATE INDEX IF NOT EXISTS ix_proposals_status ON proposals(status, created_at DESC);
 """
 
 
@@ -1007,6 +1050,255 @@ class Database:
                 "UPDATE promoted_rules SET status=?, resolved_at=? WHERE id=?",
                 (status, time.time(), rule_id),
             )
+
+
+    # ---------------------------------------------------------- merchant rules
+
+    def upsert_rule(
+        self,
+        *,
+        merchant_key: str,
+        category_id: str,
+        category_name: str = "",
+        account_id: str = "",
+        match: str = "exact",
+        merchant_label: str = "",
+        source: str = "user",
+        actual_rule_id: str = "",
+        actual_rule_json: str = "",
+        actual_status: str = "",
+    ) -> dict[str, Any] | None:
+        """Declare a rule, or change the category of the live one for this merchant.
+
+        A merchant has one live rule per account scope. Declaring it again
+        changes the category (and reactivates a paused rule) rather than
+        creating a second, so the user's latest word is always the one that
+        applies.
+        """
+
+        if not merchant_key or not category_id:
+            return None
+        now = time.time()
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT id FROM merchant_rules WHERE merchant_key=? AND account_id=? "
+                "AND status IN ('active','paused')",
+                (merchant_key, account_id),
+            ).fetchone()
+            if existing:
+                connection.execute(
+                    "UPDATE merchant_rules SET category_id=?, category_name=?, match=?, "
+                    "merchant_label=CASE WHEN ?!='' THEN ? ELSE merchant_label END, "
+                    "source=?, status='active', updated_at=? WHERE id=?",
+                    (
+                        category_id,
+                        category_name,
+                        match,
+                        merchant_label,
+                        merchant_label[:120],
+                        source,
+                        now,
+                        existing["id"],
+                    ),
+                )
+                rule_id = existing["id"]
+            else:
+                rule_id = str(uuid.uuid4())
+                connection.execute(
+                    "INSERT INTO merchant_rules(id,merchant_key,account_id,match,category_id,"
+                    "category_name,merchant_label,source,status,actual_rule_id,actual_rule_json,"
+                    "actual_status,created_at,updated_at) "
+                    "VALUES(?,?,?,?,?,?,?,?,'active',?,?,?,?,?)",
+                    (
+                        rule_id,
+                        merchant_key,
+                        account_id,
+                        match,
+                        category_id,
+                        category_name,
+                        merchant_label[:120],
+                        source,
+                        actual_rule_id,
+                        actual_rule_json,
+                        actual_status,
+                        now,
+                        now,
+                    ),
+                )
+            row = connection.execute(
+                "SELECT * FROM merchant_rules WHERE id=?", (rule_id,)
+            ).fetchone()
+            connection.commit()
+        return dict(row)
+
+    def get_rule(self, rule_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM merchant_rules WHERE id=?", (rule_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_rules(
+        self, *, statuses: Sequence[str] = ("active", "paused"), limit: int = 2000
+    ) -> list[dict[str, Any]]:
+        if not statuses:
+            return []
+        placeholders = ",".join("?" for _ in statuses)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT * FROM merchant_rules WHERE status IN ({placeholders}) "
+                "ORDER BY merchant_key, account_id LIMIT ?",
+                (*statuses, limit),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def active_rules(self) -> list[dict[str, Any]]:
+        return self.list_rules(statuses=("active",))
+
+    def rules_for_merchant(self, merchant_key: str) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM merchant_rules WHERE merchant_key=? AND status IN ('active','paused') "
+                "ORDER BY account_id",
+                (merchant_key,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def update_rule(self, rule_id: str, **fields: Any) -> dict[str, Any] | None:
+        allowed = {
+            "category_id",
+            "category_name",
+            "match",
+            "status",
+            "account_id",
+            "merchant_label",
+            "actual_status",
+            "actual_rule_id",
+            "actual_rule_json",
+        }
+        changes = {key: value for key, value in fields.items() if key in allowed}
+        if not changes:
+            return self.get_rule(rule_id)
+        changes["updated_at"] = time.time()
+        assignments = ", ".join(f"{key}=?" for key in changes)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE merchant_rules SET {assignments} WHERE id=?",
+                (*changes.values(), rule_id),
+            )
+        return self.get_rule(rule_id)
+
+    def record_rules_applied(self, counts: Mapping[str, int]) -> None:
+        """Count what each rule filed in a run, so the page can show what earns its keep."""
+        if not counts:
+            return
+        now = time.time()
+        with self.connect() as connection:
+            for rule_id, count in counts.items():
+                connection.execute(
+                    "UPDATE merchant_rules SET applied_count=applied_count+?, last_applied_at=?, "
+                    "updated_at=? WHERE id=?",
+                    (int(count), now, now, rule_id),
+                )
+
+    def delete_rule(self, rule_id: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM merchant_rules WHERE id=?", (rule_id,))
+        return cursor.rowcount > 0
+
+    # --------------------------------------------------------------- proposals
+
+    def add_proposal(
+        self,
+        *,
+        kind: str,
+        merchant_key: str,
+        payload: dict[str, Any],
+        evidence: dict[str, Any] | None = None,
+    ) -> str | None:
+        """Ask the user something once; an open or declined question is not repeated."""
+        proposal_id = str(uuid.uuid4())
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT id FROM proposals WHERE kind=? AND merchant_key=? "
+                "AND status IN ('open','declined') LIMIT 1",
+                (kind, merchant_key),
+            ).fetchone()
+            if existing:
+                connection.commit()
+                return None
+            connection.execute(
+                "INSERT INTO proposals(id,kind,merchant_key,payload_json,evidence_json,status,"
+                "created_at) VALUES(?,?,?,?,?,'open',?)",
+                (
+                    proposal_id,
+                    kind,
+                    merchant_key,
+                    _json(payload),
+                    _json(evidence or {}),
+                    time.time(),
+                ),
+            )
+            connection.commit()
+        return proposal_id
+
+    def list_proposals(self, *, status: str = "open", limit: int = 200) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM proposals WHERE status=? ORDER BY created_at DESC LIMIT ?",
+                (status, limit),
+            ).fetchall()
+        return [self._proposal_row(row) for row in rows]
+
+    def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM proposals WHERE id=?", (proposal_id,)
+            ).fetchone()
+        return self._proposal_row(row) if row else None
+
+    def claim_proposal(self, proposal_id: str) -> dict[str, Any] | None:
+        """Take an open proposal so a double click cannot act on it twice."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT * FROM proposals WHERE id=? AND status='open'", (proposal_id,)
+            ).fetchone()
+            if not row:
+                connection.rollback()
+                return None
+            connection.execute(
+                "UPDATE proposals SET status='claimed' WHERE id=?", (proposal_id,)
+            )
+            connection.commit()
+        return self._proposal_row(row)
+
+    def resolve_proposal(self, proposal_id: str, status: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE proposals SET status=?, resolved_at=? WHERE id=?",
+                (status, None if status == "open" else time.time(), proposal_id),
+            )
+
+    def close_proposals_for(self, merchant_key: str, *, kind: str | None = None) -> int:
+        """Withdraw open questions a newer fact has answered (a rule was made by hand)."""
+        sql = "UPDATE proposals SET status='withdrawn', resolved_at=? WHERE merchant_key=? AND status='open'"
+        values: list[Any] = [time.time(), merchant_key]
+        if kind:
+            sql += " AND kind=?"
+            values.append(kind)
+        with self.connect() as connection:
+            cursor = connection.execute(sql, values)
+        return cursor.rowcount
+
+    @staticmethod
+    def _proposal_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["payload"] = json.loads(item.pop("payload_json"))
+        item["evidence"] = json.loads(item.pop("evidence_json"))
+        return item
 
     # ------------------------------------------------------------------ health
 
@@ -1893,8 +2185,11 @@ class Database:
                 "SELECT COUNT(*) FROM decisions WHERE status='applied' AND created_at >= ?",
                 (time.time() - 86_400,),
             ).fetchone()[0]
-            rule_suggestions = connection.execute(
-                "SELECT COUNT(*) FROM promoted_rules WHERE status='suggested'"
+            proposals = connection.execute(
+                "SELECT COUNT(*) FROM proposals WHERE status='open'"
+            ).fetchone()[0]
+            rules = connection.execute(
+                "SELECT COUNT(*) FROM merchant_rules WHERE status='active'"
             ).fetchone()[0]
             degraded = connection.execute(
                 "SELECT COUNT(*) FROM account_health WHERE status NOT IN ('ok','not_linked','muted')"
@@ -1907,7 +2202,8 @@ class Database:
             "failed_jobs": jobs.get("failed", 0),
             "needs_review": needs_review,
             "applied_today": applied_today,
-            "rule_suggestions": rule_suggestions,
+            "proposals": proposals,
+            "rules": rules,
             "degraded_accounts": degraded,
             "anticipated_open": anticipated,
         }

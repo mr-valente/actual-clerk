@@ -26,15 +26,18 @@ from actual_clerk.domain.anticipated import (
     match_charges,
     parse_notification,
 )
+from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, resolve
 from actual_clerk.domain.merchants import normalize_merchant
 
 log = logging.getLogger(__name__)
 
 # Where a provisional category came from. A taught one is the user's word and
-# is never overwritten by memory; a memory one is re-derived on every pass so
-# it follows the evidence.
+# is never overwritten by memory; a rule is the user's word too, read from the
+# rule book; a memory one is re-derived on every pass so it follows the
+# evidence.
 SOURCE_MEMORY = "memory"
 SOURCE_TAUGHT = "taught"
+# SOURCE_RULE is shared with the resolver.
 
 # Statuses an anticipation can be in. Only `open` charges count in the budget.
 OPEN = "open"
@@ -177,20 +180,21 @@ def classify(
     *,
     today: datetime.date,
 ) -> int:
-    """Give each open anticipation a provisional category from memory.
+    """Give each open anticipation a provisional category from rules and memory.
 
-    The same evidence and the same thresholds as the filing cascade's memory
-    path: the user's own filed history plus Clerk's applied decisions. A
-    notification's merchant is looked up through its alias first (the bank's
-    name for the shop is what the history was filed under), then under its own
-    key. Nothing is asked of the model; a taught category is left alone.
-    Returns how many rows changed.
+    The same resolver as the filing cascade, short of the model: a rule the
+    user declared first, then the user's own filed history plus Clerk's
+    applied decisions under the same thresholds. A notification's merchant is
+    looked up through its alias first (the bank's name for the shop is what
+    the history was filed under), then under its own key. A taught category
+    is left alone. Returns how many rows changed.
     """
 
     candidates = [row for row in rows if row.get("category_source") != SOURCE_TAUGHT]
     if not candidates:
         return 0
     aliases = database.alias_map()
+    rules = RuleBook.from_rows(database.active_rules())
     keys: set[str] = set()
     for row in candidates:
         key = str(row.get("merchant_key") or "")
@@ -218,18 +222,25 @@ def classify(
     changed = 0
     for row in candidates:
         key = str(row.get("merchant_key") or "")
-        match = None
-        for lookup_key in (aliases.get(key), key):
-            if not lookup_key:
-                continue
-            match = memory.lookup(
-                lookup_key,
+        match = (
+            resolve(
+                key,
+                account_id=str(row.get("actual_account_id") or ""),
+                rules=rules,
+                memory=memory,
+                aliases=aliases,
                 min_observations=settings.memory_min_observations,
                 min_confidence=settings.memory_min_confidence,
                 allowed_categories=set(known),
+                names=known,
             )
-            if match is not None:
-                break
+            if key
+            else None
+        )
+        # A lone exact sighting is a suggestion for a person, not a category
+        # to charge money against.
+        if match is not None and not match.automatic:
+            match = None
         if match is None:
             if row.get("category_id"):
                 database.set_anticipated_category(
@@ -237,16 +248,16 @@ def classify(
                 )
                 changed += 1
             continue
-        name = known.get(match.category_id) or match.category_name
+        source = SOURCE_RULE if match.is_rule else SOURCE_MEMORY
         if (
             row.get("category_id") != match.category_id
-            or row.get("category_source") != SOURCE_MEMORY
+            or row.get("category_source") != source
         ):
             database.set_anticipated_category(
                 row["id"],
                 category_id=match.category_id,
-                category_name=name,
-                source=SOURCE_MEMORY,
+                category_name=match.category_name,
+                source=source,
                 confidence=match.confidence,
             )
             changed += 1

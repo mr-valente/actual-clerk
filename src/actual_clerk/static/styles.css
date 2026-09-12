@@ -309,7 +309,7 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .cell-status { display: flex; justify-content: flex-start; }
 .job-row { grid-template-columns: 34px minmax(150px, 1fr) minmax(140px, .8fr) 100px auto; }
 .decision-row { grid-template-columns: 30px minmax(160px, 1.2fr) minmax(140px, .9fr) 92px 100px; }
-.rule-row { grid-template-columns: 34px minmax(180px, 1.4fr) minmax(130px, .8fr) auto; }
+.rule-row { grid-template-columns: 34px minmax(180px, 1.4fr) minmax(150px, .9fr) auto auto; }
 
 .dot { width: 11px; height: 11px; border-radius: 50%; background: var(--ink-faint); box-shadow: 0 0 0 3px var(--surface-muted); }
 .dot.ok { background: #27ab83; box-shadow: 0 0 0 3px var(--green-soft); }
@@ -319,6 +319,8 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 
 .mark { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); font-weight: 800; font-size: 12px; }
 .mark.memory { color: var(--blue); background: var(--blue-soft); }
+.mark.rule { color: var(--green); background: var(--green-soft); }
+.intel-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .mark.model { color: var(--accent); background: var(--accent-soft); }
 .mark.unresolved { color: var(--amber); background: var(--amber-soft); }
 .mark.subscription { color: var(--accent); background: var(--accent-soft); }

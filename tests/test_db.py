@@ -463,6 +463,82 @@ def test_settings_round_trip(database):
     assert database.get_setting("runtime") == '{"a":1}'
 
 
+# ---------------------------------------------------------- merchant rules
+
+
+def test_declaring_a_rule_again_changes_its_category_rather_than_doubling_it(database):
+    first = database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee", category_name="Coffee")
+    second = database.upsert_rule(merchant_key="blue bottle", category_id="cat-dining", category_name="Dining")
+    assert second["id"] == first["id"]
+    assert [row["category_id"] for row in database.active_rules()] == ["cat-dining"]
+
+
+def test_a_paused_rule_is_not_active_and_is_reactivated_by_declaring_it(database):
+    rule = database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee")
+    database.update_rule(rule["id"], status="paused")
+    assert database.active_rules() == []
+    assert database.list_rules()[0]["status"] == "paused"
+    database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee")
+    assert database.active_rules()[0]["id"] == rule["id"]
+
+
+def test_a_retired_rule_makes_room_for_a_new_one(database):
+    rule = database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee")
+    database.update_rule(rule["id"], status="retired")
+    fresh = database.upsert_rule(merchant_key="blue bottle", category_id="cat-dining")
+    assert fresh["id"] != rule["id"]
+    assert [row["id"] for row in database.list_rules(statuses=("retired",))] == [rule["id"]]
+
+
+def test_account_scoped_rules_live_beside_the_general_one(database):
+    database.upsert_rule(merchant_key="deposit", category_id="cat-income", account_id="acct-1")
+    database.upsert_rule(merchant_key="deposit", category_id="cat-misc")
+    assert len(database.rules_for_merchant("deposit")) == 2
+
+
+def test_rule_applications_are_counted(database):
+    rule = database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee")
+    database.record_rules_applied({rule["id"]: 3})
+    database.record_rules_applied({rule["id"]: 1})
+    stored = database.get_rule(rule["id"])
+    assert stored["applied_count"] == 4
+    assert stored["last_applied_at"] is not None
+
+
+def test_incomplete_rules_are_refused(database):
+    assert database.upsert_rule(merchant_key="", category_id="cat-coffee") is None
+    assert database.upsert_rule(merchant_key="x", category_id="") is None
+
+
+# --------------------------------------------------------------- proposals
+
+
+def test_a_question_is_asked_once_and_not_again_after_a_decline(database):
+    first = database.add_proposal(kind="rule", merchant_key="blue bottle", payload={"category_id": "c"})
+    assert first is not None
+    assert database.add_proposal(kind="rule", merchant_key="blue bottle", payload={}) is None
+    database.resolve_proposal(first, "declined")
+    assert database.add_proposal(kind="rule", merchant_key="blue bottle", payload={}) is None
+    # A different kind of question about the same merchant is still allowed.
+    assert database.add_proposal(kind="alias", merchant_key="blue bottle", payload={}) is not None
+
+
+def test_an_accepted_proposal_can_be_asked_again_later(database):
+    first = database.add_proposal(kind="rule", merchant_key="blue bottle", payload={})
+    assert database.claim_proposal(first) is not None
+    assert database.claim_proposal(first) is None
+    database.resolve_proposal(first, "accepted")
+    assert database.list_proposals() == []
+    assert database.add_proposal(kind="rule", merchant_key="blue bottle", payload={}) is not None
+
+
+def test_a_hand_made_rule_withdraws_the_open_question(database):
+    database.add_proposal(kind="rule", merchant_key="blue bottle", payload={})
+    assert database.close_proposals_for("blue bottle", kind="rule") == 1
+    assert database.list_proposals() == []
+    assert database.list_proposals(status="withdrawn")[0]["payload"] == {}
+
+
 # ------------------------------------------------------------------- counts
 
 
@@ -471,6 +547,8 @@ def test_dashboard_counts_reflect_the_work_outstanding(database):
     database.add_decision(decision(status="needs_review"))
     database.add_decision(decision(transaction_id="txn-2", status="applied"))
     database.suggest_rule(**rule())
+    database.add_proposal(kind="rule", merchant_key="blue bottle", payload={})
+    database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee")
     database.record_health([snapshot(status="error")])
     counts = database.counts()
     assert counts == {
@@ -478,7 +556,8 @@ def test_dashboard_counts_reflect_the_work_outstanding(database):
         "failed_jobs": 0,
         "needs_review": 1,
         "applied_today": 1,
-        "rule_suggestions": 1,
+        "proposals": 1,
+        "rules": 1,
         "degraded_accounts": 1,
         "anticipated_open": 0,
     }

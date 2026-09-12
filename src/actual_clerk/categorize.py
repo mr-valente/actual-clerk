@@ -3,38 +3,42 @@
 Clerk answers the cheapest, most reliable question first and only escalates when
 that fails:
 
-1. **Memory.** The same merchant has been filed before, in this budget, by this
+1. **Rules.** The user has said where this merchant belongs. A rule is applied
+   without thresholds and regardless of the apply mode; it is the one answer
+   Clerk never second-guesses.
+2. **Memory.** The same merchant has been filed before, in this budget, by this
    person. Recency-weighted evidence with a clear majority ends the matter.
-2. **Model.** A merchant the budget has never seen goes to the local model,
+3. **Model.** A merchant the budget has never seen goes to the local model,
    once per merchant rather than once per transaction, with the budget's own
    categories and its own filing habits as context.
-3. **Review.** Anything the first two cannot settle confidently is queued for a
-   human instead of guessed at.
+4. **Review.** Anything the first three cannot settle confidently is queued for
+   a human instead of guessed at.
 
-Actual's own rules are not re-implemented here. Actual applies them during
-import, so a transaction that reaches Clerk uncategorized is one no rule
-claimed. What Clerk does add is the reverse direction: a merchant it has
-categorized the same way several times is promoted into a real Actual rule, and
-from then on the answer costs nothing at all.
+Rules and memory are read through one resolver (`domain.intelligence`), which
+anticipated charges share. The reverse direction exists too: a merchant Clerk
+has filed the same way several times becomes a *proposal* to make a rule, so
+the user's knowledge grows from evidence without Clerk ever asserting a rule
+on its own.
 """
 
 from __future__ import annotations
 
 import datetime
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleClient
 from actual_clerk.config import Settings
 from actual_clerk.domain import tagging
+from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, resolve
 from actual_clerk.domain.memory import MerchantMemory, similar_examples
-from actual_clerk.domain.merchants import rule_match_value
 from actual_clerk.prompts import SYSTEM_PROMPT, build_user_prompt
 from actual_clerk.schemas import CATEGORY_CHOICE_SCHEMA, CategoryChoice
 
 SOURCE_MEMORY = "memory"
 SOURCE_MODEL = "model"
+# SOURCE_RULE is defined with the resolver and re-exported here for callers.
 SOURCE_UNRESOLVED = "unresolved"
 
 STATUS_APPLIED = "applied"
@@ -64,6 +68,7 @@ class Proposal:
     tags: list[str] = field(default_factory=list)
     note_tags: list[str] = field(default_factory=list)
     rationale: dict[str, Any] = field(default_factory=dict)
+    rule_id: str = ""
 
     def as_decision(self, job_id: str | None) -> dict[str, Any]:
         return {
@@ -249,6 +254,8 @@ class Categorizer:
         today: datetime.date,
         lookback_days: int | None = None,
         stored_memory: Sequence[dict[str, Any]] = (),
+        rules: RuleBook | None = None,
+        aliases: Mapping[str, str] | None = None,
         exclude_transaction_ids: set[str] | None = None,
         only_transaction_ids: set[str] | None = None,
     ) -> CategorizationResult:
@@ -286,6 +293,8 @@ class Categorizer:
                 merchant_key=merchant_key,
                 items=items,
                 memory=memory,
+                rules=rules,
+                aliases=aliases or {},
                 candidates=candidates,
                 candidate_ids=candidate_ids,
                 names=names,
@@ -320,6 +329,8 @@ class Categorizer:
         merchant_key: str,
         items: Sequence[dict[str, Any]],
         memory: MerchantMemory,
+        rules: RuleBook | None,
+        aliases: Mapping[str, str],
         candidates: Sequence[dict[str, Any]],
         candidate_ids: set[str],
         names: dict[str, str],
@@ -329,48 +340,36 @@ class Categorizer:
         settings = self.settings
         real_key = "" if merchant_key.startswith(" ") else merchant_key
 
-        match = (
-            memory.lookup(
+        # A merchant is one question, but the account can change the answer
+        # for a scoped rule; the first transaction's account stands for all.
+        account_id = str(items[0].get("account_id") or "") if items else ""
+        resolution = (
+            resolve(
                 real_key,
+                account_id=account_id,
+                rules=rules,
+                memory=memory,
+                aliases=aliases,
                 min_observations=settings.memory_min_observations,
                 min_confidence=settings.memory_min_confidence,
                 allowed_categories=candidate_ids or None,
+                names=names,
             )
             if real_key
             else None
         )
-        if match is not None:
+        if resolution is not None:
             return {
-                "source": SOURCE_MEMORY,
-                "category_id": match.category_id,
-                "category_name": names.get(match.category_id, match.category_name),
-                "confidence": match.confidence,
-                "rationale": {
-                    "memory": match.as_dict(),
-                    "evidence": memory.evidence(real_key)[:5],
-                },
-            }
-
-        suggestion = (
-            memory.exact_suggestion(real_key, allowed_categories=candidate_ids or None)
-            if real_key
-            else None
-        )
-        if suggestion is not None:
-            return {
-                "source": SOURCE_MEMORY,
-                "category_id": suggestion.category_id,
-                "category_name": names.get(suggestion.category_id, suggestion.category_name),
-                "confidence": suggestion.confidence,
-                # One exact prior filing is useful enough to propose, but not
-                # enough to bypass the configured automatic-memory thresholds.
-                "automatic_eligible": False,
-                "rationale": {
-                    "memory": suggestion.as_dict(),
-                    "evidence": memory.evidence(real_key)[:5],
-                    "provisional": True,
-                    "reason": "One exact prior filing suggests this category; approval is required.",
-                },
+                "source": resolution.source,
+                "category_id": resolution.category_id,
+                "category_name": resolution.category_name,
+                "confidence": resolution.confidence,
+                # A rule applies regardless of the apply mode; memory may
+                # apply only when the evidence meets the automatic thresholds,
+                # and a lone exact sighting is a review-only suggestion.
+                "automatic_eligible": resolution.automatic,
+                "rule_id": resolution.rule.id if resolution.rule else "",
+                "rationale": resolution.rationale,
             }
 
         model = None if result.model_abandoned else self._ensure_model()
@@ -510,8 +509,11 @@ class Categorizer:
         settings = self.settings
         category_id = resolution.get("category_id")
         confidence = float(resolution.get("confidence") or 0.0)
+        is_rule = resolution["source"] == SOURCE_RULE
         threshold = (
-            settings.memory_min_confidence
+            0.0
+            if is_rule
+            else settings.memory_min_confidence
             if resolution["source"] == SOURCE_MEMORY
             else settings.ai_min_confidence
         )
@@ -519,12 +521,15 @@ class Categorizer:
         # A model answer is a proposal, never permission to alter the budget.
         # Only this person's established filing history can auto-apply. Once a
         # model proposal is approved, that decision becomes memory for future
-        # transactions from the same merchant.
+        # transactions from the same merchant. A rule is the person's own
+        # word and is applied even when the apply mode holds memory back.
         automatic_eligible = resolution.get(
             "automatic_eligible", resolution["source"] == SOURCE_MEMORY
         )
         status = (
             STATUS_APPLIED
+            if bool(category_id) and is_rule
+            else STATUS_APPLIED
             if confident and automatic_eligible and settings.apply_mode == "automatic"
             else STATUS_REVIEW
         )
@@ -562,6 +567,7 @@ class Categorizer:
             proposed_category=resolution.get("proposed_category", ""),
             tags=tags,
             note_tags=note_tags,
+            rule_id=str(resolution.get("rule_id") or ""),
             rationale={
                 **resolution.get("rationale", {}),
                 "threshold": threshold,
@@ -571,24 +577,28 @@ class Categorizer:
         )
 
 
-def rule_promotion_candidates(
+def rule_proposal_candidates(
     proposals: Sequence[Proposal],
     stored_memory: dict[str, list[dict[str, Any]]],
     *,
     promote_after: int,
+    rules: RuleBook | None = None,
 ) -> list[dict[str, Any]]:
-    """Merchants Clerk has now filed the same way often enough to hand to Actual.
+    """Merchants Clerk has now filed the same way often enough to ask for a rule.
 
-    Promotion needs a match value that appears verbatim on the statement, so
-    merchants whose key only exists after normalization are never promoted: a
-    rule that can never fire is worse than no rule.
+    A merchant that already has a rule, or was filed by one, is not asked
+    about again; a merchant filed two different ways is not settled enough.
+    The result is a proposal for the user, never a rule: Clerk's evidence can
+    earn the question but only a person can give the answer.
     """
 
     seen: dict[str, dict[str, Any]] = {}
     for proposal in proposals:
         if proposal.status != STATUS_APPLIED or not proposal.category_id:
             continue
-        if not proposal.merchant_key:
+        if not proposal.merchant_key or proposal.source == SOURCE_RULE:
+            continue
+        if rules is not None and rules.has_merchant(proposal.merchant_key):
             continue
         entry = seen.setdefault(
             proposal.merchant_key,
@@ -620,16 +630,13 @@ def rule_promotion_candidates(
         )
         if observations < promote_after:
             continue
-        match_value = rule_match_value(*entry["descriptors"])
-        if not match_value:
-            continue
         candidates.append(
             {
                 "merchant_key": merchant_key,
                 "merchant_label": entry["merchant_label"],
                 "category_id": entry["category_id"],
                 "category_name": entry["category_name"],
-                "match_value": match_value,
+                "descriptors": entry["descriptors"][:4],
                 "observations": observations,
             }
         )

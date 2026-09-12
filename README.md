@@ -16,11 +16,12 @@ It supports OpenAI-compatible **local** endpoints only. There are no hosted AI p
 
 Clerk answers the cheapest reliable question first:
 
-1. **Memory.** Noisy descriptors are normalized to a stable merchant key — `SQ *BLUE BOTTLE 4471`, `TST* Blue Bottle Coffee`, and `BLUE BOTTLE COFFEE #4471 OAKLAND CA` are one merchant. If your own history has filed that merchant consistently, Clerk files it the same way. No model call.
-2. **The local model**, once per *merchant* rather than once per transaction, shown your existing categories as a numbered list and your own comparable filings as examples. Its answer is always a proposal for review, never permission to alter a first-time merchant quietly.
-3. **You**, for every first-time merchant and anything else Clerk cannot settle from reliable history. Clerk queues its best guess rather than guessing on your behalf.
+1. **Your rules.** Noisy descriptors are normalized to a stable merchant key — `SQ *BLUE BOTTLE 4471`, `TST* Blue Bottle Coffee`, and `BLUE BOTTLE COFFEE #4471 OAKLAND CA` are one merchant. A rule says where that merchant belongs, and it is applied without thresholds, before anything else is consulted. Rules live in Clerk, under **Intelligence**, not in Actual.
+2. **Memory.** If your own history has filed that merchant consistently, Clerk files it the same way. No model call.
+3. **The local model**, once per *merchant* rather than once per transaction, shown your existing categories as a numbered list and your own comparable filings as examples. Its answer is always a proposal for review, never permission to alter a first-time merchant quietly.
+4. **You**, for every first-time merchant and anything else Clerk cannot settle from a rule or reliable history. Clerk queues its best guess rather than guessing on your behalf. *Apply* files it and teaches Clerk; *Always* also makes it a rule.
 
-Once Clerk has filed the same merchant the same way a few times, it offers to write a **native Actual rule**. From then on Actual applies it during import and the answer costs nothing at all.
+Once Clerk has filed the same merchant the same way a few times, it **proposes a rule**. You say yes or no; Clerk never declares one on its own. [How Clerk's intelligence is organised, and how it takes the simple rules over from Actual](docs/intelligence/plan.md).
 
 ### Tags what a category cannot express
 
@@ -177,7 +178,7 @@ Clerk is deliberately conservative:
 
 - **It never overwrites a category you set.** If you categorize something between Clerk proposing and Clerk writing, your choice wins and Clerk records that it stood down.
 - **It never creates a category on its own.** When a merchant fits nowhere, it says so and offers a suggestion you can accept in one click.
-- **It never writes a rule without asking.**
+- **It never makes a rule without asking.** Rules are yours; Clerk only proposes them.
 - **It never auto-files a first-time merchant.** Model confidence is useful for ranking a proposal, not for granting permission to write it.
 - **It never touches a transaction it is unsure about.** Below the confidence threshold, the proposal goes to the review queue instead of into your budget.
 - **Everything it does is reversible from inside Actual**, because everything it touches carries the `#clerk` tag.
@@ -242,8 +243,8 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_AI_EXAMPLE_COUNT` | `8` | Your own transactions shown to the model |
 | `CLERK_CATEGORY_CANDIDATE_LIMIT` | `90` | Categories offered to the model |
 | `CLERK_ALLOW_NEW_CATEGORIES` | `false` | Surface suggestions for missing categories |
-| `CLERK_RULE_PROMOTION_ENABLED` | `true` | Offer to write native Actual rules |
-| `CLERK_RULE_PROMOTE_AFTER` | `3` | Consistent decisions before offering |
+| `CLERK_RULE_PROMOTION_ENABLED` | `true` | Propose a rule once a merchant is settled |
+| `CLERK_RULE_PROMOTE_AFTER` | `3` | Consistent decisions before proposing |
 
 ### Tags
 
