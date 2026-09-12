@@ -36,6 +36,7 @@ from actual_clerk.schemas import (
     ActualRulesRequest,
     BulkResolveRequest,
     ClaimSetupTokenRequest,
+    CreateAliasRequest,
     CreateCategoryRequest,
     CreateLinkRequest,
     CreateRuleRequest,
@@ -705,9 +706,11 @@ async def intelligence(
             _serialize_record(proposal) for proposal in database.list_proposals(limit=200)
         ],
         "aliases": [_serialize_record(alias) for alias in database.list_aliases()],
+        "merchants": [_serialize_record(item) for item in database.list_memory(limit=500)],
         "counts": {
             **database.counts(),
             "memory_merchants": database.memory_size(),
+            "aliases": len(database.list_aliases()),
         },
         "categories": snapshot.get("categories", []),
         "accounts": [
@@ -745,6 +748,39 @@ async def create_rule(payload: CreateRuleRequest, request: Request) -> dict[str,
         match=payload.match,
     )
     return {"rule": _serialize_record(rule)}
+
+
+@app.post("/api/intelligence/aliases", status_code=status.HTTP_201_CREATED)
+async def create_alias(payload: CreateAliasRequest, request: Request) -> dict[str, Any]:
+    """Teach that one name for a shop is another: the alias resolves to the merchant."""
+    alias_key = normalize_merchant(payload.alias)
+    merchant_key = normalize_merchant(payload.merchant)
+    if not alias_key or not merchant_key:
+        raise HTTPException(status_code=422, detail="One of those names is all decoration")
+    if alias_key == merchant_key:
+        raise HTTPException(status_code=422, detail="Those two names are already the same merchant")
+    database = _database(request)
+    existing = database.alias_map()
+    if merchant_key in existing or alias_key in set(existing.values()):
+        raise HTTPException(
+            status_code=422,
+            detail="That would chain aliases; point both names at the same merchant instead",
+        )
+    alias = database.upsert_alias(
+        alias_key,
+        merchant_key,
+        alias_label=merchant_label(payload.alias),
+        merchant_label=merchant_label(payload.merchant),
+        source="taught",
+    )
+    return {"alias": _serialize_record(alias)}
+
+
+@app.delete("/api/intelligence/aliases/{alias_key}")
+async def delete_alias(alias_key: str, request: Request) -> dict[str, Any]:
+    if not _database(request).delete_alias(alias_key):
+        raise HTTPException(status_code=404, detail="Alias not found")
+    return {"deleted": True}
 
 
 def _rule_or_404(request: Request, rule_id: str) -> dict[str, Any]:
@@ -1669,10 +1705,15 @@ async def anticipated_teach_category(
         name = _category_name(database, payload.category_id)
         if not name:
             raise HTTPException(status_code=404, detail="That category is not in the last snapshot")
-    anticipated.teach_category(database, row, category_id=payload.category_id, category_name=name)
+    rule = anticipated.teach_category(
+        database, row, category_id=payload.category_id, category_name=name
+    )
     with contextlib.suppress(Exception):
         await _jobs(request).refresh_now()
-    return {"charge": anticipated.public_charge(database.get_anticipated_charge(charge_id) or row)}
+    return {
+        "charge": anticipated.public_charge(database.get_anticipated_charge(charge_id) or row),
+        "rule": _serialize_record(rule) if rule else None,
+    }
 
 
 @app.post("/api/anticipated/charges/{charge_id}/alias")

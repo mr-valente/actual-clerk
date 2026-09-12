@@ -965,6 +965,38 @@ class Database:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def list_memory(self, *, limit: int = 500) -> list[dict[str, Any]]:
+        """What Clerk has learned, one row per merchant, strongest category first."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT m.merchant_key, m.category_id, m.category_name, m.hits, m.corrections, "
+                "m.last_seen, (SELECT payee_name FROM decisions d WHERE d.merchant_key=m.merchant_key "
+                "AND d.payee_name!='' ORDER BY d.created_at DESC LIMIT 1) AS label "
+                "FROM merchant_memory m ORDER BY m.merchant_key, m.hits+m.corrections*3 DESC"
+            ).fetchall()
+        merchants: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            entry = merchants.setdefault(
+                row["merchant_key"],
+                {
+                    "merchant_key": row["merchant_key"],
+                    "label": row["label"] or "",
+                    "categories": [],
+                    "last_seen": 0.0,
+                },
+            )
+            entry["categories"].append(
+                {
+                    "category_id": row["category_id"],
+                    "category_name": row["category_name"],
+                    "hits": row["hits"],
+                    "corrections": row["corrections"],
+                }
+            )
+            entry["last_seen"] = max(entry["last_seen"], float(row["last_seen"] or 0))
+        ordered = sorted(merchants.values(), key=lambda item: -item["last_seen"])
+        return ordered[:limit]
+
     def memory_size(self) -> int:
         with self.connect() as connection:
             return connection.execute(
@@ -2125,6 +2157,37 @@ class Database:
                 "SELECT * FROM merchant_aliases WHERE alias_key=?", (alias_key,)
             ).fetchone()
         return dict(row) if row else None
+
+    def learn_aliases(self, pairs: Mapping[str, Mapping[str, str]], *, source: str) -> int:
+        """Absorb aliases read from evidence, never over a taught one, never as a chain."""
+        if not pairs:
+            return 0
+        learned = 0
+        with self.connect() as connection:
+            existing_targets = {
+                row["merchant_key"]
+                for row in connection.execute("SELECT merchant_key FROM merchant_aliases")
+            }
+            alias_keys = {
+                row["alias_key"] for row in connection.execute("SELECT alias_key FROM merchant_aliases")
+            }
+        for alias_key, entry in pairs.items():
+            target = str(entry.get("merchant_key") or "")
+            if not target or alias_key == target:
+                continue
+            # The new alias must not point at a key that is itself an alias,
+            # nor turn an existing target into an alias.
+            if target in alias_keys or alias_key in existing_targets:
+                continue
+            if self.upsert_alias(
+                alias_key,
+                target,
+                alias_label=str(entry.get("alias_label") or ""),
+                merchant_label=str(entry.get("merchant_label") or ""),
+                source=source,
+            ):
+                learned += 1
+        return learned
 
     def list_aliases(self) -> list[dict[str, Any]]:
         with self.connect() as connection:

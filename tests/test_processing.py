@@ -323,6 +323,24 @@ async def test_rule_proposals_can_be_switched_off(manager, settings_manager):
     assert manager.database.list_proposals() == []
 
 
+async def test_filing_reads_the_payee_catalogue_as_aliases(manager, settings_manager):
+    settings_manager.update({"ai_enabled": False})
+    manager.gateway.snap["transactions"].append(
+        transaction(
+            TODAY - datetime.timedelta(days=3),
+            -1999,
+            payee="Steam Games",
+            description="VALVE CORP 1234",
+            category_id="cat-coffee",
+            category_name="Coffee",
+        )
+    )
+    job = await run_job(manager, "categorize")
+    assert job["result"]["aliases_learned"] == 1
+    assert manager.database.alias_map() == {"valve": "steam games"}
+    assert manager.database.list_aliases()[0]["source"] == "actual_payee"
+
+
 async def test_a_rule_files_without_memory_and_counts_its_work(manager, settings_manager):
     settings_manager.update({"ai_enabled": False, "apply_mode": "review"})
     rule = manager.database.upsert_rule(

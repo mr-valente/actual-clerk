@@ -91,6 +91,21 @@ class CreateRuleRequest(BaseModel):
         return self
 
 
+class CreateAliasRequest(BaseModel):
+    """Two names for one shop: the alias as some source shows it, the merchant as the bank posts it."""
+
+    alias: str = Field(min_length=1, max_length=200)
+    merchant: str = Field(min_length=1, max_length=200)
+
+    @field_validator("alias", "merchant")
+    @classmethod
+    def collapse(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("may not be blank")
+        return normalized
+
+
 class ActualRulesRequest(BaseModel):
     """Import, retire, or restore Actual rules: all that qualify, or the ids named."""
 

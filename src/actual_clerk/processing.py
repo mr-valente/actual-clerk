@@ -32,7 +32,12 @@ from actual_clerk.db import Database
 from actual_clerk.digest import build_digest, health_alert
 from actual_clerk.domain import tagging
 from actual_clerk.domain.health import evaluate_accounts, summarize
-from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook
+from actual_clerk.domain.intelligence import (
+    ALIAS_ACTUAL_PAYEE,
+    SOURCE_RULE,
+    RuleBook,
+    payee_aliases,
+)
 from actual_clerk.plaid_links import read_items, readings
 from actual_clerk.plaid_sync import PlaidSyncEngine
 from actual_clerk.reporting import (
@@ -407,6 +412,11 @@ class JobManager:
 
         stored = _stored_memory(self.database, snapshot)
         rules = RuleBook.from_rows(self.database.active_rules())
+        # The payee catalogue in Actual is the user's own alias table; read it
+        # first so this run already benefits from a renamed payee.
+        aliases_learned = self.database.learn_aliases(
+            payee_aliases(snapshot["transactions"]), source=ALIAS_ACTUAL_PAYEE
+        )
         categorizer = Categorizer(settings)
         try:
             self.database.update_job(job["id"], phase="classifying")
@@ -485,6 +495,7 @@ class JobManager:
         summary = result.summary()
         summary["written"] = len(applied_ids)
         summary["rule_proposals"] = promotions
+        summary["aliases_learned"] = aliases_learned
         summary["lookback_days"] = lookback
         summary["full_history"] = full
         summary["review_retry"] = retry_reviews

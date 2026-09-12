@@ -15,6 +15,7 @@ const state = {
   actualRules: null,
   actualRulesError: "",
   ruleSearch: "",
+  merchantSearch: "",
   showRetiredRules: false,
   accounts: null,
   decisions: [],
@@ -639,7 +640,7 @@ async function renderIntelligence() {
     <section class="grid intel-grid" style="margin-bottom:18px">
       <article class="metric-card"><span class="metric-icon">⚡</span><span class="metric-label">Rules</span><div class="metric-value">${counts.rules || 0}</div><span class="metric-note">${live.length - (counts.rules || 0) > 0 ? `${live.length - (counts.rules || 0)} paused · ` : ""}applied before evidence or the model</span></article>
       <article class="metric-card ${proposals.length ? "warning" : ""}"><span class="metric-icon">?</span><span class="metric-label">Proposals</span><div class="metric-value">${proposals.length}</div><span class="metric-note">questions waiting for you</span></article>
-      <article class="metric-card"><span class="metric-icon">↺</span><span class="metric-label">Merchants learned</span><div class="metric-value">${counts.memory_merchants || 0}</div><span class="metric-note">from decisions Clerk applied or you approved</span></article>
+      <article class="metric-card"><span class="metric-icon">↺</span><span class="metric-label">Merchants learned</span><div class="metric-value">${counts.memory_merchants || 0}</div><span class="metric-note">${counts.aliases || 0} alias${counts.aliases === 1 ? "" : "es"} · from decisions applied or approved</span></article>
     </section>
     ${proposals.length ? `<article class="panel">
       <header class="panel-head"><div><h2>Proposals</h2><p>Merchants Clerk has filed the same way often enough to ask whether that should be a rule.</p></div>${statusChip("suggested", `${proposals.length} waiting`)}</header>
@@ -659,8 +660,10 @@ async function renderIntelligence() {
       <div class="status-list" id="rule-list">${live.length ? live.map((item) => ruleRow(item, categories, accounts)).join("") : emptyState("⚡", "No rules yet", "Use Always on a review, Make it a rule on a decision, or add one here. Rules Clerk proposes appear above once a merchant has been filed the same way a few times.")}</div>
       ${state.showRetiredRules && retired.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Retired</h3><p>No longer applied. Reinstate one to bring it back.</p></div></header><div class="status-list">${retired.map((item) => ruleRow(item, categories, accounts)).join("")}</div>` : ""}
     </article>
+    ${merchantsPanel(page)}
     ${actualPanel()}`;
   if (state.ruleSearch) filterRuleRows();
+  if (state.merchantSearch) filterMerchantRows();
   if (restoreSearchFocus) {
     const search = document.querySelector("#rule-search");
     search?.focus();
@@ -668,6 +671,60 @@ async function renderIntelligence() {
   }
 }
 
+
+function merchantRow(item, categories) {
+  const top = item.categories[0] || {};
+  const known = categories.some((category) => category.id === top.category_id);
+  const evidence = item.categories.map((c) => `${escapeHtml(c.category_name || c.category_id)} ×${c.hits}${c.corrections ? ` (+${c.corrections} corrected)` : ""}`).join(", ");
+  return `<article class="data-row rule-row" data-merchant-search="${escapeHtml(`${item.label} ${item.merchant_key} ${item.categories.map((c) => c.category_name).join(" ")}`.toLocaleLowerCase())}">
+    <span class="mark memory">↺</span>
+    <div class="row-title"><strong>${escapeHtml(item.label || item.merchant_key)}</strong><small>“${escapeHtml(item.merchant_key)}” · ${evidence}</small></div>
+    <div class="row-meta">${item.categories.length > 1 ? `<span class="negative">filed ${item.categories.length} ways</span>` : `<strong>${escapeHtml(top.category_name || "")}</strong>`}<br /><span>last ${relativeTime(item.last_seen)}</span></div>
+    <div class="health-state">${item.rule ? statusChip("ok", "Has a rule") : ""}</div>
+    <div class="row-actions">
+      ${!item.rule && known && item.categories.length === 1 ? `<button class="button secondary small" data-action="rule-make" data-key="${escapeHtml(item.merchant_key)}" data-label="${escapeHtml(item.label || "")}" data-category-id="${escapeHtml(top.category_id)}" title="Always file this merchant as ${escapeHtml(top.category_name)}">Make it a rule</button>` : ""}
+      <button class="button ghost small" data-action="alias-teach" data-alias="${escapeHtml(item.label || item.merchant_key)}" title="Name the payee the bank posts this merchant as">Posts as…</button>
+      <button class="button ghost small" data-action="forget-merchant" data-key="${escapeHtml(item.merchant_key)}">Forget</button>
+    </div>
+  </article>`;
+}
+
+function aliasRow(alias) {
+  const source = { taught: "taught by you", settled: "learned when a charge settled", actual_payee: "from your payees in Actual", proposed: "proposed" }[alias.source] || alias.source;
+  return `<article class="data-row" style="grid-template-columns:30px minmax(0,1fr) auto" data-alias-search="${escapeHtml(`${alias.alias_label} ${alias.alias_key} ${alias.merchant_label} ${alias.merchant_key}`.toLocaleLowerCase())}">
+    <span class="dot ok"></span>
+    <div class="row-title"><strong>${escapeHtml(alias.alias_label || alias.alias_key)} → ${escapeHtml(alias.merchant_label || alias.merchant_key)}</strong><small>“${escapeHtml(alias.alias_key)}” resolves to “${escapeHtml(alias.merchant_key)}” · ${escapeHtml(source)}</small></div>
+    <div class="row-actions"><button class="button ghost small" data-action="alias-delete" data-id="${escapeHtml(alias.alias_key)}">Forget</button></div>
+  </article>`;
+}
+
+function filterMerchantRows() {
+  const query = state.merchantSearch.trim().toLocaleLowerCase();
+  document.querySelectorAll("[data-merchant-search], [data-alias-search]").forEach((row) => {
+    const haystack = row.dataset.merchantSearch ?? row.dataset.aliasSearch ?? "";
+    row.hidden = Boolean(query) && !haystack.includes(query);
+  });
+}
+
+function merchantsPanel(page) {
+  const categories = page.categories || [];
+  const merchants = page.merchants || [];
+  const aliases = page.aliases || [];
+  const ruleKeys = new Set((page.rules || []).filter((rule) => rule.status === "active").map((rule) => rule.merchant_key));
+  const rows = merchants.map((item) => ({ ...item, rule: ruleKeys.has(item.merchant_key) }));
+  return `<article class="panel" id="merchants-panel" style="margin-top:18px">
+    <header class="panel-head"><div><h2>Merchants and aliases</h2><p>What Clerk has learned without being told: the merchants it has filed or you have approved, with the evidence, and the names it knows to be one shop. An alias is followed before rules and evidence are consulted, so a rule for the bank's name reaches the phone's name too.</p></div></header>
+    <form class="toolbar" id="alias-form" autocomplete="off">
+      <input class="search-input" name="alias" type="text" placeholder="A name for the shop (as the phone or a statement shows it)" required maxlength="200" aria-label="Alias" />
+      <span class="muted" style="font-size:11px">posts as</span>
+      <input class="search-input" name="merchant" type="text" placeholder="The payee the bank posts it as" required maxlength="200" aria-label="Merchant" />
+      <button class="button primary small" type="submit">Add alias</button>
+    </form>
+    <div class="toolbar"><input class="search-input" id="merchant-search" type="search" value="${escapeHtml(state.merchantSearch)}" placeholder="Filter merchants and aliases" aria-label="Filter merchants and aliases" /><span class="muted" style="font-size:11px">${merchants.length} merchant${merchants.length === 1 ? "" : "s"} learned · ${aliases.length} alias${aliases.length === 1 ? "" : "es"}</span></div>
+    <div class="status-list">${rows.length ? rows.map((item) => merchantRow(item, categories)).join("") : emptyState("↺", "Nothing learned yet", "Clerk records a merchant here when it applies a category or you approve one in Review.")}</div>
+    ${aliases.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Aliases</h3><p>One shop, several names.</p></div></header><div class="status-list">${aliases.map(aliasRow).join("")}</div>` : ""}
+  </article>`;
+}
 
 function actualRuleRow(rule) {
   const move = rule.disposition === "move";
@@ -781,7 +838,7 @@ function teachControls(item, categories, aliases) {
   }
   const options = [...groups.entries()].map(([group, items]) => `<optgroup label="${escapeHtml(group)}">${items.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === item.category_id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</optgroup>`).join("");
   const alias = aliases.find((a) => a.alias_key === item.merchant_key);
-  return `<select class="select-inline" data-action="anticipated-teach-category" data-id="${escapeHtml(item.id)}" title="Teach Clerk where this merchant belongs; remembered for next time and for the bank's row when it lands"><option value="" ${item.category_id ? "" : "selected"}>Teach a category…</option>${options}</select>
+  return `<select class="select-inline" data-action="anticipated-teach-category" data-id="${escapeHtml(item.id)}" title="Always file this merchant here: a rule is made for it, for the bank's row when it lands, and for the next notification"><option value="" ${item.category_id ? "" : "selected"}>Always file as…</option>${options}</select>
     <button class="button ghost small" data-action="anticipated-teach-alias" data-id="${escapeHtml(item.id)}" data-merchant="${escapeHtml(item.merchant || "")}" title="${alias ? `Posts as ${escapeHtml(alias.merchant_label || alias.merchant_key)}` : "Name the payee the bank posts this merchant as"}">${alias ? `Posts as ${escapeHtml((alias.merchant_label || alias.merchant_key).slice(0, 18))}` : "Posts as…"}</button>`;
 }
 
@@ -850,7 +907,7 @@ function phonePanel(phone) {
       : emptyState("📱", "No phone sources yet", "Install the Actual Clerk phone app, point it at this server, and use Register a source to pick the card app's notification.")}</div>
     ${open.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Waiting for the bank</h3><p>Counted as spent now, against the provisional category when one is known (from your history, or taught here) and against free money otherwise. Each settles against the matching transaction when it is imported.</p></div></header><div class="status-list">${open.map((item) => anticipatedChargeRow(item, { sources, categories, aliases })).join("")}</div>` : ""}
     ${recent.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Recently settled</h3><p>What the last notifications became.</p></div></header><div class="status-list">${recent.map((item) => anticipatedChargeRow(item, { sources })).join("")}</div>` : ""}
-    ${aliases.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Merchant aliases</h3><p>How the card app names a shop versus how the bank posts it; learned when a charge settles, or taught.</p></div></header><div class="status-list">${aliases.map((alias) => `<article class="data-row" style="grid-template-columns:30px minmax(0,1fr) auto"><span class="dot ok"></span><div class="row-title"><strong>${escapeHtml(alias.alias_label || alias.alias_key)} → ${escapeHtml(alias.merchant_label || alias.merchant_key)}</strong><small>${escapeHtml(alias.alias_key)} → ${escapeHtml(alias.merchant_key)} · ${escapeHtml(alias.source)}</small></div><div class="row-actions"><button class="button ghost small" data-action="anticipated-alias-delete" data-id="${escapeHtml(alias.alias_key)}">Forget</button></div></article>`).join("")}</div>` : ""}
+    ${aliases.length ? `<p class="muted" style="margin:12px 20px;font-size:11px">${aliases.length} merchant alias${aliases.length === 1 ? "" : "es"} known · <a href="#intelligence">manage them under Intelligence</a></p>` : ""}
   </article>`;
 }
 
@@ -1949,6 +2006,23 @@ document.addEventListener("click", async (event) => {
     } catch (error) { toast(`Could not ${kind}`, error.message, "error"); }
     finally { target.disabled = false; }
   }
+  if (action === "alias-teach") {
+    event.stopPropagation();
+    const payee = window.prompt(`What payee does the bank post "${target.dataset.alias}" as? Type it as it appears in Actual.`);
+    if (!payee || !payee.trim()) return;
+    try {
+      const result = await api("/api/intelligence/aliases", { method: "POST", body: JSON.stringify({ alias: target.dataset.alias, merchant: payee.trim() }) });
+      toast("Alias taught", `“${result.alias.alias_key}” now resolves to “${result.alias.merchant_key}”.`);
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not teach the alias", error.message, "error"); }
+  }
+  if (action === "alias-delete") {
+    event.stopPropagation();
+    try {
+      await api(`/api/intelligence/aliases/${encodeURIComponent(target.dataset.id)}`, { method: "DELETE" });
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not forget the alias", error.message, "error"); }
+  }
   if (action === "rules-show-retired") {
     event.preventDefault();
     state.showRetiredRules = !state.showRetiredRules;
@@ -1956,9 +2030,11 @@ document.addEventListener("click", async (event) => {
   }
 
   if (action === "forget-merchant") {
+    event.stopPropagation();
     try {
       await api(`/api/memory/${encodeURIComponent(target.dataset.key)}`, { method: "DELETE" });
       toast("Merchant forgotten", "Clerk will work this merchant out again from scratch.");
+      if (state.route === "intelligence") await renderIntelligence();
     } catch (error) { toast("Could not forget the merchant", error.message, "error"); }
   }
 
@@ -2031,6 +2107,21 @@ categoryForm.addEventListener("submit", async (event) => {
     categoryDialog.close(); categoryForm.reset();
     await renderRoute({ quiet: true });
   } catch (error) { toast("Could not create the category", error.message, "error"); }
+  finally { button.disabled = false; }
+});
+
+content.addEventListener("submit", async (event) => {
+  if (event.target.id !== "alias-form") return;
+  event.preventDefault();
+  const form = event.target;
+  const data = new FormData(form);
+  const button = form.querySelector('[type="submit"]');
+  button.disabled = true;
+  try {
+    const result = await api("/api/intelligence/aliases", { method: "POST", body: JSON.stringify({ alias: String(data.get("alias") || ""), merchant: String(data.get("merchant") || "") }) });
+    toast("Alias taught", `“${result.alias.alias_key}” now resolves to “${result.alias.merchant_key}”.`);
+    await renderIntelligence();
+  } catch (error) { toast("Could not teach the alias", error.message, "error"); }
   finally { button.disabled = false; }
 });
 
@@ -2134,7 +2225,7 @@ content.addEventListener("change", async (event) => {
     teach.disabled = true;
     try {
       await api(`/api/anticipated/charges/${encodeURIComponent(teach.dataset.id)}/category`, { method: "POST", body: JSON.stringify({ category_id: teach.value }) });
-      toast(teach.value ? "Category taught" : "Category cleared", teach.value ? "Counted against that category now, and remembered for the merchant." : "Memory decides again.");
+      toast(teach.value ? "Rule made" : "Category cleared", teach.value ? "Counted against that category now, and this merchant is always filed there from now on." : "The rule is retired; rules and memory decide again.");
       await renderRoute({ quiet: true });
     } catch (error) {
       toast("Could not teach the category", error.message, "error");
@@ -2168,6 +2259,10 @@ content.addEventListener("input", (event) => {
   if (event.target.id === "rule-search") {
     state.ruleSearch = event.target.value;
     filterRuleRows();
+  }
+  if (event.target.id === "merchant-search") {
+    state.merchantSearch = event.target.value;
+    filterMerchantRows();
   }
   if (event.target.form?.id === "rule-form" && event.target.name === "merchant") {
     clearTimeout(ruleKeyPreviewTimer);
@@ -2209,7 +2304,7 @@ window.addEventListener("hashchange", navigateFromHash);
 async function pollVisibleRoute() {
   try {
     if (document.hidden || state.route === "settings" || document.querySelector(".category-picker.open")) return;
-    if (state.route === "intelligence" && document.querySelector("#rule-form [name=merchant]")?.value) return;
+    if (state.route === "intelligence" && (document.querySelector("#rule-form [name=merchant]")?.value || document.querySelector("#alias-form [name=alias]")?.value || document.querySelector("#alias-form [name=merchant]")?.value)) return;
     if (state.route === "activity") {
       await renderActivity({ poll: true, refreshDrawer: Boolean(state.openJobId) });
     } else if (!drawer.classList.contains("open")) {

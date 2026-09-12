@@ -88,7 +88,13 @@ cascade, after the resolver has nothing.
 
 Alias resolution runs before all four steps: a key the alias table maps to
 another (a phone notification's "Valve" for the bank's "Steam") is looked up
-under the canonical key first, then under its own.
+under the canonical key first, then under its own. Aliases come from three
+places: taught by hand, learned when an anticipated charge settled against a
+row with a different name, and read from the payee catalogue in Actual on
+every filing run, where a bank descriptor that the user settled on a
+differently named payee is an alias the user curated without calling it
+one. Only unambiguous pairs are read, and the table never chains: an alias
+points at a merchant, never at another alias.
 
 ### Proposals
 
@@ -171,7 +177,8 @@ app build) and stores one *anticipated charge* per notification in its own
 SQLite. Each open charge is given a provisional category through the same
 memory the filing cascade uses (history plus applied decisions, same
 thresholds, no model), looked up through a learned merchant alias first; the
-user can teach a category or an alias, and teaching writes memory. A
+user can set a category or an alias by hand, and a category set by hand is a
+rule. A
 categorized charge is charged to its category as a posted row would be, so a
 budgeted bill draws on its budget; an uncategorized one is discretionary.
 Free money is untouched. Every path that rebuilds

@@ -524,6 +524,34 @@ async def test_applying_a_merchant_with_always_declares_one_rule_for_the_group(c
     assert client.database.active_rules()[0]["category_id"] == "cat-coffee"
 
 
+async def test_an_alias_can_be_taught_listed_and_forgotten(client):
+    response = await client.post("/api/intelligence/aliases", json={"alias": "VALVE", "merchant": "Steam Games"})
+    assert response.status_code == 201
+    assert response.json()["alias"]["alias_key"] == "valve"
+    assert response.json()["alias"]["merchant_key"] == "steam games"
+    assert response.json()["alias"]["source"] == "taught"
+    page = (await client.get("/api/intelligence")).json()
+    assert [a["alias_key"] for a in page["aliases"]] == ["valve"]
+    assert page["counts"]["aliases"] == 1
+    same = await client.post("/api/intelligence/aliases", json={"alias": "Steam", "merchant": "STEAM #1"})
+    assert same.status_code == 422
+    chain = await client.post("/api/intelligence/aliases", json={"alias": "Steam Games", "merchant": "Valve Corp"})
+    assert chain.status_code == 422
+    assert (await client.delete("/api/intelligence/aliases/valve")).json() == {"deleted": True}
+    assert (await client.delete("/api/intelligence/aliases/valve")).status_code == 404
+
+
+async def test_the_page_lists_what_clerk_has_learned(client):
+    client.database.record_memory("blue bottle", "cat-coffee", "Coffee")
+    client.database.add_decision(decision(status="applied"))
+    page = (await client.get("/api/intelligence")).json()
+    [merchant] = page["merchants"]
+    assert merchant["merchant_key"] == "blue bottle"
+    assert merchant["label"] == "Blue Bottle"
+    assert merchant["categories"][0]["category_name"] == "Coffee"
+    assert merchant["last_seen"] is not None
+
+
 async def test_the_old_actual_rule_endpoints_are_gone(client):
     assert (await client.get("/api/rules")).status_code == 404
 

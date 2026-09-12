@@ -388,6 +388,7 @@ Done: see [stage-2.md](stage-2.md).
 read as alias evidence, canonicalization in the resolver for both the
 cascade and anticipated charges, the Merchants section of the Intelligence page,
 "teach" on a charge unified with "create rule".
+Done: see [stage-3.md](stage-3.md).
 
 **Stage 4: learning from Actual.** Applied-decision observation, corrections
 and disputes, rule-change and retire proposals, category repair, the digest

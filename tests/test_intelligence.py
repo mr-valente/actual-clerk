@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import datetime
 
-from actual_clerk.domain.intelligence import Rule, RuleBook, canonical_key, resolve
+from actual_clerk.domain.intelligence import (
+    Rule,
+    RuleBook,
+    canonical_key,
+    payee_aliases,
+    resolve,
+)
 from actual_clerk.domain.memory import MerchantMemory
 
 TODAY = datetime.date(2026, 8, 21)
@@ -158,3 +164,41 @@ def test_a_rule_for_a_category_that_no_longer_exists_is_skipped():
 def test_category_names_come_from_the_budget_when_known():
     answer = resolve("starbucks", rules=RuleBook.from_rows([rule(category_name="Old name")]), names={"cat-coffee": "Coffee & tea"})
     assert answer.category_name == "Coffee & tea"
+
+
+# -------------------------------------------------------------- payee aliases
+
+
+def row(imported, payee):
+    return {"imported_description": imported, "payee_name": payee}
+
+
+def test_the_payee_catalogue_yields_aliases_where_the_two_names_differ():
+    pairs = payee_aliases([
+        row("SQ *BLUE BOTTLE 4471", "Blue Bottle Coffee"),
+        row("SQ *BLUE BOTTLE 4471", "Blue Bottle Coffee"),
+        row("STARBUCKS #1234", "Starbucks"),
+        row("", "Landlord"),
+        row("Landlord", ""),
+    ])
+    assert pairs == {
+        "blue bottle": {
+            "merchant_key": "blue bottle coffee",
+            "alias_label": "SQ *BLUE BOTTLE 4471",
+            "merchant_label": "Blue Bottle Coffee",
+        }
+    }
+
+
+def test_an_ambiguous_descriptor_and_a_chain_are_left_alone():
+    ambiguous = payee_aliases([
+        row("AMZN Mktp", "Amazon Marketplace"),
+        row("AMZN Mktp", "Amazon Prime"),
+    ])
+    assert ambiguous == {}
+    chained = payee_aliases([
+        row("VALVE", "Steam"),
+        row("Steam", "Steam Games"),
+    ])
+    # valve -> steam would point at a key that is itself an alias; both are dropped.
+    assert chained == {}

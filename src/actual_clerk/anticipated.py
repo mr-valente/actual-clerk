@@ -270,13 +270,15 @@ def teach_category(
     *,
     category_id: str,
     category_name: str,
-) -> None:
-    """The user names the category: remember it for the merchant and its alias.
+) -> dict[str, Any] | None:
+    """The user names the category: that is a rule for the merchant and its alias.
 
-    Recorded as a correction, which is how a deliberate human choice is
-    weighted, under the notification's key and, when the bank's name for the
-    shop is known, under that key too -- so the real row files itself when it
-    lands and the next notification is categorized on sight.
+    Teaching is the user's word, so it is declared as a rule under the
+    notification's key and, when the bank's name for the shop is known, under
+    that key too -- so the real row files itself when it lands and the next
+    notification is categorized on sight. It is also recorded as a
+    correction in memory, so the evidence agrees with the rule. Clearing the
+    category retires the rule the notification's key carries.
     """
 
     database.set_anticipated_category(
@@ -286,14 +288,29 @@ def teach_category(
         source=SOURCE_TAUGHT if category_id else "",
         confidence=1.0 if category_id else 0.0,
     )
-    if not category_id:
-        return
     key = str(row.get("merchant_key") or "")
-    if key:
-        database.record_memory(key, category_id, category_name, correction=True)
-        target = database.alias_map().get(key)
-        if target:
-            database.record_memory(target, category_id, category_name, correction=True)
+    if not key:
+        return None
+    if not category_id:
+        for rule in database.rules_for_merchant(key):
+            database.update_rule(rule["id"], status="retired")
+        return None
+    label = str(row.get("merchant") or "")
+    rule = database.upsert_rule(
+        merchant_key=key, category_id=category_id, category_name=category_name,
+        merchant_label=label, source="user",
+    )
+    database.close_proposals_for(key, kind="rule")
+    database.record_memory(key, category_id, category_name, correction=True)
+    target = database.alias_map().get(key)
+    if target:
+        database.upsert_rule(
+            merchant_key=target, category_id=category_id, category_name=category_name,
+            merchant_label=label, source="user",
+        )
+        database.close_proposals_for(target, kind="rule")
+        database.record_memory(target, category_id, category_name, correction=True)
+    return rule
 
 
 def teach_alias(database: Database, row: dict[str, Any], *, payee: str) -> dict[str, Any] | None:
@@ -311,10 +328,25 @@ def teach_alias(database: Database, row: dict[str, Any], *, payee: str) -> dict[
         source=SOURCE_TAUGHT,
     )
     if alias and row.get("category_id") and row.get("category_source") == SOURCE_TAUGHT:
-        database.record_memory(
-            target, row["category_id"], row.get("category_name") or "", correction=True
-        )
+        _carry_rule(database, key, target, row)
     return alias
+
+
+def _carry_rule(database: Database, key: str, target: str, row: dict[str, Any]) -> None:
+    """A taught category is the user's word under the bank's key as well."""
+    category_id = str(row.get("category_id") or "")
+    category_name = str(row.get("category_name") or "")
+    if not category_id or not target:
+        return
+    database.upsert_rule(
+        merchant_key=target,
+        category_id=category_id,
+        category_name=category_name,
+        merchant_label=str(row.get("matched_payee") or row.get("merchant") or ""),
+        source="user",
+    )
+    database.close_proposals_for(target, kind="rule")
+    database.record_memory(target, category_id, category_name, correction=True)
 
 
 def _learn_from_settlement(
@@ -340,8 +372,8 @@ def _learn_from_settlement(
         # The user said where this goes before the bank had a row for it. Say
         # so under the bank's key as well, so the filing run that follows this
         # sync files the real row the same way.
-        database.record_memory(
-            posted_key, row["category_id"], row.get("category_name") or "", correction=True
+        _carry_rule(
+            database, charge_key, posted_key, {**row, "matched_payee": transaction.payee_name}
         )
 
 

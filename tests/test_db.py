@@ -539,6 +539,37 @@ def test_a_hand_made_rule_withdraws_the_open_question(database):
     assert database.list_proposals(status="withdrawn")[0]["payload"] == {}
 
 
+# -------------------------------------------------------------- aliases
+
+
+def test_learned_aliases_never_override_a_taught_one_or_form_a_chain(database):
+    database.upsert_alias("valve", "steam", source="taught")
+    learned = database.learn_aliases(
+        {
+            "valve": {"merchant_key": "valve software"},
+            "steam": {"merchant_key": "valve corp"},
+            "sq blue bottle": {"merchant_key": "blue bottle coffee", "alias_label": "SQ *BLUE BOTTLE"},
+            "x": {"merchant_key": "x"},
+        },
+        source="actual_payee",
+    )
+    assert learned == 2
+    assert database.alias_map() == {"valve": "steam", "sq blue bottle": "blue bottle coffee"}
+    assert {a["alias_key"]: a["source"] for a in database.list_aliases()}["sq blue bottle"] == "actual_payee"
+
+
+def test_memory_is_listed_one_merchant_at_a_time_with_a_label(database):
+    database.record_memory("blue bottle", "cat-coffee", "Coffee")
+    database.record_memory("blue bottle", "cat-coffee", "Coffee")
+    database.record_memory("blue bottle", "cat-dining", "Dining", correction=True)
+    database.add_decision(decision(status="applied"))
+    [entry] = database.list_memory()
+    assert entry["merchant_key"] == "blue bottle"
+    assert entry["label"] == "Blue Bottle"
+    assert [c["category_id"] for c in entry["categories"]] == ["cat-dining", "cat-coffee"]
+    assert entry["categories"][0]["corrections"] == 1
+
+
 # ------------------------------------------------------------------- counts
 
 

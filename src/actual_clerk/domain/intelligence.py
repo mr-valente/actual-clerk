@@ -24,10 +24,15 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from actual_clerk.domain.memory import MerchantMemory
-from actual_clerk.domain.merchants import keys_related
+from actual_clerk.domain.merchants import keys_related, merchant_label, normalize_merchant
 
 SOURCE_RULE = "rule"
 SOURCE_MEMORY = "memory"
+
+# Where an alias came from.
+ALIAS_TAUGHT = "taught"
+ALIAS_SETTLED = "settled"
+ALIAS_ACTUAL_PAYEE = "actual_payee"
 
 MATCH_EXACT = "exact"
 MATCH_FAMILY = "family"
@@ -133,6 +138,52 @@ class Resolution:
     @property
     def is_rule(self) -> bool:
         return self.source == SOURCE_RULE
+
+
+def payee_aliases(transactions: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
+    """Aliases the user's own payee catalogue in Actual already implies.
+
+    Actual keeps two names on an imported transaction: the bank's descriptor
+    (`imported_payee`) and the payee the user settled on. Where the two
+    normalize to different keys, the user has curated an alias without
+    calling it one: `SQ *BLUE BOTTLE 4471` is `Blue Bottle Coffee`. Reading
+    those pairs back is what keeps a rule firing after a payee is renamed.
+
+    Only unambiguous pairs are kept: a descriptor key that has been settled
+    on two different payees says nothing, and a key that appears as both a
+    descriptor and a payee is left alone so the alias table never chains.
+    """
+
+    seen: dict[str, dict[str, dict[str, str]]] = {}
+    for row in transactions:
+        imported = str(row.get("imported_description") or "")
+        payee = str(row.get("payee_name") or "")
+        if not imported or not payee:
+            continue
+        source_key = normalize_merchant(imported)
+        target_key = normalize_merchant(payee)
+        if not source_key or not target_key or source_key == target_key:
+            continue
+        targets = seen.setdefault(source_key, {})
+        targets.setdefault(
+            target_key,
+            {
+                "merchant_key": target_key,
+                "alias_label": merchant_label(imported),
+                "merchant_label": merchant_label(payee),
+            },
+        )
+    pairs = {
+        source_key: next(iter(targets.values()))
+        for source_key, targets in seen.items()
+        if len(targets) == 1
+    }
+    target_keys = {entry["merchant_key"] for entry in pairs.values()}
+    return {
+        source_key: entry
+        for source_key, entry in pairs.items()
+        if source_key not in target_keys and entry["merchant_key"] not in pairs
+    }
 
 
 def canonical_key(merchant_key: str, aliases: Mapping[str, str]) -> str:

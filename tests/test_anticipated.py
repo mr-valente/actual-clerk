@@ -493,21 +493,28 @@ def test_settling_learns_the_alias_and_the_next_notification_matches_by_merchant
     assert database.alias_map() == {"valve": "steam"}
 
 
-def test_teaching_a_category_writes_memory_for_the_merchant_and_its_alias(database, settings):
+def test_teaching_a_category_declares_a_rule_for_the_merchant_and_its_alias(database, settings):
     src = source(database)
     row, _ = anticipated.record_notification(
         database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $3.19 at Valve was approved.",
     )
-    anticipated.teach_category(database, row, category_id="cat-games", category_name="Games")
+    database.add_proposal(kind="rule", merchant_key="valve", payload={})
+    rule = anticipated.teach_category(database, row, category_id="cat-games", category_name="Games")
+    assert rule["merchant_key"] == "valve" and rule["category_id"] == "cat-games"
     assert database.get_anticipated_charge(row["id"])["category_source"] == "taught"
     assert [m["category_id"] for m in database.memory_for("valve")] == ["cat-games"]
     assert database.memory_for("valve")[0]["corrections"] == 1
+    assert database.list_proposals() == []
     # Memory does not overwrite what was taught.
     anticipated.reconcile(database, steam_history(), settings, today=TODAY)
     assert database.get_anticipated_charge(row["id"])["category_id"] == "cat-games"
-    # Teaching the alias afterwards carries the category to the bank's key too.
+    # Teaching the alias afterwards carries the rule to the bank's key too.
     anticipated.teach_alias(database, database.get_anticipated_charge(row["id"]), payee="Steam")
+    assert {r["merchant_key"]: r["category_id"] for r in database.active_rules()} == {"valve": "cat-games", "steam": "cat-games"}
     assert [m["category_id"] for m in database.memory_for("steam")] == ["cat-games"]
+    # Clearing the category retires the notification key's rule.
+    anticipated.teach_category(database, database.get_anticipated_charge(row["id"]), category_id="", category_name="")
+    assert [r["merchant_key"] for r in database.active_rules()] == ["steam"]
 
 
 def test_a_taught_category_reaches_the_bank_s_key_when_the_charge_settles(database, settings):
@@ -524,6 +531,7 @@ def test_a_taught_category_reaches_the_bank_s_key_when_the_charge_settles(databa
     anticipated.reconcile(database, snap, settings, today=TODAY)
     assert database.alias_map() == {"valve": "steam"}
     assert [m["category_id"] for m in database.memory_for("steam")] == ["cat-games"]
+    assert {r["merchant_key"] for r in database.active_rules()} == {"valve", "steam"}
 
 
 def test_older_ledgers_gain_the_category_columns(tmp_path):

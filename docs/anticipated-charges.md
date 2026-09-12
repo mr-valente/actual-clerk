@@ -35,16 +35,17 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
 2. **Stores it once.** The phone sends a stable key per notification, so a
    retry, a reboot, or an app re-posting the same notification never produces
    a second charge.
-3. **Categorizes it, provisionally.** The merchant key is looked up through
-   the same memory the filing cascade uses: your own filed history plus the
-   decisions Clerk has applied, with the same confidence and observation
-   thresholds, and no model call. A notification's merchant is looked up
-   through its **alias** first (the bank's name for the shop is what the
-   history was filed under), then under its own key. A category can also be
-   **taught** on the Connections page; a taught category is the user's word
-   and is never overwritten by memory. Teaching writes memory for the merchant
-   and, when known, its alias, so the next notification is categorized on
-   sight and the bank's row files itself when it lands.
+3. **Categorizes it, provisionally.** The merchant key goes through the same
+   resolver the filing cascade uses, short of the model: a **rule** you have
+   declared first, then your own filed history plus the decisions Clerk has
+   applied, with the same confidence and observation thresholds. A
+   notification's merchant is looked up through its **alias** first (the
+   bank's name for the shop is what the history was filed under), then under
+   its own key. A category can also be set by hand on the Connections page
+   with *Always file as…*; that is the user's word, so it declares a rule for
+   the merchant and, when known, its alias, and is never overwritten by
+   memory. The next notification is categorized on sight and the bank's row
+   files itself when it lands. Clearing it retires that rule.
 4. **Counts it.** An open charge with a category is charged to that category
    exactly as a posted transaction would be: a bill that is already budgeted
    draws on its own budget (and its carry-over) rather than on free money,
@@ -66,9 +67,9 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
 6. **Learns from the settlement.** When the notification's merchant and the
    posted payee differ ("Valve" on the phone, "Steam" on the statement), the
    pair is remembered as an alias; a taught alias is never overwritten by a
-   settlement. If the charge had a taught category, that category is written
-   to memory under the bank's key too, so the filing run that follows the sync
-   files the real row the same way.
+   settlement. If the charge had a category set by hand, the rule is declared
+   under the bank's key too, so the filing run that follows the sync files
+   the real row the same way.
 7. **Lets go.** A charge nothing has settled after the expiry period stops
    counting: the bank is evidently never going to post it (a hold that was
    released, an authorisation that was reversed). It stays in the ledger as
@@ -169,8 +170,10 @@ pointed at an Actual account), `anticipated_charges` (one per notification,
 with the parsed amount, merchant, the raw title and text, the provisional
 category and where it came from, and how it was settled: `open`, `matched`,
 `expired`, `dismissed`, or `ignored` for a declined or unreadable
-notification), and `merchant_aliases` (a notification merchant key and the
-bank's key for the same shop, learned or taught). Deleting a source deletes its charges. Moving a
+notification), and `merchant_aliases`, which is shared with the rest of
+Clerk's intelligence: any key and the merchant key it resolves to, taught,
+learned when a charge settled, or read from the payee catalogue in Actual.
+Aliases are managed on the Intelligence page. Deleting a source deletes its charges. Moving a
 source to another account moves only its open charges; settled history stays
 where it settled.
 
@@ -195,6 +198,6 @@ Web UI:
 | `DELETE` | `/api/anticipated/sources/{id}` | Remove a source and its charges |
 | `POST` | `/api/anticipated/charges/{id}/dismiss` | Stop counting a charge now |
 | `POST` | `/api/anticipated/charges/{id}/reopen` | Count it again after a wrong match |
-| `POST` | `/api/anticipated/charges/{id}/category` | Teach the category (blank clears it); writes memory |
+| `POST` | `/api/anticipated/charges/{id}/category` | Always file this merchant here: declares a rule (blank clears it and retires the rule) |
 | `POST` | `/api/anticipated/charges/{id}/alias` | Teach the payee the bank posts this merchant as |
 | `DELETE` | `/api/anticipated/aliases/{alias_key}` | Forget an alias |
