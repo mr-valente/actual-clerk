@@ -16,8 +16,9 @@ change to that compose file beyond the image tag.
 
 ### 0. What is already done on this machine
 
-- The release image is built here as `valentemath/actual-clerk:2026-09-12-plaid`
-  (version string `0.1.0-plaid.aa1b0d1`, shown on the Clerk health line).
+- The release image was built and pushed with the shared builder
+  (`build actual-clerk --major`) as `valentemath/actual-clerk:v1.0.0`, also
+  tagged `latest`, from this checkout.
 - `scripts/transfer-lab-intelligence.py` is written and was verified against a
   copy of the live Clerk database: the phone source, the three charges (two
   open), the taught alias, one hand-made rule, and the phone-app settings
@@ -28,24 +29,12 @@ change to that compose file beyond the image tag.
 
 ### 1. Publish the image (from this machine)
 
-```bash
-docker push valentemath/actual-clerk:2026-09-12-plaid
+```fish
+build actual-clerk --major     # → valentemath/actual-clerk:v1.0.0 and latest
 ```
 
-Pin the live compose file to that tag rather than `latest`, so nothing on
-shiro moves until you move it and the version in the UI says which build is
-running:
-
-```yaml
-  actual-clerk:
-    image: valentemath/actual-clerk:2026-09-12-plaid
-```
-
-(If you would rather keep `latest`, also run
-`docker tag valentemath/actual-clerk:2026-09-12-plaid valentemath/actual-clerk:latest && docker push valentemath/actual-clerk:latest`,
-and be aware that anything on shiro that auto-pulls `latest` will restart
-Clerk before step 3 has run. That is safe, since step 3 is additive, but then
-step 3 must be run with Clerk stopped afterwards.)
+The live compose file follows `latest`. The version on the Clerk footer says
+which build is running.
 
 ### 2. Stop live Clerk (on shiro)
 
@@ -62,26 +51,31 @@ unless you say Clerk is stopped.
 
 ### 3. Carry the lab's phone intelligence over (from this machine)
 
-Dry run first, then for real. The script writes a consistent backup to
-`clerk/backups/clerk-before-lab-transfer-<stamp>.db` before it changes
-anything.
+Done on 2026-09-12 at 17:21. What was learned doing it: SQLite's own
+locking and backup calls hang against the TrueNAS SMB share, so the script
+must not be pointed at the share directly. Copy the database to local disk,
+run the transfer there, and copy the result back. Clerk's write-ahead log is
+empty once the container is stopped, so a plain file copy is consistent.
 
 ```bash
 cd ~/forge/actual-clerk
+LIVE="$MNT_HOME/.local/share/actual-budget/clerk/data"
+WORK=$(mktemp -d)
+cp "$LIVE/clerk.db" "$WORK/clerk.db"
 uv run python scripts/transfer-lab-intelligence.py \
-  --source lab/data/clerk/clerk.db \
-  --target "$MNT_HOME/.local/share/actual-budget/clerk/data/clerk.db" \
-  --dry-run
+  --source lab/data/clerk/clerk.db --target "$WORK/clerk.db" --dry-run
 uv run python scripts/transfer-lab-intelligence.py \
-  --source lab/data/clerk/clerk.db \
-  --target "$MNT_HOME/.local/share/actual-budget/clerk/data/clerk.db" \
-  --i-stopped-clerk
+  --source lab/data/clerk/clerk.db --target "$WORK/clerk.db" --i-stopped-clerk
+cp "$WORK/../backups/"clerk-before-lab-transfer-*.db "$MNT_HOME/.local/share/actual-budget/clerk/backups/"
+cp "$WORK/clerk.db" "$LIVE/clerk.db"
+rm -f "$LIVE/clerk.db-wal" "$LIVE/clerk.db-shm"
 ```
 
-Expected: 1 source, 3 charges, 1 alias, 1 rule, 4 settings. The two open
-charges arrive with their lab categories; live Clerk re-derives those on its
-first refresh from its own rules and history, so they may read as
-"Uncategorized" until step 6.
+Result: 1 source, 3 charges, 1 alias, 1 rule, 4 settings; integrity ok; the
+pre-transfer copy is `clerk/backups/clerk-before-lab-transfer-2026-09-12_17-20-57.db`.
+The two open charges arrive with their lab categories; live Clerk re-derives
+those on its first refresh from its own rules and history, so they may read
+as "Uncategorized" until step 6.
 
 What deliberately does not move: the 71 rules the lab imported from Actual
 (the live budget still holds those rules in Actual, so they are imported from
@@ -98,7 +92,7 @@ docker logs -f actual-clerk
 
 Then check, in Clerk at :30031:
 
-- The footer says `Actual Clerk 0.1.0-plaid.aa1b0d1`.
+- The footer shows the new version (1.0.0).
 - **Connections** shows a *Phone notifications* panel with the Capital One
   source on the Pixel, pointed at the Venture card, and two charges *Waiting
   for the bank* (Valve $3.19, Geico $152.40).

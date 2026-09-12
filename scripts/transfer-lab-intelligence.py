@@ -29,9 +29,14 @@ not know is dropped from the copied row, not invented.
         --target "$MNT_HOME/.local/share/actual-budget/clerk/data/clerk.db" \
         --dry-run
 
-The target Clerk MUST be stopped: the live database sits on a network share
-and SQLite cannot share a database across hosts. Pass --i-stopped-clerk to
-say so. A consistent backup of the target is written beside it first.
+The target Clerk MUST be stopped: SQLite cannot share a database across
+hosts. Pass --i-stopped-clerk to say so. A consistent backup of the target is
+written beside it first.
+
+Do not point --target at a database on an SMB/CIFS share: SQLite's locking
+and backup calls hang there. Copy the file to local disk (with Clerk stopped
+its write-ahead log is empty, so a plain copy is consistent), run this
+against the copy, and copy the result back; see docs/going-live.md.
 """
 
 from __future__ import annotations
