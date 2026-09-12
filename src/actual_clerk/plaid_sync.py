@@ -394,9 +394,12 @@ class PlaidSyncEngine:
             existing=existing,
             adopt_window_days=self.settings.plaid_adopt_window_days,
         )
+        # Withdrawn pending rows the setting says to leave alone. They count
+        # as kept, but are reported apart from the cleared ones the planner
+        # never deletes.
+        withheld: list[dict[str, Any]] = []
         if not self.settings.plaid_delete_removed_pending:
-            plan.kept.extend(plan.deletions)
-            plan.deletions = []
+            withheld, plan.deletions = plan.deletions, []
 
         opening: int | None = None
         if (
@@ -437,6 +440,16 @@ class PlaidSyncEngine:
                 f"already holds as cleared ({item['date']}, {item['amount_cents'] / 100:.2f}); left in place",
                 {"actual_account_id": account_id, **{k: str(v) for k, v in item.items()}},
             )
+        for item in withheld:
+            self.events(
+                "info",
+                "plaid_removed_pending_kept",
+                f"{link.get('external_name') or account_id}: the bank withdrew a pending transaction "
+                f"({item['date']}, {item['amount_cents'] / 100:.2f}); left in place because deleting "
+                f"withdrawn pending charges is switched off",
+                {"actual_account_id": account_id, **{k: str(v) for k, v in item.items()}},
+            )
+        plan.kept.extend(withheld)
         rows = list(plan.imports)
         if opening is not None:
             rows.insert(0, await self._opening_row(account_id, cutover, opening))

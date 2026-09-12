@@ -151,6 +151,7 @@ def _serialize_record(record: dict[str, Any]) -> dict[str, Any]:
         "updated_at",
         "last_applied_at",
         "observed_at",
+        "last_import_at",
     ):
         if field in result:
             result[field] = _timestamp(result.get(field))
@@ -980,6 +981,32 @@ def _plaid_item_or_404(request: Request, item_id: str) -> dict[str, Any]:
     return item
 
 
+def _refuse_taken_plaid_account(
+    database: Database, external_account_id: str, *, actual_account_id: str = ""
+) -> None:
+    """Refuse a Plaid account that another Actual account's mapping still owns.
+
+    The unique index on (provider, external id) covers paused mappings too,
+    so this has to run before anything in Actual is created or unlinked: the
+    insert would fail afterwards and leave that work half done.
+    """
+    owner = next(
+        (
+            link
+            for link in database.list_bank_links(provider="plaid")
+            if link["external_account_id"] == external_account_id
+            and link["actual_account_id"] != actual_account_id
+        ),
+        None,
+    )
+    if owner is None:
+        return
+    detail = "That bank account is already mapped to another Actual account"
+    if not owner["enabled"]:
+        detail += " (a paused mapping; forget that mapping first)"
+    raise HTTPException(status_code=409, detail=detail)
+
+
 def _actual_accounts_for_mapping(request: Request) -> list[dict[str, Any]]:
     """The Actual accounts a Plaid account can be mapped onto, from the last snapshot."""
     snapshot = _database(request).get_snapshot(OVERVIEW_SNAPSHOT) or {}
@@ -1031,10 +1058,10 @@ async def plaid_items(request: Request) -> dict[str, Any]:
 @app.post("/api/plaid/link-token")
 async def plaid_link_token(payload: LinkTokenRequest, request: Request) -> dict[str, Any]:
     """Mint a Link token: a new connection, or update mode for a named Item."""
-    client = _plaid_client(request)
     access_token = None
     if payload.item_id:
         access_token = _plaid_item_or_404(request, payload.item_id)["access_token"]
+    client = _plaid_client(request)
     try:
         token = await client.create_link_token(
             access_token=access_token, account_selection=payload.account_selection
@@ -1193,13 +1220,8 @@ async def plaid_create_link(payload: CreateLinkRequest, request: Request) -> dic
         )
     database = _database(request)
     actual_account_id = payload.actual_account_id
-    created_account: dict[str, Any] | None = None
-    if payload.new_account is not None:
-        created_account = await _gateway(request).create_account(
-            payload.new_account.name, off_budget=payload.new_account.off_budget
-        )
-        actual_account_id = created_account["id"]
-    existing = database.get_bank_link(actual_account_id)
+    _refuse_taken_plaid_account(database, external["id"], actual_account_id=actual_account_id)
+    existing = database.get_bank_link(actual_account_id) if actual_account_id else None
     if (
         existing
         and existing["enabled"]
@@ -1209,6 +1231,12 @@ async def plaid_create_link(payload: CreateLinkRequest, request: Request) -> dic
             status_code=409,
             detail="That Actual account is already mapped to a different bank account",
         )
+    created_account: dict[str, Any] | None = None
+    if payload.new_account is not None:
+        created_account = await _gateway(request).create_account(
+            payload.new_account.name, off_budget=payload.new_account.off_budget
+        )
+        actual_account_id = created_account["id"]
     try:
         link = database.upsert_bank_link(
             {
@@ -1405,14 +1433,7 @@ async def migrate_to_plaid(payload: MigrateToPlaidRequest, request: Request) -> 
     external = next((a for a in externals if a["id"] == payload.external_account_id), None)
     if external is None:
         raise HTTPException(status_code=404, detail="That account is not on this bank connection")
-    other = database.list_bank_links(enabled_only=True)
-    taken = next(
-        (candidate for candidate in other if candidate["external_account_id"] == external["id"]
-         and candidate["actual_account_id"] != account["id"]),
-        None,
-    )
-    if taken:
-        raise HTTPException(status_code=409, detail="That bank account is already mapped to another Actual account")
+    _refuse_taken_plaid_account(database, external["id"], actual_account_id=account["id"])
     existing = database.get_bank_link(account["id"])
     actual_source = account.get("sync_source") or ""
     cutover = payload.cutover_date or datetime.now(settings.zone).date().isoformat()
@@ -1444,12 +1465,15 @@ async def migrate_to_plaid(payload: MigrateToPlaidRequest, request: Request) -> 
             "keeps_actual_link": bool(actual_source and not payload.unlink_actual),
             "preview": preview,
         }
-    if will_unlink:
-        await gateway.unlink_account(account["id"])
+    # The mapping is stored before Actual's own link is dropped: if the
+    # second step fails, the account is fed twice (a state the Connections
+    # page allows mid-migration) rather than by nobody.
     try:
         stored = database.upsert_bank_link(link)
     except sqlite3.IntegrityError as exc:
         raise HTTPException(status_code=409, detail="That bank account is already mapped to another Actual account") from exc
+    if will_unlink:
+        await gateway.unlink_account(account["id"])
     await _jobs(request).enqueue("sync", trigger="manual")
     return {
         "dry_run": False,

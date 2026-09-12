@@ -1224,7 +1224,17 @@ def plaid(client, monkeypatch):
         "remove_item": remove_item, "sandbox_reset_login": sandbox_reset_login,
     }.items():
         monkeypatch.setattr(f"actual_clerk.clients.plaid.PlaidClient.{name}", function)
-    return {"calls": calls, "state": state}
+    from actual_clerk.clients.plaid import PlaidClient
+
+    recorded = {"calls": calls, "state": state, "clients": 0}
+    original_init = PlaidClient.__init__
+
+    def counting_init(self, *args, **kwargs):
+        recorded["clients"] += 1
+        original_init(self, *args, **kwargs)
+
+    monkeypatch.setattr(PlaidClient, "__init__", counting_init)
+    return recorded
 
 
 async def test_plaid_endpoints_refuse_until_configured(client):
@@ -1241,6 +1251,7 @@ async def test_a_link_token_is_minted_for_a_new_connection_or_a_repair(client, p
     assert fresh.status_code == 200
     assert fresh.json()["update_mode"] is False
     assert (await client.post("/api/plaid/link-token", json={"item_id": "nope"})).status_code == 404
+    assert plaid["clients"] == 1, "an unknown Item is refused before a client is opened"
     client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
     repair = await client.post("/api/plaid/link-token", json={"item_id": "item-1", "account_selection": True})
     assert repair.json()["update_mode"] is True
@@ -1319,6 +1330,8 @@ async def test_mapping_a_plaid_account_onto_an_existing_actual_account(client, p
     assert link["institution"] == "Platypus"
     assert link["cutover_date"] == "2026-09-01"
     assert link["enabled"] is True
+    assert link["created_at"].startswith("20") and link["updated_at"].startswith("20"), "timestamps are ISO, not epochs"
+    assert link["last_import_at"] is None
     unknown = await client.post("/api/plaid/links", json={"item_id": "item-1", "external_account_id": "plaid-nope", "actual_account_id": "acct-1"})
     assert unknown.status_code == 404
     taken = await client.post("/api/plaid/links", json={"item_id": "item-1", "external_account_id": "plaid-chk", "actual_account_id": "acct-2"})
@@ -1340,6 +1353,26 @@ async def test_mapping_onto_a_new_actual_account_creates_it_first(client, plaid,
     assert response.json()["created_account"]["id"] == "acct-new"
     assert response.json()["link"]["actual_account_id"] == "acct-new"
     assert response.json()["link"]["cutover_date"]
+
+
+async def test_a_taken_plaid_account_is_refused_before_a_new_actual_account_is_created(client, plaid, gateway):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    client.database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1", "external_account_id": "plaid-chk"})
+    response = await client.post(
+        "/api/plaid/links",
+        json={"item_id": "item-1", "external_account_id": "plaid-chk", "new_account": {"name": "Duplicate"}},
+    )
+    assert response.status_code == 409
+    assert getattr(gateway, "created_accounts", []) == [], "nothing is created in Actual for a refused mapping"
+    # A paused mapping still owns the Plaid account (the unique index does not care about `enabled`).
+    client.database.update_bank_link("acct-1", enabled=False)
+    paused = await client.post(
+        "/api/plaid/links",
+        json={"item_id": "item-1", "external_account_id": "plaid-chk", "new_account": {"name": "Duplicate"}},
+    )
+    assert paused.status_code == 409
+    assert "paused" in paused.json()["detail"]
+    assert getattr(gateway, "created_accounts", []) == []
 
 
 async def test_a_mapping_can_be_paused_moved_and_forgotten(client, plaid):
@@ -1470,6 +1503,13 @@ async def test_moving_to_plaid_can_keep_actuals_link_and_refuses_a_taken_account
     client.database.upsert_bank_link({"actual_account_id": "acct-manual", "provider": "plaid", "item_id": "item-1", "external_account_id": "plaid-chk"})
     taken = await client.post("/api/migration/to-plaid", json={"actual_account_id": "acct-sf", "item_id": "item-1", "external_account_id": "plaid-chk"})
     assert taken.status_code == 409
+    assert getattr(feeds, "unlinked", []) == [], "a refused migration leaves Actual's own link alone"
+    client.database.update_bank_link("acct-manual", enabled=False)
+    paused = await client.post("/api/migration/to-plaid", json={"actual_account_id": "acct-sf", "item_id": "item-1", "external_account_id": "plaid-chk"})
+    assert paused.status_code == 409, "a paused mapping still owns the Plaid account"
+    assert "paused" in paused.json()["detail"]
+    assert getattr(feeds, "unlinked", []) == []
+    assert client.database.get_bank_link("acct-sf") is None
     missing = await client.post("/api/migration/to-plaid", json={"actual_account_id": "acct-ghost", "item_id": "item-1", "external_account_id": "plaid-chk"})
     assert missing.status_code == 404
 

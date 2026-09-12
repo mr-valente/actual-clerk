@@ -89,7 +89,7 @@ class AccountPlan:
     external_account_id: str
     imports: list[dict[str, Any]] = field(default_factory=list)
     # Existing rows given a new id / settled: {transaction_id, imported_id,
-    # cleared, amount_cents, previous_imported_id, reason}
+    # cleared, amount_cents, date, previous_imported_id, reason}
     adoptions: list[dict[str, Any]] = field(default_factory=list)
     deletions: list[dict[str, Any]] = field(default_factory=list)
     # Removed by the bank but cleared (or reconciled) in Actual: left alone.
@@ -178,7 +178,7 @@ def plan_account(
             plan.imports.append(convert(transaction))
             continue
         claimed.add(row["id"])
-        settled = _settlement(row, transaction, transaction_id)
+        settled = _settlement(row, transaction, transaction_id, date)
         if settled or reason != "settled":
             plan.adoptions.append(
                 {
@@ -231,9 +231,14 @@ def _adopt_foreign(
 
 
 def _settlement(
-    row: dict[str, Any], transaction: dict[str, Any], transaction_id: str
+    row: dict[str, Any], transaction: dict[str, Any], transaction_id: str, date: datetime.date
 ) -> dict[str, Any]:
-    """The fields on an existing row that the Plaid transaction changes."""
+    """The fields on an existing row that the Plaid transaction changes.
+
+    The date is one of them: a posted transaction usually lands a day or
+    more after the pending one Actual already holds, and Actual's import
+    would never move it.
+    """
     fields: dict[str, Any] = {}
     if (row.get("imported_id") or "") != transaction_id:
         fields["imported_id"] = transaction_id
@@ -243,6 +248,8 @@ def _settlement(
     amount = plaid_amount_to_cents(transaction.get("amount"))
     if row.get("amount_cents") != amount:
         fields["amount_cents"] = amount
+    if row.get("date") != date:
+        fields["date"] = date
     return fields
 
 

@@ -119,6 +119,7 @@ def test_a_pending_to_posted_swap_adopts_the_existing_row():
         "imported_id": "t-posted",
         "cleared": True,
         "amount_cents": -475,
+        "date": datetime.date(2026, 9, 5),
     }
 
 
@@ -150,6 +151,10 @@ def test_a_modified_transaction_settles_the_matching_row_in_place():
     assert "imported_id" not in adoption
     unchanged = plan(modified=[plaid_txn("t1", 4.5, "2026-09-03", pending=True)], existing=existing)
     assert unchanged.empty
+    # A date correction alone is still a settlement: Actual's import would never move the row.
+    moved = plan(modified=[plaid_txn("t1", 4.5, "2026-09-04", pending=True)], existing=existing)
+    [adoption] = moved.adoptions
+    assert adoption == {"transaction_id": "row-1", "previous_imported_id": "t1", "reason": "settled", "date": datetime.date(2026, 9, 4)}
 
 
 def test_a_foreign_row_near_the_cutover_is_adopted_by_amount_and_date():

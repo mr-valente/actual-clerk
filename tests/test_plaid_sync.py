@@ -233,7 +233,7 @@ async def test_pending_rows_are_settled_deleted_or_kept_and_adoptions_logged(lin
     result = await instance.run()
     assert result["adopted"] == 2 and result["deleted"] == 1 and result["kept"] == 1 and result["imported"] == 0
     [adoptions] = gateway.adoptions
-    assert {a["transaction_id"]: a for a in adoptions}["row-p"] == {"transaction_id": "row-p", "imported_id": "t-posted", "cleared": True, "amount_cents": -475}
+    assert {a["transaction_id"]: a for a in adoptions}["row-p"] == {"transaction_id": "row-p", "imported_id": "t-posted", "cleared": True, "amount_cents": -475, "date": datetime.date(2026, 9, 5)}
     assert {a["transaction_id"]: a for a in adoptions}["row-sf"] == {"transaction_id": "row-sf", "imported_id": "t-sf"}
     assert gateway.deletions == [["row-gone"]]
     assert gateway.imports == []
@@ -252,6 +252,9 @@ async def test_deleting_withdrawn_pending_rows_can_be_switched_off(linked):
     result = await instance.run()
     assert result["deleted"] == 0 and result["kept"] == 1
     assert gateway.deletions == []
+    kinds = [kind for _, kind, _ in events]
+    assert "plaid_removed_pending_kept" in kinds
+    assert "plaid_removed_cleared" not in kinds, "an uncleared row is not reported as cleared"
 
 
 async def test_refresh_is_rate_limited_and_waits_for_a_newer_update(linked):
