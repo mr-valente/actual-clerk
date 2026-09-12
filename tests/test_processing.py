@@ -325,16 +325,17 @@ async def test_rule_proposals_can_be_switched_off(manager, settings_manager):
 
 async def test_filing_reads_the_payee_catalogue_as_aliases(manager, settings_manager):
     settings_manager.update({"ai_enabled": False})
-    manager.gateway.snap["transactions"].append(
-        transaction(
-            TODAY - datetime.timedelta(days=3),
-            -1999,
-            payee="Steam Games",
-            description="VALVE CORP 1234",
-            category_id="cat-coffee",
-            category_name="Coffee",
+    for days in (3, 10):
+        manager.gateway.snap["transactions"].append(
+            transaction(
+                TODAY - datetime.timedelta(days=days),
+                -1999,
+                payee="Steam Games",
+                description="VALVE CORP 1234",
+                category_id="cat-coffee",
+                category_name="Coffee",
+            )
         )
-    )
     job = await run_job(manager, "categorize")
     assert job["result"]["aliases_learned"] == 1
     assert manager.database.alias_map() == {"valve": "steam games"}
@@ -394,6 +395,41 @@ async def test_a_rule_whose_category_left_the_budget_asks_for_repair(manager, se
     assert "no longer in Actual" in proposal["evidence"]["reason"]
     # The rule filed nothing; memory and the review queue take over.
     assert "rule" not in job["result"]["by_source"]
+
+
+async def test_a_history_run_proposes_rules_for_unanimous_merchants(manager, settings_manager):
+    settings_manager.update({"ai_enabled": False, "rule_promote_after": 3})
+    job = await run_job(manager, "categorize", {"propose_rules": True})
+    assert job["result"]["history_proposals"] == 1
+    [proposal] = manager.database.list_proposals()
+    assert proposal["kind"] == "rule"
+    assert proposal["payload"]["merchant_key"] == "blue bottle coffee"
+    assert proposal["evidence"]["observations"] >= 3
+    # Declining them all closes the question for good.
+    assert manager.database.decline_open_proposals(kind="rule") == 1
+    again = await run_job(manager, "categorize", {"propose_rules": True})
+    assert again["result"]["history_proposals"] == 0
+
+
+async def test_the_models_alias_answers_become_proposals(manager, settings_manager, monkeypatch):
+    settings_manager.update({"ai_enabled": False})
+    from actual_clerk import categorize as categorize_module
+
+    async def fake_run(self, snapshot, **kwargs):
+        result = categorize_module.CategorizationResult()
+        result.alias_proposals.append({"alias_key": "valve", "alias_label": "Valve", "merchant_key": "steam", "confidence": 0.9, "reason": "Valve runs Steam."})
+        result.proposals.append(categorize_module.Proposal(
+            transaction_id="txn-new", merchant_key="valve", merchant_label="Valve", payee_name="Valve", account_id="acct-checking", account_name="Checking",
+            transaction_date=TODAY.isoformat(), amount_cents=-1999, source="unresolved", status="needs_review", confidence=0.0,
+        ))
+        return result
+
+    monkeypatch.setattr(categorize_module.Categorizer, "run", fake_run)
+    job = await run_job(manager, "categorize")
+    assert job["result"]["alias_proposals"] == 1
+    [proposal] = manager.database.list_proposals()
+    assert proposal["kind"] == "alias"
+    assert proposal["payload"] == {"alias_key": "valve", "alias_label": "Valve", "merchant_key": "steam"}
 
 
 async def test_a_rule_files_without_memory_and_counts_its_work(manager, settings_manager):

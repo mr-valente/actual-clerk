@@ -49,6 +49,7 @@ def build_user_prompt(
     candidates: Sequence[dict[str, Any]],
     examples: Sequence[dict[str, Any]],
     currency: str = "USD",
+    rule_hints: Sequence[dict[str, Any]] = (),
 ) -> str:
     """Assemble the classification request for one merchant."""
 
@@ -68,6 +69,15 @@ def build_user_prompt(
     if merchant.get("cadence"):
         sections.append(f"Observed cadence: {merchant['cadence']}")
 
+    if rule_hints:
+        sections.append("")
+        sections.append("RULES THIS PERSON HAS SET FOR SIMILAR MERCHANTS")
+        for hint in rule_hints:
+            sections.append(
+                f"- {hint.get('merchant_label') or hint.get('merchant_key')} "
+                f"-> {hint.get('category_name') or '?'} (always)"
+            )
+
     if examples:
         sections.append("")
         sections.append("HOW THIS BUDGET FILES SIMILAR SPENDING")
@@ -84,5 +94,35 @@ def build_user_prompt(
     sections.append("")
     sections.append(
         "Reply with the number of the best category, or 0 if none of them fit this merchant."
+    )
+    return "\n".join(sections)
+
+
+ALIAS_SYSTEM_PROMPT = """You are a careful bookkeeping assistant for one person's personal budget.
+
+You are given the name of a merchant as it appears on a bank statement or a card notification, and a numbered list of merchants this budget already knows. Decide whether the new name is the same business as one of them.
+
+Rules:
+- Answer with the number of the matching merchant, or 0 when none of them is the same business. Answering 0 is correct and useful; a confident wrong match is not.
+- The same business means the same company or shop, not the same kind of shop. A coffee chain is not the same business as another coffee chain.
+- A card network, a payment processor, or a store number is decoration, not identity.
+- Set confidence honestly: above 0.85 only when the names plainly denote one business, below 0.5 when you are guessing.
+- Keep the reason to one short sentence."""
+
+
+def build_alias_prompt(*, merchant: dict[str, Any], candidates: Sequence[str]) -> str:
+    """Ask whether an unfamiliar merchant is one the budget already knows by another name."""
+    sections = ["MERCHANT"]
+    sections.append(f"Name: {merchant.get('label') or merchant.get('key')}")
+    descriptions = [item for item in merchant.get("descriptions", []) if item][:3]
+    if descriptions:
+        sections.append("Bank descriptions: " + " | ".join(descriptions))
+    sections.append("")
+    sections.append("MERCHANTS THIS BUDGET ALREADY KNOWS")
+    for index, candidate in enumerate(candidates, start=1):
+        sections.append(f"{index}. {candidate}")
+    sections.append("")
+    sections.append(
+        "Reply with the number of the merchant that is the same business, or 0 if none is."
     )
     return "\n".join(sections)

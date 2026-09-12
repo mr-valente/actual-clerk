@@ -397,6 +397,7 @@ Done: see [stage-4.md](stage-4.md).
 
 **Stage 5: the model as consultant.** Same-merchant questions, rule hints in
 the category prompt, bulk rule proposals from history for a first run.
+Done: see [stage-5.md](stage-5.md).
 
 ## 9. Decisions taken in this plan
 

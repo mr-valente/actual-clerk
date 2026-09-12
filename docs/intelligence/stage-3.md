@@ -13,12 +13,19 @@ for pairs where the bank's descriptor and the payee the user settled on
 normalize to different keys (`domain/intelligence.py`, `payee_aliases`).
 `SQ *BLUE BOTTLE 4471` against `Blue Bottle Coffee` is an alias the user
 curated in Actual without calling it one, and it is what keeps a rule
-firing after a payee is renamed. Only unambiguous pairs are read: a
-descriptor settled on two different payees says nothing. The table never
-chains: a pair whose alias is already a target, or whose target is already
-an alias, is left alone, both in the reader and in `learn_aliases`. A taught
-alias is never overwritten by a learned one. Sources are now `taught`,
-`settled`, and `actual_payee`.
+firing after a payee is renamed. Only pairs that have earned it are read:
+a descriptor settled on two different payees says nothing; a pair seen
+once may be a one-off rename and has to recur; and a descriptor made only
+of payment-rail words (`ACH PAYPAL INST`, `DEBIT CARD WITHDRAWAL`) names
+the rail, not the shop, and is never an alias, since it would make every
+later charge on that rail read as whatever the user once filed one as.
+The first lab run, before those two filters, learned 103 aliases of which
+a dozen were exactly that kind; with them it learns 18, all real. Learned
+aliases are derived: each run drops the ones the budget no longer supports.
+The table never chains: a pair whose alias is already a target, or whose
+target is already an alias, is left alone, both in the reader and in
+`learn_aliases`. A taught alias is never overwritten by a learned one.
+Sources are now `taught`, `settled`, and `actual_payee`.
 
 **The resolver** already canonicalized through the alias table in Stage 1;
 both the filing cascade and anticipated charges pass it the live map, and

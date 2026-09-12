@@ -1384,6 +1384,17 @@ class Database:
                 (status, None if status == "open" else time.time(), proposal_id),
             )
 
+    def decline_open_proposals(self, *, kind: str | None = None) -> int:
+        """Close every open question of a kind, so a bulk proposal can be waved away."""
+        sql = "UPDATE proposals SET status='declined', resolved_at=? WHERE status='open'"
+        values: list[Any] = [time.time()]
+        if kind:
+            sql += " AND kind=?"
+            values.append(kind)
+        with self.connect() as connection:
+            cursor = connection.execute(sql, values)
+        return cursor.rowcount
+
     def close_proposals_for(self, merchant_key: str, *, kind: str | None = None) -> int:
         """Withdraw open questions a newer fact has answered (a rule was made by hand)."""
         sql = "UPDATE proposals SET status='withdrawn', resolved_at=? WHERE merchant_key=? AND status='open'"
@@ -2229,7 +2240,18 @@ class Database:
         return dict(row) if row else None
 
     def learn_aliases(self, pairs: Mapping[str, Mapping[str, str]], *, source: str) -> int:
-        """Absorb aliases read from evidence, never over a taught one, never as a chain."""
+        """Absorb aliases read from evidence, never over a taught one, never as a chain.
+
+        Aliases of this source are derived, so ones the evidence no longer
+        supports are dropped first: the table follows the budget rather than
+        accumulating every pair it ever saw.
+        """
+        with self.connect() as connection:
+            connection.execute(
+                "DELETE FROM merchant_aliases WHERE source=? AND alias_key NOT IN "
+                f"({','.join('?' for _ in pairs) or "''"})",
+                (source, *pairs.keys()),
+            )
         if not pairs:
             return 0
         learned = 0

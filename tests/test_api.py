@@ -515,6 +515,31 @@ async def test_a_repair_needs_a_category_and_a_retire_retires(client):
     assert (await client.post(f"/api/intelligence/proposals/{orphan}/resolve", json={"action": "accept"})).status_code == 409
 
 
+async def test_accepting_an_alias_proposal_declares_the_alias(client):
+    proposal_id = client.database.add_proposal(kind="alias", merchant_key="valve", payload={"alias_key": "valve", "alias_label": "Valve", "merchant_key": "steam"})
+    response = await client.post(f"/api/intelligence/proposals/{proposal_id}/resolve", json={"action": "accept"})
+    assert response.json()["alias"]["merchant_key"] == "steam"
+    assert client.database.alias_map() == {"valve": "steam"}
+    chained = client.database.add_proposal(kind="alias", merchant_key="steam", payload={"alias_key": "steam", "merchant_key": "valve corp"})
+    assert (await client.post(f"/api/intelligence/proposals/{chained}/resolve", json={"action": "accept"})).status_code == 422
+    assert client.database.list_proposals()[0]["id"] == chained, "handed back open"
+
+
+async def test_open_proposals_can_be_declined_in_bulk_by_kind(client):
+    client.database.add_proposal(kind="rule", merchant_key="a", payload={})
+    client.database.add_proposal(kind="rule", merchant_key="b", payload={})
+    client.database.add_proposal(kind="alias", merchant_key="c", payload={})
+    assert (await client.post("/api/intelligence/proposals/decline", json={"kind": "rule"})).json() == {"declined": 2}
+    assert [p["kind"] for p in client.database.list_proposals()] == ["alias"]
+    assert (await client.post("/api/intelligence/proposals/decline", json={})).json() == {"declined": 1}
+
+
+async def test_a_history_proposal_run_is_a_categorize_job_with_a_flag(client):
+    response = await client.post("/api/jobs", json={"kind": "categorize", "propose_rules": True})
+    assert response.status_code == 202
+    assert response.json()["job"]["params"] == {"propose_rules": True}
+
+
 async def test_declining_a_proposal_declares_nothing(client):
     proposal_id = client.database.add_proposal(kind="rule", merchant_key="blue bottle", payload={"category_id": "cat-coffee"})
     response = await client.post(f"/api/intelligence/proposals/{proposal_id}/resolve", json={"action": "decline"})

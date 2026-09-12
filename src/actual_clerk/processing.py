@@ -21,6 +21,7 @@ from actual_clerk import anticipated
 from actual_clerk.categorize import (
     STATUS_APPLIED,
     Categorizer,
+    build_memory,
     rule_proposal_candidates,
 )
 from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
@@ -38,6 +39,7 @@ from actual_clerk.domain.intelligence import (
     OBSERVED_CORRECTED,
     SOURCE_RULE,
     RuleBook,
+    history_rule_candidates,
     observe_decisions,
     payee_aliases,
     rules_needing_repair,
@@ -409,6 +411,7 @@ class JobManager:
         params = job.get("params") or {}
         full = bool(params.get("full"))
         retry_reviews = bool(params.get("reviews"))
+        propose_from_history = bool(params.get("propose_rules"))
         lookback = settings.history_lookback_days if full else settings.categorize_lookback_days
         review_transaction_ids = (
             self.database.open_review_transaction_ids() if retry_reviews else None
@@ -430,6 +433,10 @@ class JobManager:
         aliases_learned = self.database.learn_aliases(
             payee_aliases(snapshot["transactions"]), source=ALIAS_ACTUAL_PAYEE
         )
+        history_proposals = 0
+        if propose_from_history:
+            history_proposals = self._propose_from_history(snapshot, settings, today, rules)
+
         categorizer = Categorizer(settings)
         try:
             self.database.update_job(job["id"], phase="classifying")
@@ -462,6 +469,7 @@ class JobManager:
                 "corrections": learned.get("corrections", 0),
                 "disputes": learned.get("disputes", 0),
                 "repairs": repairs,
+                "history_proposals": history_proposals,
             }
 
         self.database.update_job(
@@ -506,6 +514,7 @@ class JobManager:
         promotions = 0
         if settings.rule_promotion_enabled:
             promotions = self._propose_rules(result.applied, stored, settings, rules)
+        alias_proposals = self._propose_aliases(result.alias_proposals)
 
         refreshed = await self.snapshot(today=today)
         await self._refresh_overview(refreshed, settings, today)
@@ -516,6 +525,8 @@ class JobManager:
         summary["corrections"] = learned.get("corrections", 0)
         summary["disputes"] = learned.get("disputes", 0)
         summary["repairs"] = repairs
+        summary["history_proposals"] = history_proposals
+        summary["alias_proposals"] = alias_proposals
         summary["lookback_days"] = lookback
         summary["full_history"] = full
         summary["review_retry"] = retry_reviews
@@ -628,6 +639,56 @@ class JobManager:
                 evidence={"disputes": disputes, "reason": reason},
             )
         )
+
+    def _propose_aliases(self, found: list[dict[str, Any]]) -> int:
+        """What the model believes are two names for one shop, for the user to confirm."""
+        created = 0
+        for item in found:
+            if self.database.add_proposal(
+                kind="alias",
+                merchant_key=item["alias_key"],
+                payload={
+                    "alias_key": item["alias_key"],
+                    "alias_label": item["alias_label"],
+                    "merchant_key": item["merchant_key"],
+                },
+                evidence={
+                    "confidence": item["confidence"],
+                    "reason": item["reason"] or "The model believes these are one business.",
+                },
+            ):
+                created += 1
+        return created
+
+    def _propose_from_history(
+        self, snapshot: dict[str, Any], settings: Settings, today: datetime.date, rules: RuleBook
+    ) -> int:
+        """Ask for a rule wherever the history alone is unanimous and deep enough."""
+        memory = build_memory(snapshot, today=today)
+        created = 0
+        for candidate in history_rule_candidates(
+            memory, rules=rules, min_sightings=settings.rule_promote_after
+        ):
+            if self.database.add_proposal(
+                kind="rule",
+                merchant_key=candidate["merchant_key"],
+                payload={
+                    "merchant_key": candidate["merchant_key"],
+                    "merchant_label": candidate["merchant_key"],
+                    "category_id": candidate["category_id"],
+                    "category_name": candidate["category_name"],
+                },
+                evidence={
+                    "observations": candidate["observations"],
+                    "descriptors": [],
+                    "reason": (
+                        f"Your history files this merchant as {candidate['category_name']} "
+                        f"{candidate['observations']} times without exception."
+                    ),
+                },
+            ):
+                created += 1
+        return created
 
     def _propose_repairs(self, snapshot: dict[str, Any]) -> int:
         """Ask for a category wherever a rule's category has left the budget."""

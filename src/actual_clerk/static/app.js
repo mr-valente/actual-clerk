@@ -593,6 +593,10 @@ function proposalRow(item, categories) {
   } else if (item.kind === "rule_retire") {
     title = `${merchant}: retire the ${body.from_category_name || ""} rule?`;
     acceptLabel = "Retire it";
+  } else if (item.kind === "alias") {
+    title = `Is “${body.alias_label || body.alias_key}” the same shop as “${body.merchant_key}”?`;
+    detail = `${escapeHtml(evidence.reason || "")} The model is ${percent(evidence.confidence || 0)} sure. Yes makes an alias, so the known merchant's rules and history apply to this name.`;
+    acceptLabel = "Same shop";
   } else if (item.kind === "repair") {
     title = `${merchant}: ${body.from_category_name || body.from_category_id || "a category"} is gone`;
     detail = `${escapeHtml(evidence.reason || "")} Pick where it goes now.`;
@@ -657,14 +661,14 @@ async function renderIntelligence() {
   const activeElement = document.activeElement;
   const restoreSearchFocus = activeElement?.id === "rule-search";
   content.innerHTML = `
-    <section class="page-intro"><div><h2>Intelligence</h2><p>Everything Clerk knows about what your transactions mean, and everything it wants to know. A <strong>rule</strong> is your word: it files a merchant without thresholds, before any evidence or model is consulted. Clerk proposes rules from what it has filed consistently, and never makes one on its own.</p></div><div class="actions"><a class="button ghost" href="#review">Review queue</a></div></section>
+    <section class="page-intro"><div><h2>Intelligence</h2><p>Everything Clerk knows about what your transactions mean, and everything it wants to know. A <strong>rule</strong> is your word: it files a merchant without thresholds, before any evidence or model is consulted. Clerk proposes rules from what it has filed consistently, and never makes one on its own.</p></div><div class="actions"><button class="button ghost" data-action="propose-from-history" title="Ask for a rule wherever your history has filed a merchant one way, every time, often enough">Propose rules from history</button><a class="button ghost" href="#review">Review queue</a></div></section>
     <section class="grid intel-grid" style="margin-bottom:18px">
       <article class="metric-card"><span class="metric-icon">⚡</span><span class="metric-label">Rules</span><div class="metric-value">${counts.rules || 0}</div><span class="metric-note">${live.length - (counts.rules || 0) > 0 ? `${live.length - (counts.rules || 0)} paused · ` : ""}applied before evidence or the model</span></article>
       <article class="metric-card ${proposals.length ? "warning" : ""}"><span class="metric-icon">?</span><span class="metric-label">Proposals</span><div class="metric-value">${proposals.length}</div><span class="metric-note">questions waiting for you</span></article>
       <article class="metric-card"><span class="metric-icon">↺</span><span class="metric-label">Merchants learned</span><div class="metric-value">${counts.memory_merchants || 0}</div><span class="metric-note">${counts.aliases || 0} alias${counts.aliases === 1 ? "" : "es"} · from decisions applied or approved</span></article>
     </section>
     ${proposals.length ? `<article class="panel">
-      <header class="panel-head"><div><h2>Proposals</h2><p>What Clerk wants to know: merchants filed the same way often enough to deserve a rule, rules your corrections in Actual disagree with, and rules whose category has left the budget.</p></div>${statusChip("suggested", `${proposals.length} waiting`)}</header>
+      <header class="panel-head"><div><h2>Proposals</h2><p>What Clerk wants to know: merchants filed the same way often enough to deserve a rule, rules your corrections in Actual disagree with, rules whose category has left the budget, and names the model believes belong to one shop.</p></div><div class="panel-actions">${statusChip("suggested", `${proposals.length} waiting`)}${proposals.length > 3 ? `<button class="button ghost small" data-action="proposals-decline-all" data-count="${proposals.length}">Decline all</button>` : ""}</div></header>
       <div class="status-list">${proposals.map((item) => proposalRow(item, categories)).join("")}</div>
     </article>` : ""}
     <article class="panel" style="margin-top:18px">
@@ -1573,6 +1577,7 @@ async function renderSettings() {
         <section class="panel settings-section" id="settings-filing"><header class="panel-head"><div><h3>Filing</h3><p class="section-description">How Clerk decides, and how much it does without asking.</p></div></header><div class="panel-body">
           ${settingToggle("categorization_enabled", "File uncategorized transactions", "Runs after every sync. Transactions you have already categorized are never touched.", s.categorization_enabled)}
           ${settingToggle("ai_enabled", "Ask the local model about new merchants", "With this off, Clerk still files merchants it recognizes and queues the rest for review.", s.ai_enabled)}
+          ${settingToggle("ai_alias_questions", "Also ask whether a new merchant is a known one by another name", "One more model call per unfamiliar merchant. A yes becomes an alias proposal under Intelligence, never an alias.", s.ai_alias_questions)}
           <div class="form-grid">
             ${settingInput("apply_mode", "For merchants Clerk already knows", s.apply_mode, { type: "select", full: true, choices: [["automatic", "Apply reliable history in Actual"], ["review", "Propose every category for review"]], note: "First-time merchants always require approval, regardless of this setting." })}
             ${settingInput("memory_min_confidence", "Confidence needed from memory", s.memory_min_confidence, { type: "number", min: 0, max: 1, step: 0.01, note: "Evidence from your own filing history." })}
@@ -2050,6 +2055,20 @@ document.addEventListener("click", async (event) => {
       await renderRoute({ quiet: true });
     } catch (error) { toast("Could not forget the alias", error.message, "error"); }
   }
+  if (action === "propose-from-history") {
+    event.preventDefault();
+    if (!window.confirm("Look through your whole filing history and propose a rule for every merchant that has only ever been filed one way?\n\nNothing is declared until you accept each one; Decline all waves the rest away.")) return;
+    enqueue("categorize", "Rule proposals from history", { propose_rules: true });
+  }
+  if (action === "proposals-decline-all") {
+    event.preventDefault();
+    if (!window.confirm(`Decline all ${target.dataset.count} open proposals?\n\nClerk will not ask these again.`)) return;
+    try {
+      const result = await api("/api/intelligence/proposals/decline", { method: "POST", body: JSON.stringify({}) });
+      toast("Proposals declined", `${result.declined} closed.`);
+      await renderIntelligence();
+    } catch (error) { toast("Could not decline", error.message, "error"); }
+  }
   if (action === "rules-show-retired") {
     event.preventDefault();
     state.showRetiredRules = !state.showRetiredRules;
@@ -2181,7 +2200,7 @@ content.addEventListener("submit", async (event) => {
   const locked = new Set(state.settings?.environment_overrides || []);
   const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "memory_dispute_threshold", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "anticipated_match_window_days", "anticipated_expire_days"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "memory_learn_from_actual", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "ai_alias_questions", "rule_promotion_enabled", "memory_learn_from_actual", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;

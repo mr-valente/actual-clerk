@@ -40,6 +40,7 @@ from actual_clerk.schemas import (
     CreateCategoryRequest,
     CreateLinkRequest,
     CreateRuleRequest,
+    DeclineProposalsRequest,
     EnqueueRequest,
     ExchangeRequest,
     ForwardNotificationRequest,
@@ -466,6 +467,8 @@ async def enqueue_job(payload: EnqueueRequest, request: Request) -> dict[str, An
             params = {"full": True}
         elif payload.reviews:
             params = {"reviews": True}
+        if payload.propose_rules:
+            params = {**(params or {}), "propose_rules": True}
     elif payload.force and payload.kind == "digest":
         params = {"force": True}
     job, created = await _jobs(request).enqueue(payload.kind, trigger="manual", params=params)
@@ -859,6 +862,13 @@ async def intelligence_restore(payload: ActualRulesRequest, request: Request) ->
     )
 
 
+@app.post("/api/intelligence/proposals/decline")
+async def decline_proposals(payload: DeclineProposalsRequest, request: Request) -> dict[str, Any]:
+    """Wave away every open proposal of a kind, for a bulk run that asked too much."""
+    declined = _database(request).decline_open_proposals(kind=payload.kind or None)
+    return {"declined": declined}
+
+
 @app.post("/api/intelligence/proposals/{proposal_id}/resolve")
 async def resolve_proposal(
     proposal_id: str, payload: ResolveProposalRequest, request: Request
@@ -893,6 +903,23 @@ async def resolve_proposal(
             raise hand_back("The proposal no longer names a category")
         database.resolve_proposal(proposal_id, "accepted")
         return {"status": "accepted", "rule": _serialize_record(rule)}
+
+    if kind == "alias":
+        alias_key = str(body.get("alias_key") or proposal["merchant_key"])
+        merchant_key = str(body.get("merchant_key") or "")
+        existing = database.alias_map()
+        if not alias_key or not merchant_key or alias_key == merchant_key:
+            raise hand_back("The proposal no longer names two merchants")
+        if merchant_key in existing or alias_key in set(existing.values()):
+            raise hand_back("That alias would chain; declare it by hand instead")
+        alias = database.upsert_alias(
+            alias_key,
+            merchant_key,
+            alias_label=str(body.get("alias_label") or ""),
+            source="taught",
+        )
+        database.resolve_proposal(proposal_id, "accepted")
+        return {"status": "accepted", "alias": _serialize_record(alias) if alias else None}
 
     rule_id = str(body.get("rule_id") or "")
     rule = database.get_rule(rule_id) if rule_id else None

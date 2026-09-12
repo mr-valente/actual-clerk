@@ -627,3 +627,59 @@ async def test_an_intermittent_failure_does_not_abandon_the_model(settings):
     assert result.model_abandoned is False
     assert len(model.calls) == 6
     assert len(result.review) == 6
+
+
+# ------------------------------------------------------------ model consults
+
+
+async def test_the_model_is_shown_rules_for_similar_merchants(settings):
+    model = FakeModel([{"category_number": 1, "confidence": 0.9, "reason": "ok", "suggested_new_category": ""}])
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "amazon", "category_id": "cat-groceries", "category_name": "Groceries", "merchant_label": "Amazon"}])
+    pending = [transaction(TODAY, -2500, payee="Amazon Fresh")]
+    await run(settings, snapshot(transactions=pending), model=model, rules=rules)
+    assert "RULES THIS PERSON HAS SET FOR SIMILAR MERCHANTS" in model.calls[0]["user"]
+    assert "Amazon -> Groceries (always)" in model.calls[0]["user"]
+
+
+async def test_the_same_merchant_question_is_only_asked_when_switched_on(settings):
+    model = FakeModel([{"category_number": 1, "confidence": 0.9, "reason": "ok", "suggested_new_category": ""}])
+    pending = [transaction(TODAY, -1999, payee="Valve")]
+    result = await run(settings, snapshot(transactions=coffee_history() + pending), model=model)
+    assert [call["name"] for call in model.calls] == ["category_choice"]
+    assert result.alias_proposals == []
+
+
+async def test_a_confident_same_merchant_answer_becomes_an_alias_proposal(settings):
+    settings = settings.model_copy(update={"ai_alias_questions": True})
+    model = FakeModel([
+        {"category_number": 1, "confidence": 0.9, "reason": "ok", "suggested_new_category": ""},
+        {"candidate_number": 1, "confidence": 0.92, "reason": "Valve runs Steam."},
+    ])
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "steam", "category_id": "cat-coffee"}])
+    pending = [transaction(TODAY, -1999, payee="Valve")]
+    result = await run(settings, snapshot(transactions=pending), model=model, rules=rules)
+    assert [call["name"] for call in model.calls] == ["category_choice", "alias_choice"]
+    assert "1. steam" in model.calls[1]["user"]
+    [proposal] = result.alias_proposals
+    assert proposal == {"alias_key": "valve", "alias_label": "Valve", "merchant_key": "steam", "confidence": 0.92, "reason": "Valve runs Steam."}
+    assert result.model_calls == 2
+    assert result.summary()["alias_proposals"] == 1
+
+
+async def test_an_unsure_or_unusable_same_merchant_answer_is_dropped(settings):
+    settings = settings.model_copy(update={"ai_alias_questions": True})
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "steam", "category_id": "cat-coffee"}])
+    unsure = FakeModel([
+        {"category_number": 1, "confidence": 0.9, "reason": "ok", "suggested_new_category": ""},
+        {"candidate_number": 1, "confidence": 0.4, "reason": "maybe"},
+    ])
+    result = await run(settings, snapshot(transactions=[transaction(TODAY, -1999, payee="Valve")]), model=unsure, rules=rules)
+    assert result.alias_proposals == []
+    nonsense = FakeModel([
+        {"category_number": 1, "confidence": 0.9, "reason": "ok", "suggested_new_category": ""},
+        {"category_number": 3},
+    ])
+    result = await run(settings, snapshot(transactions=[transaction(TODAY, -1999, payee="Valve")]), model=nonsense, rules=rules)
+    assert result.alias_proposals == []
+    # A dropped alias answer is not a model failure.
+    assert result.errors == []

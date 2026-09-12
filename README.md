@@ -243,6 +243,7 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_AI_EXAMPLE_COUNT` | `8` | Your own transactions shown to the model |
 | `CLERK_CATEGORY_CANDIDATE_LIMIT` | `90` | Categories offered to the model |
 | `CLERK_ALLOW_NEW_CATEGORIES` | `false` | Surface suggestions for missing categories |
+| `CLERK_AI_ALIAS_QUESTIONS` | `false` | Also ask whether a new merchant is a known one by another name |
 | `CLERK_RULE_PROMOTION_ENABLED` | `true` | Propose a rule once a merchant is settled |
 | `CLERK_RULE_PROMOTE_AFTER` | `3` | Consistent decisions before proposing |
 | `CLERK_MEMORY_LEARN_FROM_ACTUAL` | `true` | Read categories changed by hand in Actual as corrections |

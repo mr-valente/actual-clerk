@@ -5,7 +5,9 @@ import datetime
 from actual_clerk.domain.intelligence import (
     Rule,
     RuleBook,
+    alias_candidates,
     canonical_key,
+    history_rule_candidates,
     observe_decisions,
     payee_aliases,
     resolve,
@@ -180,6 +182,7 @@ def test_the_payee_catalogue_yields_aliases_where_the_two_names_differ():
         row("SQ *BLUE BOTTLE 4471", "Blue Bottle Coffee"),
         row("SQ *BLUE BOTTLE 4471", "Blue Bottle Coffee"),
         row("STARBUCKS #1234", "Starbucks"),
+        row("STARBUCKS #1234", "Starbucks"),
         row("", "Landlord"),
         row("Landlord", ""),
     ])
@@ -196,14 +199,30 @@ def test_an_ambiguous_descriptor_and_a_chain_are_left_alone():
     ambiguous = payee_aliases([
         row("AMZN Mktp", "Amazon Marketplace"),
         row("AMZN Mktp", "Amazon Prime"),
+        row("AMZN Mktp", "Amazon Prime"),
     ])
     assert ambiguous == {}
     chained = payee_aliases([
-        row("VALVE", "Steam"),
-        row("Steam", "Steam Games"),
+        row("VALVE", "Steam"), row("VALVE", "Steam"),
+        row("Steam", "Steam Games"), row("Steam", "Steam Games"),
     ])
     # valve -> steam would point at a key that is itself an alias; both are dropped.
     assert chained == {}
+
+
+def test_a_pair_seen_once_or_naming_a_payment_rail_is_not_an_alias():
+    once = payee_aliases([row("Chipotle Mex Gr", "Chipotle Mexican Grill")])
+    assert once == {}
+    rails = payee_aliases([
+        row("ACH PAYPAL INST", "Dunkin"), row("ACH PAYPAL INST", "Dunkin"),
+        row("DEBIT CARD WITHDRAWAL", "Chumba Casino"), row("DEBIT CARD WITHDRAWAL", "Chumba Casino"),
+        row("SIG VISA PAYPAL", "Apple"), row("SIG VISA PAYPAL", "Apple"),
+        row("Gyro Factory", "LLC"), row("Gyro Factory", "LLC"),
+    ])
+    assert rails == {}
+    # A rail word beside a real name is still a name.
+    real = payee_aliases([row("DEBIT CARD POPEYES", "Popeyes"), row("DEBIT CARD POPEYES", "Popeyes")])
+    assert list(real) == ["debit card popeyes"]
 
 
 # --------------------------------------------------------------- observations
@@ -248,3 +267,33 @@ def test_only_active_rules_with_a_missing_category_need_repair():
         {"id": "paused", "category_id": "cat-old", "status": "paused"},
     ]
     assert [rule["id"] for rule in rules_needing_repair(rules, [{"id": "cat-coffee"}])] == ["gone"]
+
+
+# ------------------------------------------------------------- model helpers
+
+
+def test_related_rules_are_the_closest_by_name():
+    book = RuleBook.from_rows([
+        rule(id="amazon", merchant_key="amazon"),
+        rule(id="prime", merchant_key="amazon prime"),
+        rule(id="shell", merchant_key="shell"),
+    ])
+    assert [r.id for r in book.related("amazon fresh")] == ["amazon", "prime"]
+    assert book.related("") == []
+    assert [r.id for r in book.rules] == ["amazon", "prime", "shell"]
+
+
+def test_history_proposes_only_unanimous_well_seen_merchants_without_a_rule():
+    memory = MerchantMemory().add_transactions(
+        history(*[("shell", "cat-gas", "Gas")] * 4, *[("target", "cat-a", "A")] * 3, ("target", "cat-b", "B"), *[("once", "cat-a", "A")] * 2, *[("ruled", "cat-a", "A")] * 5),
+        TODAY,
+    )
+    book = RuleBook.from_rows([rule(id="r", merchant_key="ruled", category_id="cat-a")])
+    candidates = history_rule_candidates(memory, rules=book, min_sightings=3)
+    assert candidates == [{"merchant_key": "shell", "category_id": "cat-gas", "category_name": "Gas", "observations": 4}]
+
+
+def test_alias_candidates_are_the_closest_known_keys():
+    known = ["steam games", "valve corp", "shell", "starbucks", "valve"]
+    assert alias_candidates("valve", known, limit=3) == ["valve corp", "shell", "starbucks"]
+    assert alias_candidates("", known) == []

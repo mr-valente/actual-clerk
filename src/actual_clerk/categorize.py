@@ -31,10 +31,23 @@ from typing import Any
 from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleClient
 from actual_clerk.config import Settings
 from actual_clerk.domain import tagging
-from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, resolve
+from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, alias_candidates, resolve
 from actual_clerk.domain.memory import MerchantMemory, similar_examples
-from actual_clerk.prompts import SYSTEM_PROMPT, build_user_prompt
-from actual_clerk.schemas import CATEGORY_CHOICE_SCHEMA, CategoryChoice
+from actual_clerk.prompts import (
+    ALIAS_SYSTEM_PROMPT,
+    SYSTEM_PROMPT,
+    build_alias_prompt,
+    build_user_prompt,
+)
+from actual_clerk.schemas import (
+    ALIAS_CHOICE_SCHEMA,
+    CATEGORY_CHOICE_SCHEMA,
+    AliasChoice,
+    CategoryChoice,
+)
+
+# An alias the model is less sure of than this is not worth a person's time.
+ALIAS_MIN_CONFIDENCE = 0.7
 
 SOURCE_MEMORY = "memory"
 SOURCE_MODEL = "model"
@@ -98,6 +111,8 @@ class CategorizationResult:
     model_calls: int = 0
     merchants_seen: int = 0
     suggested_categories: list[dict[str, Any]] = field(default_factory=list)
+    # Merchants the model believes are ones the budget knows by another name.
+    alias_proposals: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     model_abandoned: bool = False
 
@@ -122,6 +137,7 @@ class CategorizationResult:
             "model_abandoned": self.model_abandoned,
             "by_source": by_source,
             "suggested_categories": self.suggested_categories,
+            "alias_proposals": len(self.alias_proposals),
             "errors": self.errors,
         }
 
@@ -409,11 +425,20 @@ class Categorizer:
             "count": len(items),
         }
         examples = similar_examples(real_key, history, limit=settings.ai_example_count)
+        hints = [
+            {
+                "merchant_key": rule.merchant_key,
+                "merchant_label": rule.merchant_label,
+                "category_name": names.get(rule.category_id, rule.category_name),
+            }
+            for rule in (rules.related(real_key) if rules is not None and real_key else [])
+        ]
         prompt = build_user_prompt(
             merchant=merchant,
             candidates=candidates,
             examples=examples,
             currency=settings.budget_currency,
+            rule_hints=hints,
         )
         try:
             # This counts classification requests, including requests whose
@@ -436,6 +461,19 @@ class Categorizer:
             self._record_model_failure(result)
             return self._unresolved(f"The model returned an unusable answer: {exc}")
         self._model_failures = 0
+
+        if settings.ai_alias_questions and real_key:
+            await self._ask_same_merchant(
+                model,
+                merchant=merchant,
+                merchant_key=real_key,
+                known_keys=[
+                    *memory.keys,
+                    *(rule.merchant_key for rule in (rules.rules if rules is not None else [])),
+                    *aliases.values(),
+                ],
+                result=result,
+            )
 
         if choice.category_number <= 0 or choice.category_number > len(candidates):
             # A missing category is only worth raising when the user has said
@@ -478,6 +516,50 @@ class Categorizer:
                 "examples": [example.get("merchant_key") for example in examples],
             },
         }
+
+    async def _ask_same_merchant(
+        self,
+        model: OpenAICompatibleClient,
+        *,
+        merchant: dict[str, Any],
+        merchant_key: str,
+        known_keys: Sequence[str],
+        result: CategorizationResult,
+    ) -> None:
+        """Ask whether an unfamiliar merchant is a known one under another name.
+
+        A yes is recorded as an alias proposal for the user, never as an
+        alias; a bad answer is simply dropped, since this question is a
+        courtesy rather than part of filing.
+        """
+
+        candidates = alias_candidates(merchant_key, known_keys)
+        if not candidates:
+            return
+        try:
+            result.model_calls += 1
+            raw = await model.structured(
+                name="alias_choice",
+                schema=ALIAS_CHOICE_SCHEMA,
+                system=ALIAS_SYSTEM_PROMPT,
+                user=build_alias_prompt(merchant=merchant, candidates=candidates),
+            )
+            choice = AliasChoice.model_validate(raw)
+        except (ModelError, ValueError):
+            return
+        if not 0 < choice.candidate_number <= len(candidates):
+            return
+        if choice.confidence < ALIAS_MIN_CONFIDENCE:
+            return
+        result.alias_proposals.append(
+            {
+                "alias_key": merchant_key,
+                "alias_label": merchant.get("label") or merchant_key,
+                "merchant_key": candidates[choice.candidate_number - 1],
+                "confidence": choice.confidence,
+                "reason": choice.reason,
+            }
+        )
 
     @staticmethod
     def _unresolved(reason: str) -> dict[str, Any]:

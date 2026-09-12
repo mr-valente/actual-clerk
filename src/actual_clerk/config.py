@@ -108,6 +108,10 @@ class Settings(BaseModel):
     ai_example_count: int = Field(default=8, ge=0, le=40)
     category_candidate_limit: int = Field(default=90, ge=10, le=400)
     allow_new_categories: bool = False
+    # After asking about an unfamiliar merchant's category, also ask whether
+    # it is a merchant the budget already knows by another name. One more
+    # model call per unfamiliar merchant, so it is off unless asked for.
+    ai_alias_questions: bool = False
 
     # --- Rule promotion ---------------------------------------------------
     rule_promotion_enabled: bool = True
@@ -423,6 +427,7 @@ ENVIRONMENT_FIELDS = {
     "CLERK_AI_EXAMPLE_COUNT": "ai_example_count",
     "CLERK_CATEGORY_CANDIDATE_LIMIT": "category_candidate_limit",
     "CLERK_ALLOW_NEW_CATEGORIES": "allow_new_categories",
+    "CLERK_AI_ALIAS_QUESTIONS": "ai_alias_questions",
     "CLERK_RULE_PROMOTION_ENABLED": "rule_promotion_enabled",
     "CLERK_RULE_PROMOTE_AFTER": "rule_promote_after",
     "CLERK_MEMORY_LEARN_FROM_ACTUAL": "memory_learn_from_actual",

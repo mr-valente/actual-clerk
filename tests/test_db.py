@@ -602,6 +602,9 @@ def test_learned_aliases_never_override_a_taught_one_or_form_a_chain(database):
     assert learned == 2
     assert database.alias_map() == {"valve": "steam", "sq blue bottle": "blue bottle coffee"}
     assert {a["alias_key"]: a["source"] for a in database.list_aliases()}["sq blue bottle"] == "actual_payee"
+    # Learned aliases follow the evidence: one the next reading lacks is dropped, taught ones stay.
+    database.learn_aliases({}, source="actual_payee")
+    assert database.alias_map() == {"valve": "steam"}
 
 
 def test_memory_is_listed_one_merchant_at_a_time_with_a_label(database):

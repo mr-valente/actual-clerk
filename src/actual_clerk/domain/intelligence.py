@@ -23,7 +23,7 @@ from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
-from actual_clerk.domain.memory import MerchantMemory
+from actual_clerk.domain.memory import MerchantMemory, token_similarity
 from actual_clerk.domain.merchants import keys_related, merchant_label, normalize_merchant
 
 SOURCE_RULE = "rule"
@@ -109,6 +109,32 @@ class RuleBook:
     def has_merchant(self, merchant_key: str) -> bool:
         return any(key == merchant_key for key, _ in self._exact)
 
+    @property
+    def rules(self) -> list[Rule]:
+        return list(self._exact.values())
+
+    def related(self, merchant_key: str, *, limit: int = 6) -> list[Rule]:
+        """Rules for merchants that look like this one, closest first.
+
+        Shown to the model as hints: a rule for `amazon` says a lot about
+        `amazon fresh`, and the user's own rules are a better guide than the
+        category names.
+        """
+
+        if not merchant_key:
+            return []
+        scored = []
+        for rule in self._exact.values():
+            score = (
+                1.0
+                if keys_related(rule.merchant_key, merchant_key)
+                else token_similarity(rule.merchant_key, merchant_key)
+            )
+            if score > 0:
+                scored.append((score, rule))
+        scored.sort(key=lambda item: (-item[0], item[1].merchant_key))
+        return [rule for _, rule in scored[:limit]]
+
     def lookup(self, merchant_key: str, account_id: str = "") -> Rule | None:
         if not merchant_key:
             return None
@@ -140,6 +166,31 @@ class Resolution:
         return self.source == SOURCE_RULE
 
 
+# A pair has to recur before it is read as an alias rather than a one-off.
+ALIAS_MIN_SIGHTINGS = 2
+# Words that describe how money moved rather than where it went. A descriptor
+# left with nothing else names the rail, and a rail is not a merchant.
+_RAIL_TOKENS = frozenset(
+    {
+        "ach", "eft", "pos", "sig", "visa", "mastercard", "amex", "discover", "paypal", "pp",
+        "venmo", "zelle", "inst", "xfer", "transfer", "tfr", "debit", "credit", "card",
+        "consumer", "withdrawal", "deposit", "dep", "electronic", "payment", "pmnt", "pymt",
+        "rcvd", "received", "recurring", "purchase", "pur", "online", "mobile", "internet",
+        "check", "chk", "atm", "cash", "fee", "interest", "direct", "ext", "trn", "merchant",
+        "location", "timestamp", "date", "retail", "store", "web", "ppd", "ccd", "pending",
+    }
+)
+
+
+def _names_a_rail(key: str) -> bool:
+    return all(token in _RAIL_TOKENS or len(token) <= 2 for token in key.split())
+
+
+def _too_generic(key: str) -> bool:
+    tokens = key.split()
+    return not tokens or (len(tokens) == 1 and len(tokens[0]) <= 3)
+
+
 def payee_aliases(transactions: Iterable[Mapping[str, Any]]) -> dict[str, dict[str, str]]:
     """Aliases the user's own payee catalogue in Actual already implies.
 
@@ -149,12 +200,16 @@ def payee_aliases(transactions: Iterable[Mapping[str, Any]]) -> dict[str, dict[s
     calling it one: `SQ *BLUE BOTTLE 4471` is `Blue Bottle Coffee`. Reading
     those pairs back is what keeps a rule firing after a payee is renamed.
 
-    Only unambiguous pairs are kept: a descriptor key that has been settled
-    on two different payees says nothing, and a key that appears as both a
-    descriptor and a payee is left alone so the alias table never chains.
+    Only pairs that have earned it are kept. A descriptor settled on two
+    different payees says nothing. A pair seen once may be a one-off rename;
+    it has to recur. A descriptor made only of payment-rail words (`ACH
+    PAYPAL INST`, `DEBIT CARD WITHDRAWAL`) names the rail, not the shop, and
+    would make every future charge on that rail read as whatever the user
+    once filed one as. And a key that appears as both a descriptor and a
+    payee is left alone so the alias table never chains.
     """
 
-    seen: dict[str, dict[str, dict[str, str]]] = {}
+    seen: dict[str, dict[str, dict[str, Any]]] = {}
     for row in transactions:
         imported = str(row.get("imported_description") or "")
         payee = str(row.get("payee_name") or "")
@@ -164,19 +219,25 @@ def payee_aliases(transactions: Iterable[Mapping[str, Any]]) -> dict[str, dict[s
         target_key = normalize_merchant(payee)
         if not source_key or not target_key or source_key == target_key:
             continue
+        if _names_a_rail(source_key) or _too_generic(target_key):
+            continue
         targets = seen.setdefault(source_key, {})
-        targets.setdefault(
+        entry = targets.setdefault(
             target_key,
             {
                 "merchant_key": target_key,
                 "alias_label": merchant_label(imported),
                 "merchant_label": merchant_label(payee),
+                "sightings": 0,
             },
         )
+        entry["sightings"] += 1
     pairs = {
-        source_key: next(iter(targets.values()))
+        source_key: {key: value for key, value in entry.items() if key != "sightings"}
         for source_key, targets in seen.items()
         if len(targets) == 1
+        for entry in targets.values()
+        if entry["sightings"] >= ALIAS_MIN_SIGHTINGS
     }
     target_keys = {entry["merchant_key"] for entry in pairs.values()}
     return {
@@ -364,3 +425,59 @@ def rules_needing_repair(
         if str(rule.get("status") or "active") == "active"
         and str(rule.get("category_id") or "") not in known
     ]
+
+
+def history_rule_candidates(
+    memory: MerchantMemory,
+    *,
+    rules: RuleBook | None = None,
+    min_sightings: float = 3,
+    limit: int = 100,
+) -> list[dict[str, Any]]:
+    """Merchants the user has filed one way, every time, often enough to be a rule.
+
+    For a first run against an existing budget: the evidence alone earns
+    the question, and the answer is still the user's. Merchants that already
+    have a rule are skipped; the most-seen come first.
+    """
+
+    candidates: list[dict[str, Any]] = []
+    for key in memory.keys:
+        if rules is not None and rules.has_merchant(key):
+            continue
+        evidence = memory.evidence(key)
+        if not evidence:
+            continue
+        top = evidence[0]
+        sightings = float(top.get("sightings") or 0)
+        if float(top.get("share") or 0) < 1.0 or sightings < min_sightings:
+            continue
+        candidates.append(
+            {
+                "merchant_key": key,
+                "category_id": str(top.get("category_id") or ""),
+                "category_name": str(top.get("category_name") or ""),
+                "observations": int(sightings),
+            }
+        )
+    candidates.sort(key=lambda item: (-item["observations"], item["merchant_key"]))
+    return candidates[:limit]
+
+
+def alias_candidates(
+    merchant_key: str,
+    known_keys: Iterable[str],
+    *,
+    limit: int = 12,
+) -> list[str]:
+    """Known merchants worth asking about: the closest by name, then the rest by rule."""
+    if not merchant_key:
+        return []
+    scored = []
+    for key in set(known_keys):
+        if not key or key == merchant_key:
+            continue
+        score = 1.0 if keys_related(key, merchant_key) else token_similarity(key, merchant_key)
+        scored.append((score, key))
+    scored.sort(key=lambda item: (-item[0], item[1]))
+    return [key for _, key in scored[:limit]]

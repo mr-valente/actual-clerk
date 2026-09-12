@@ -21,6 +21,10 @@ class EnqueueRequest(BaseModel):
     # Digest only: send it now to see what the morning looks like, without
     # spending the one delivery today's date is allowed.
     force: bool = False
+    # Categorize only: also propose a rule for every merchant the history
+    # has filed one way, often enough. For a first run against an existing
+    # budget.
+    propose_rules: bool = False
 
     @model_validator(mode="after")
     def one_categorization_scope(self) -> EnqueueRequest:
@@ -64,6 +68,12 @@ class ResolveDecisionRequest(BaseModel):
         if self.action == "recategorize" and not self.category_id:
             raise ValueError("a category is required when recategorizing")
         return self
+
+
+class DeclineProposalsRequest(BaseModel):
+    """Close every open proposal of one kind, or all of them, in one click."""
+
+    kind: str = Field(default="", max_length=40)
 
 
 class ResolveProposalRequest(BaseModel):
@@ -173,6 +183,45 @@ class CategoryChoice(StrictModel):
         if number > 1.0:
             number = number / 100 if number <= 100 else 1.0
         return max(0.0, min(1.0, number))
+
+
+class AliasChoice(StrictModel):
+    """Whether an unfamiliar merchant is one the budget knows by another name."""
+
+    candidate_number: int = Field(ge=0, le=999)
+    confidence: float = Field(ge=0.0, le=1.0)
+    reason: str = Field(default="", max_length=400)
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def empty_optional_text(cls, value: Any) -> Any:
+        return "" if value is None else value
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def clamp_confidence(cls, value: Any) -> Any:
+        try:
+            number = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if number > 1.0:
+            number = number / 100 if number <= 100 else 1.0
+        return max(0.0, min(1.0, number))
+
+
+ALIAS_CHOICE_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "properties": {
+        "candidate_number": {
+            "type": "integer",
+            "description": "Number of the merchant that is the same business, or 0 if none is.",
+        },
+        "confidence": {"type": "number", "description": "How certain, between 0 and 1."},
+        "reason": {"type": "string", "description": "One short sentence."},
+    },
+    "required": ["candidate_number", "confidence", "reason"],
+    "additionalProperties": False,
+}
 
 
 CATEGORY_CHOICE_SCHEMA: dict[str, Any] = {
