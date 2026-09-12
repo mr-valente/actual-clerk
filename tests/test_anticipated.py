@@ -554,3 +554,62 @@ def test_older_ledgers_gain_the_category_columns(tmp_path):
     database.initialize()
     row = database.get_anticipated_charge("c")
     assert row["category_id"] == "" and row["category_source"] == "" and row["category_confidence"] == 0
+
+
+def test_teaching_an_alias_points_at_the_canonical_key_and_never_chains(database, settings):
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    # The payee catalogue already maps the raw descriptor to the curated payee.
+    database.upsert_alias("steamgames", "steam", source="actual_payee")
+    alias = anticipated.teach_alias(database, row, payee="STEAMGAMES")
+    assert alias["merchant_key"] == "steam"
+    assert database.alias_map() == {"steamgames": "steam", "valve": "steam"}
+    # A key other names already resolve to cannot itself become an alias.
+    other, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $9.99 at Steam was approved.",
+    )
+    assert anticipated.teach_alias(database, other, payee="Valve Software") is None
+    assert database.alias_map() == {"steamgames": "steam", "valve": "steam"}
+
+
+def test_settling_learns_the_alias_against_the_canonical_key(database, settings):
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    database.upsert_alias("steamgames", "steam", source="actual_payee")
+    snap = snapshot(
+        accounts=[account("Card", account_id="acct-card")],
+        transactions=[transaction(datetime.date(2026, 8, 21), -319, payee="STEAMGAMES", account_id="acct-card", transaction_id="t-steam")],
+    )
+    anticipated.reconcile(database, snap, settings, today=TODAY)
+    assert database.get_anticipated_charge(row["id"])["matched_transaction_id"] == "t-steam"
+    # Learned as valve → steam, not valve → steamgames → steam.
+    assert database.alias_map() == {"steamgames": "steam", "valve": "steam"}
+
+
+def test_a_repeat_within_ten_minutes_is_the_same_charge(database, settings):
+    src = source(database)
+    base = int(datetime.datetime(2026, 8, 21, 9, 0, tzinfo=datetime.UTC).timestamp() * 1000)
+    first, created = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=base, title="Card", text="A charge of $4.00 at CAFE was approved.", key="a",
+    )
+    repeat, created_again = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=base + 5 * 60_000, title="Card", text="A charge of $4.00 at CAFE was approved.", key="b",
+    )
+    later, created_later = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=base + 11 * 60_000, title="Card", text="A charge of $4.00 at CAFE was approved.", key="c",
+    )
+    assert (created, created_again, created_later) == (True, False, True)
+    assert repeat["id"] == first["id"] and later["id"] != first["id"]
+    # A different app's identical words are its own charge.
+    other = source(database, device_id="phone-2")
+    _, created_elsewhere = anticipated.record_notification(
+        database, settings, source=other, posted_at_ms=base, title="Card", text="A charge of $4.00 at CAFE was approved.", key="d",
+    )
+    assert created_elsewhere is True

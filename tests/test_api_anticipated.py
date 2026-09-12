@@ -321,3 +321,79 @@ async def test_an_alias_can_be_taught_and_forgotten(client):
     assert [a["alias_key"] for a in (await client.get("/api/anticipated")).json()["aliases"]] == ["valve"]
     assert (await client.delete("/api/anticipated/aliases/valve")).json() == {"deleted": True}
     assert (await client.delete("/api/anticipated/aliases/valve")).status_code == 404
+
+
+# ------------------------------------------------------ repeats and timing
+
+
+async def test_a_non_ascii_device_token_is_refused_not_crashed(client):
+    client.settings_manager.update({"anticipated_device_token": "clé-secrète"})
+    assert (await client.get("/api/anticipated/device/hello", headers={"Authorization": "Bearer cle"})).status_code == 401
+    # HTTP carries header bytes; the server reads them as latin-1, as the phone sends them.
+    ok = await client.get(
+        "/api/anticipated/device/hello",
+        headers={"Authorization": "Bearer clé-secrète".encode("latin-1")},
+    )
+    assert ok.status_code == 200
+
+
+async def test_a_re_posted_notification_under_a_new_key_is_one_charge(client):
+    seed_overview(client.database)
+    await register(client)
+    text = "Your purchase for $3.19 at Valve was approved."
+    first = (await client.post("/api/anticipated/device/notifications", json=notification(text, notification_key="k1"))).json()
+    # The card app re-posts the same words two minutes later with a new post time.
+    again = (await client.post("/api/anticipated/device/notifications", json=notification(text, notification_key="k2", posted_at_ms=1_755_780_000_000 + 120_000))).json()
+    assert again["created"] is False
+    assert again["charge"]["id"] == first["charge"]["id"]
+    # The same words a quarter of an hour later are a new purchase.
+    later = (await client.post("/api/anticipated/device/notifications", json=notification(text, notification_key="k3", posted_at_ms=1_755_780_000_000 + 15 * 60_000))).json()
+    assert later["created"] is True
+    assert len((await client.get("/api/anticipated")).json()["open"]) == 2
+
+
+async def test_the_registration_sample_seen_again_by_the_listener_is_one_charge(client):
+    seed_overview(client.database)
+    registered = await register(
+        client,
+        sample_title="Venture Credit Card…4273",
+        sample_text="Your purchase for $3.19 at Valve was approved.",
+        sample_posted_at_ms=1_755_780_000_000,
+    )
+    sample = registered.json()["charge"]
+    forwarded = (await client.post(
+        "/api/anticipated/device/notifications",
+        json=notification(
+            "Your purchase for $3.19 at Valve was approved.",
+            title="Venture Credit Card…4273",
+            notification_key=f"{PACKAGE}:1755780060000:abcdef0123456789",
+            posted_at_ms=1_755_780_060_000,
+        ),
+    )).json()
+    assert forwarded["created"] is False
+    assert forwarded["charge"]["id"] == sample["id"]
+
+
+async def test_a_slow_budget_read_does_not_hold_the_phone(client, monkeypatch):
+    import asyncio
+
+    from actual_clerk import main as clerk_main
+
+    seed_overview(client.database)
+    await register(client)
+    finished = asyncio.Event()
+
+    async def slow():
+        await asyncio.sleep(0.2)
+        finished.set()
+        return {}
+
+    monkeypatch.setattr(clerk_main.app.state.job_manager, "refresh_now", slow)
+    monkeypatch.setattr(clerk_main, "FORWARD_REFRESH_SECONDS", 0.02)
+    body = (await client.post("/api/anticipated/device/notifications", json=notification("A charge of $5.00 at SHOP was approved."))).json()
+    assert body["created"] is True
+    assert body["refreshed"] is False
+    assert "still" in body["refresh_error"]
+    # The read carries on in the background rather than being cancelled.
+    await asyncio.wait_for(finished.wait(), timeout=2)
+    assert len((await client.get("/api/anticipated")).json()["open"]) == 1

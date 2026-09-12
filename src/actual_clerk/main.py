@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import hashlib
 import logging
@@ -524,7 +525,17 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
         )
         if not category_id:
             continue
-        if not database.resolve_decision(decision_id, "applied"):
+        recategorized = payload.action == "recategorize"
+        if not database.resolve_decision(
+            decision_id,
+            "applied",
+            category_id=category_id if recategorized else None,
+            category_name=(
+                (_category_name(database, category_id) or pending["category_name"])
+                if recategorized
+                else None
+            ),
+        ):
             continue
         add_tags = list(pending.get("tags") or [])
         if settings.tag_provenance and settings.clerk_tag:
@@ -603,8 +614,15 @@ async def resolve_review(
     if payload.action == "recategorize":
         category_name = _category_name(database, category_id) or category_name
 
-    # Claim first: a second click must not produce a second write.
-    claimed = database.resolve_decision(decision_id, "applied")
+    # Claim first: a second click must not produce a second write. The chosen
+    # category is written on the decision too, so the ledger says what went
+    # to Actual rather than what Clerk proposed.
+    claimed = database.resolve_decision(
+        decision_id,
+        "applied",
+        category_id=category_id if payload.action == "recategorize" else None,
+        category_name=category_name if payload.action == "recategorize" else None,
+    )
     if not claimed:
         raise HTTPException(status_code=409, detail="This review has already been resolved")
 
@@ -1546,6 +1564,20 @@ async def migrate_to_simplefin(payload: MigrateToSimpleFinRequest, request: Requ
 # arrives through the ordinary import and settles it.
 
 
+# How long the phone's forward call waits for the budget to be re-read. The
+# phone gives up reading a reply after 30 seconds and would retry a charge it
+# has already delivered.
+FORWARD_REFRESH_SECONDS = 20.0
+
+
+def _log_refresh_outcome(task: asyncio.Task[Any]) -> None:
+    if task.cancelled():
+        return
+    error = task.exception()
+    if error is not None:
+        log.warning("Budget re-read after an anticipated charge failed: %s", error)
+
+
 def _require_device(request: Request) -> None:
     settings = _settings_manager(request).get()
     if not settings.anticipated_enabled:
@@ -1556,7 +1588,9 @@ def _require_device(request: Request) -> None:
     header = request.headers.get("authorization", "")
     presented = header[7:].strip() if header.lower().startswith("bearer ") else ""
     presented = presented or request.headers.get("x-clerk-device-token", "").strip()
-    if not presented or not secrets.compare_digest(presented, expected):
+    # Compared as bytes: the str form of compare_digest refuses non-ASCII
+    # text, which would turn a token with an accent into a 500 instead of a 401.
+    if not presented or not secrets.compare_digest(presented.encode(), expected.encode()):
         raise HTTPException(status_code=401, detail="The device token is missing or wrong")
 
 
@@ -1693,10 +1727,17 @@ async def anticipated_forward(payload: ForwardNotificationRequest, request: Requ
     if created and row["status"] == anticipated.OPEN:
         # The bank may already hold this charge (the phone was offline, or the
         # feed was quick). Reading the budget now settles it immediately and
-        # gives the phone a figure that already reflects the charge.
+        # gives the phone a figure that already reflects the charge. The read
+        # is bounded so the phone never times out and retries a charge that
+        # is already stored; a slow read carries on in the background and the
+        # next hello shows its result.
+        refresh = asyncio.ensure_future(_jobs(request).refresh_now())
         try:
-            await _jobs(request).refresh_now()
+            await asyncio.wait_for(asyncio.shield(refresh), timeout=FORWARD_REFRESH_SECONDS)
             refreshed = True
+        except TimeoutError:
+            refresh_error = "the budget is still being re-read"
+            refresh.add_done_callback(_log_refresh_outcome)
         except ActualGatewayError as exc:
             refresh_error = str(exc)
         except Exception as exc:  # noqa: BLE001 - the charge is stored; the read is best effort
@@ -1802,7 +1843,11 @@ async def anticipated_teach_alias(
     alias = anticipated.teach_alias(database, row, payee=payload.payee)
     if alias is None:
         raise HTTPException(
-            status_code=422, detail="Neither the notification nor the payee yields a merchant key"
+            status_code=422,
+            detail=(
+                "That pair cannot be an alias: one name is all decoration, they are already "
+                "the same merchant, or other names already resolve to this one"
+            ),
         )
     with contextlib.suppress(Exception):
         await _jobs(request).refresh_now()

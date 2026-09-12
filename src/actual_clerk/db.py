@@ -881,8 +881,21 @@ class Database:
             ).fetchone()
         return self._decision_row(row) if row else None
 
-    def resolve_decision(self, decision_id: str, status: str) -> dict[str, Any] | None:
-        """Atomically close an open review so two clicks cannot both apply it."""
+    def resolve_decision(
+        self,
+        decision_id: str,
+        status: str,
+        *,
+        category_id: str | None = None,
+        category_name: str | None = None,
+    ) -> dict[str, Any] | None:
+        """Atomically close an open review so two clicks cannot both apply it.
+
+        When the person applies a different category from the one proposed,
+        the ledger records the category that actually went to Actual: the
+        observation channel later compares the two, and the user's own choice
+        must not read as a correction of Clerk's work.
+        """
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
@@ -891,10 +904,23 @@ class Database:
             if not row:
                 connection.rollback()
                 return None
-            connection.execute(
-                "UPDATE decisions SET status=?, resolved_at=? WHERE id=?",
-                (status, time.time(), decision_id),
-            )
+            if category_id:
+                connection.execute(
+                    "UPDATE decisions SET status=?, resolved_at=?, category_id=?, "
+                    "category_name=? WHERE id=?",
+                    (
+                        status,
+                        time.time(),
+                        category_id,
+                        category_name if category_name is not None else row["category_name"],
+                        decision_id,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "UPDATE decisions SET status=?, resolved_at=? WHERE id=?",
+                    (status, time.time(), decision_id),
+                )
             connection.commit()
         return self._decision_row(row)
 
@@ -2127,6 +2153,29 @@ class Database:
         with self.connect() as connection:
             row = connection.execute(
                 "SELECT * FROM anticipated_charges WHERE id=?", (charge_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def recent_anticipated_duplicate(
+        self, source_id: str, *, title: str, text: str, noticed_at: float, window_seconds: float
+    ) -> dict[str, Any] | None:
+        """The same words from the same app within a short window is the same charge.
+
+        A card app that re-posts a notification (a badge update, a group
+        refresh, the sample forwarded at registration and then seen again by
+        the listener) gives it a new post time and so a new key. The phone
+        already drops such repeats for ten minutes; this is the same rule on
+        the server, so a re-post that slips past the phone is not a second
+        charge either. Two genuinely separate purchases with identical wording
+        inside the window are the price, and the phone pays it already.
+        """
+        if not title and not text:
+            return None
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM anticipated_charges WHERE source_id=? AND title=? AND text=? "
+                "AND ABS(noticed_at-?)<=? ORDER BY ABS(noticed_at-?) LIMIT 1",
+                (source_id, title[:400], text[:2000], noticed_at, window_seconds, noticed_at),
             ).fetchone()
         return dict(row) if row else None
 

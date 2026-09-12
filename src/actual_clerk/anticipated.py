@@ -26,7 +26,7 @@ from actual_clerk.domain.anticipated import (
     match_charges,
     parse_notification,
 )
-from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, resolve
+from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, canonical_key, resolve
 from actual_clerk.domain.merchants import normalize_merchant
 
 log = logging.getLogger(__name__)
@@ -48,6 +48,10 @@ DISMISSED = "dismissed"
 # authorisation, or one with no amount in it. Kept so the phone log explains
 # itself, closed from the start.
 IGNORED = "ignored"
+
+# The same words from the same app inside this window are one notification,
+# whatever key they arrive under. Mirrors the phone's own repeat filter.
+REPEAT_WINDOW_SECONDS = 10 * 60
 
 
 def notification_key(package_name: str, posted_at_ms: int, title: str, text: str) -> str:
@@ -73,6 +77,15 @@ def record_notification(
     noticed_at = posted_at_ms / 1000 if posted_at_ms > 0 else datetime.datetime.now(datetime.UTC).timestamp()
     noticed_date = datetime.datetime.fromtimestamp(noticed_at, settings.zone).date().isoformat()
     status = OPEN if parsed.kind in (KIND_CHARGE, KIND_CREDIT) else IGNORED
+    repeat = database.recent_anticipated_duplicate(
+        source["id"],
+        title=title,
+        text=text,
+        noticed_at=noticed_at,
+        window_seconds=REPEAT_WINDOW_SECONDS,
+    )
+    if repeat is not None:
+        return repeat, False
     row, created = database.add_anticipated_charge(
         {
             "source_id": source["id"],
@@ -317,8 +330,12 @@ def teach_alias(database: Database, row: dict[str, Any], *, payee: str) -> dict[
     """The user names the bank's payee for this notification's merchant."""
 
     key = str(row.get("merchant_key") or "")
-    target = normalize_merchant(payee)
-    if not key or not target:
+    aliases = database.alias_map()
+    # The bank's name may itself be an alias of the canonical key (a raw
+    # descriptor the payee catalogue already maps); point at the canonical
+    # key so the table never chains, and refuse to turn a target into an alias.
+    target = canonical_key(normalize_merchant(payee), aliases)
+    if not key or not target or key == target or key in set(aliases.values()):
         return None
     alias = database.upsert_alias(
         key,
@@ -358,8 +375,12 @@ def _learn_from_settlement(
     """What a settlement teaches: the bank's name for the shop, and a taught category."""
 
     charge_key = str(row.get("merchant_key") or "")
-    posted_key = transaction.merchant_key
-    if charge_key and posted_key and charge_key != posted_key:
+    # Learn the alias against the canonical key, so a bank descriptor the
+    # payee catalogue already maps does not become a second hop; and never
+    # turn a key other aliases point at into an alias itself.
+    posted_key = canonical_key(transaction.merchant_key, aliases)
+    chains = charge_key in set(aliases.values())
+    if charge_key and posted_key and charge_key != posted_key and not chains:
         alias = database.upsert_alias(
             charge_key,
             posted_key,

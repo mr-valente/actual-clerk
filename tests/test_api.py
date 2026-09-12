@@ -331,6 +331,34 @@ async def test_choosing_a_different_category_is_recorded_as_a_correction(client,
     assert memory["cat-dining"]["corrections"] == 1
 
 
+async def test_recategorizing_records_the_chosen_category_on_the_decision(client, gateway):
+    client.database.set_snapshot(
+        OVERVIEW_SNAPSHOT,
+        {"categories": [{"id": "cat-dining", "name": "Dining", "group_name": "Everyday"}]},
+    )
+    client.database.add_decision(decision())
+    client.database.add_decision(decision(transaction_id="txn-2"))
+    first, second = (await client.get("/api/reviews")).json()
+
+    await client.post(
+        f"/api/reviews/{first['id']}/resolve", json={"action": "recategorize", "category_id": "cat-dining"}
+    )
+    await client.post(
+        "/api/reviews/resolve",
+        json={"action": "recategorize", "category_id": "cat-dining", "ids": [second["id"]]},
+    )
+    # The ledger says what went to Actual, so the observation channel later
+    # reads the user's own choice as standing rather than as a correction.
+    for decision_id in (first["id"], second["id"]):
+        stored = client.database.get_decision(decision_id)
+        assert (stored["status"], stored["category_id"], stored["category_name"]) == (
+            "applied", "cat-dining", "Dining"
+        )
+    accepted = client.database.add_decision(decision(transaction_id="txn-3"))
+    await client.post(f"/api/reviews/{accepted}/resolve", json={"action": "accept"})
+    assert client.database.get_decision(accepted)["category_id"] == "cat-coffee"
+
+
 async def test_recategorizing_without_a_category_is_refused(client):
     client.database.add_decision(decision())
     [review] = (await client.get("/api/reviews")).json()
