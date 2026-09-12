@@ -33,6 +33,16 @@ the Intelligence page.
 
 **The digest** lists open proposals under *Waiting for you*.
 
+**The ledger says what went to Actual.** A review resolved with a category
+other than the one proposed records the chosen category on the decision
+itself (single and bulk). Before this, the decision kept the proposed
+category, so the observation channel read the user's own choice as a
+correction of Clerk's work and recorded it in memory a second time. Reviews
+recategorized before this change still carry the proposed category and are
+read as corrections once, on the first run after the upgrade; the extra
+weight lands on the category the user chose, so the evidence moves the
+right way.
+
 **Settings.** `memory_learn_from_actual` (on) and
 `memory_dispute_threshold` (2), with environment variables
 `CLERK_MEMORY_LEARN_FROM_ACTUAL` and `CLERK_MEMORY_DISPUTE_THRESHOLD`.

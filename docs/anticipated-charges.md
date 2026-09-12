@@ -33,8 +33,13 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
    parser is generous about form and strict about substance: no amount, nothing
    anticipated.
 2. **Stores it once.** The phone sends a stable key per notification, so a
-   retry, a reboot, or an app re-posting the same notification never produces
-   a second charge.
+   retry or a reboot never produces a second charge. A card app that
+   re-posts the same words under a new post time (a badge update, a group
+   refresh, the notification a source was registered from) is caught by a
+   second rule, the same one the phone applies: the same title and text from
+   the same app within ten minutes is one notification. Two genuinely
+   separate purchases with identical wording inside those ten minutes are
+   the price, and the phone already pays it.
 3. **Categorizes it, provisionally.** The merchant key goes through the same
    resolver the filing cascade uses, short of the model: a **rule** you have
    declared first, then your own filed history plus the decisions Clerk has
@@ -186,7 +191,7 @@ Phone (gated by the device token when one is set):
 | `GET` | `/api/anticipated/device/hello?device_id=` | Proves the token; lists accounts, this device's sources, the budget summary |
 | `POST` | `/api/anticipated/device/sources` | Register an app on this phone against an Actual account |
 | `DELETE` | `/api/anticipated/device/sources/{id}?device_id=` | Unregister it |
-| `POST` | `/api/anticipated/device/notifications` | Forward one notification; replies with the charge and the budget as it now stands |
+| `POST` | `/api/anticipated/device/notifications` | Forward one notification; replies with the charge and the budget as it now stands (the budget re-read is bounded to twenty seconds so the phone never times out; a slower read finishes in the background and `refreshed` is false) |
 | `GET` | `/api/anticipated/device/charges?device_id=` | This device's recent charges |
 
 Web UI:
