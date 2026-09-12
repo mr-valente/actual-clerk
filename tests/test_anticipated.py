@@ -159,9 +159,50 @@ def test_anticipated_charges_count_as_spent_without_touching_free_money():
     assert result.free_cents == 220000
     assert result.anticipated_cents == 2500
     assert result.anticipated_count == 1
-    assert result.discretionary_spent_cents == 9000
+    assert result.anticipated_committed_cents == 0
+    # Without a category the charge is discretionary, in the uncategorized lump,
+    # but it is not an uncategorized *transaction*: there is nothing to file.
+    assert result.discretionary_spent_cents == 11500
+    assert result.uncategorized_cents == 2500
+    assert result.uncategorized_count == 0
     assert result.spent_cents == 11500
     assert result.remaining_cents == 220000 - 11500
+
+
+def test_a_categorized_anticipation_is_charged_to_its_own_category():
+    result = build_budget_report(
+        today=TODAY,
+        categories=CATEGORIES,
+        budgeted={"rent": 180000},
+        transactions=[TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc")],
+        anticipated=[
+            AnticipatedInfo("bill", -50000, category_id="rent"),   # committed: draws on its budget
+            AnticipatedInfo("food", -2500, category_id="food"),    # discretionary, named
+            AnticipatedInfo("gone", -100, category_id="deleted"),  # unknown category: uncategorized
+            AnticipatedInfo("pay", -100, category_id="inc"),       # income category: uncategorized
+        ],
+    )
+    assert result.anticipated_cents == 52700
+    assert result.anticipated_committed_cents == 50000
+    assert result.committed_spent_cents == 50000
+    assert result.committed_overspend_cents == 0
+    assert result.discretionary_spent_cents == 2700
+    assert result.uncategorized_cents == 200
+    assert result.spent_cents == 2700
+    assert [line["category_name"] for line in result.top_categories] == ["Groceries"]
+    assert result.committed_lines[0]["spent_cents"] == 50000
+
+
+def test_an_anticipated_bill_beyond_its_budget_overspends_like_a_posted_one():
+    result = build_budget_report(
+        today=TODAY,
+        categories=CATEGORIES,
+        budgeted={"rent": 180000},
+        transactions=[TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc")],
+        anticipated=[AnticipatedInfo("bill", -190000, category_id="rent")],
+    )
+    assert result.committed_overspend_cents == 10000
+    assert result.spent_cents == 10000
 
 
 def test_the_reporting_layer_reads_account_standing_off_the_snapshot(settings):
@@ -332,4 +373,153 @@ def test_reconcile_does_nothing_when_the_feature_is_off(database, settings):
         database, settings, source=src, posted_at_ms=1, title="", text="A charge of $1.00 at A was approved.",
     )
     summary = anticipated.reconcile(database, snapshot(transactions=[]), settings, today=TODAY)
-    assert summary == {"open": [], "matched": 0, "expired": 0}
+    assert summary == {"open": [], "matched": 0, "expired": 0, "categorized": 0}
+
+
+# ------------------------------------------------------- provisional category
+
+
+def steam_history(**overrides):
+    """A budget where Steam has been filed under Dining (any category) three times."""
+    rows = [
+        transaction(datetime.date(2026, 6, 1 + i), -1999, payee="Steam", category_id="cat-dining", account_id="acct-card")
+        for i in range(3)
+    ]
+    return snapshot(accounts=[account("Card", account_id="acct-card")], transactions=rows, **overrides)
+
+
+def test_a_known_merchant_is_categorized_on_the_spot(database, settings):
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $19.99 at Steam was approved.",
+    )
+    summary = anticipated.reconcile(database, steam_history(), settings, today=TODAY)
+    assert summary["categorized"] == 1
+    current = database.get_anticipated_charge(row["id"])
+    assert current["category_id"] == "cat-dining"
+    assert current["category_source"] == "memory"
+    assert current["category_confidence"] > 0.75
+    report = budget_report(steam_history(budgeted={"cat-dining": 5000}), settings, today=TODAY, anticipated=summary["open"])
+    # Dining carries a budget, so the anticipated charge draws on it rather than on free money.
+    assert report["anticipated_committed_cents"] == 1999
+    assert report["committed_spent_cents"] == 1999
+    assert report["spent_cents"] == 0
+
+
+def test_an_unknown_merchant_stays_uncategorized_and_discretionary(database, settings):
+    src = source(database)
+    anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    summary = anticipated.reconcile(database, steam_history(), settings, today=TODAY)
+    assert summary["categorized"] == 0
+    assert summary["open"][0]["category_id"] == ""
+    report = budget_report(steam_history(), settings, today=TODAY, anticipated=summary["open"])
+    assert report["uncategorized_cents"] == 319
+
+
+def test_an_alias_lets_the_bank_s_history_categorize_the_phone_s_name(database, settings):
+    database.upsert_alias("valve", "steam", source="taught")
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    anticipated.reconcile(database, steam_history(), settings, today=TODAY)
+    current = database.get_anticipated_charge(row["id"])
+    assert current["category_id"] == "cat-dining"
+    assert current["category_source"] == "memory"
+
+
+def test_settling_learns_the_alias_and_the_next_notification_matches_by_merchant(database, settings):
+    src = source(database)
+    first, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    snap = snapshot(
+        accounts=[account("Card", account_id="acct-card")],
+        transactions=[
+            transaction(datetime.date(2026, 8, 21), -319, payee="Steam", account_id="acct-card", transaction_id="t-steam"),
+            transaction(datetime.date(2026, 8, 20), -319, payee="Walmart", account_id="acct-card", transaction_id="t-wm"),
+        ],
+    )
+    anticipated.reconcile(database, snap, settings, today=TODAY)
+    # Nothing related the names the first time, so the nearer date (Walmart) won.
+    assert database.get_anticipated_charge(first["id"])["matched_transaction_id"] == "t-wm"
+    assert database.alias_map() == {"valve": "walmart"}
+
+    database.delete_alias("valve")
+    database.upsert_alias("valve", "steam", source="taught")
+    second, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $3.19 at Valve was approved!",
+    )
+    snap2 = snapshot(
+        accounts=[account("Card", account_id="acct-card")],
+        transactions=[
+            transaction(datetime.date(2026, 8, 21), -319, payee="Steam", account_id="acct-card", transaction_id="t-steam-2"),
+            transaction(datetime.date(2026, 8, 20), -319, payee="Walmart", account_id="acct-card", transaction_id="t-wm-2"),
+        ],
+    )
+    anticipated.reconcile(database, snap2, settings, today=TODAY)
+    settled = database.get_anticipated_charge(second["id"])
+    assert settled["matched_transaction_id"] == "t-steam-2"
+    assert settled["match_reason"] == "amount and merchant"
+    # A taught alias is not overwritten by what settled.
+    assert database.alias_map() == {"valve": "steam"}
+
+
+def test_teaching_a_category_writes_memory_for_the_merchant_and_its_alias(database, settings):
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    anticipated.teach_category(database, row, category_id="cat-games", category_name="Games")
+    assert database.get_anticipated_charge(row["id"])["category_source"] == "taught"
+    assert [m["category_id"] for m in database.memory_for("valve")] == ["cat-games"]
+    assert database.memory_for("valve")[0]["corrections"] == 1
+    # Memory does not overwrite what was taught.
+    anticipated.reconcile(database, steam_history(), settings, today=TODAY)
+    assert database.get_anticipated_charge(row["id"])["category_id"] == "cat-games"
+    # Teaching the alias afterwards carries the category to the bank's key too.
+    anticipated.teach_alias(database, database.get_anticipated_charge(row["id"]), payee="Steam")
+    assert [m["category_id"] for m in database.memory_for("steam")] == ["cat-games"]
+
+
+def test_a_taught_category_reaches_the_bank_s_key_when_the_charge_settles(database, settings):
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    anticipated.teach_category(database, row, category_id="cat-games", category_name="Games")
+    snap = snapshot(
+        accounts=[account("Card", account_id="acct-card")],
+        transactions=[transaction(datetime.date(2026, 8, 21), -319, payee="Steam", account_id="acct-card", transaction_id="t-steam")],
+    )
+    anticipated.reconcile(database, snap, settings, today=TODAY)
+    assert database.alias_map() == {"valve": "steam"}
+    assert [m["category_id"] for m in database.memory_for("steam")] == ["cat-games"]
+
+
+def test_older_ledgers_gain_the_category_columns(tmp_path):
+    import sqlite3
+
+    from actual_clerk.db import Database
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        "CREATE TABLE anticipated_charges (id TEXT PRIMARY KEY, source_id TEXT NOT NULL, "
+        "actual_account_id TEXT NOT NULL DEFAULT '', notification_key TEXT NOT NULL, kind TEXT NOT NULL DEFAULT 'charge', "
+        "amount_cents INTEGER NOT NULL DEFAULT 0, merchant TEXT NOT NULL DEFAULT '', merchant_key TEXT NOT NULL DEFAULT '', "
+        "title TEXT NOT NULL DEFAULT '', text TEXT NOT NULL DEFAULT '', noticed_at REAL NOT NULL, noticed_date TEXT NOT NULL, "
+        "status TEXT NOT NULL DEFAULT 'open', matched_transaction_id TEXT NOT NULL DEFAULT '', matched_payee TEXT NOT NULL DEFAULT '', "
+        "matched_date TEXT NOT NULL DEFAULT '', match_reason TEXT NOT NULL DEFAULT '', resolved_at REAL, created_at REAL NOT NULL, updated_at REAL NOT NULL);"
+        "INSERT INTO anticipated_charges(id,source_id,notification_key,noticed_at,noticed_date,created_at,updated_at) VALUES('c','s','k',1,'2026-08-21',1,1);"
+    )
+    raw.close()
+    database = Database(path)
+    database.initialize()
+    row = database.get_anticipated_charge("c")
+    assert row["category_id"] == "" and row["category_source"] == "" and row["category_confidence"] == 0

@@ -324,3 +324,22 @@ class ForwardNotificationRequest(BaseModel):
         if not self.title and not self.text:
             raise ValueError("a notification needs a title or a text")
         return self
+
+
+class TeachCategoryRequest(BaseModel):
+    # Blank clears a taught category and lets memory decide again.
+    category_id: str = Field(default="", max_length=100)
+
+
+class TeachAliasRequest(BaseModel):
+    """The bank's payee name for a notification's merchant, e.g. "Steam" for "Valve"."""
+
+    payee: str = Field(min_length=1, max_length=200)
+
+    @field_validator("payee")
+    @classmethod
+    def collapse(cls, value: str) -> str:
+        normalized = " ".join(value.split())
+        if not normalized:
+            raise ValueError("may not be blank")
+        return normalized

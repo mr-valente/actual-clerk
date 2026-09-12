@@ -72,6 +72,9 @@ class AnticipatedInfo:
     account_id: str = ""
     off_budget: bool = False
     merchant: str = ""
+    # Provisional, from memory or taught: decides which budget line the charge
+    # draws on before the bank's row exists. Empty means "nobody knows yet".
+    category_id: str = ""
 
     @property
     def spend_cents(self) -> int:
@@ -105,9 +108,12 @@ class BudgetReport:
     uncategorized_cents: int
     uncategorized_count: int
     # Announced by a card app but not yet posted by the bank. Counted as spent
-    # now, held outside Actual, and released when the real row arrives.
+    # now, held outside Actual, and released when the real row arrives. A
+    # charge with a provisional category is charged to that category (and so
+    # to its budget when committed); the rest is discretionary spending.
     anticipated_cents: int
     anticipated_count: int
+    anticipated_committed_cents: int
     spent_cents: int
     remaining_cents: int
     remaining_percent: float
@@ -248,10 +254,12 @@ def build_budget_report(
     category, never as this month's spending.
 
     `anticipated` charges are money the card has authorised that the bank has
-    not delivered. They count as discretionary spending -- nothing yet says
-    which category they will land in, and the conservative reading of a charge
-    is that it competes for free money -- and the day the bank posts the real
-    row, it is that row that counts instead.
+    not delivered. One carrying a provisional category is charged to that
+    category exactly as a posted transaction would be, so a bill that is
+    already budgeted draws on its own budget rather than on free money. One
+    without a category is discretionary: nothing yet says where it will land,
+    and the conservative reading of a charge is that it competes for free
+    money. The day the bank posts the real row, it is that row that counts.
     """
 
     start, end = month_bounds(today)
@@ -330,6 +338,25 @@ def build_budget_report(
             if not category_id:
                 uncategorized_count += 1
 
+    # An anticipated charge is charged the way the bank's row will be once it
+    # exists: to its provisional category, or to the uncategorized discretionary
+    # lump when nothing yet says where it belongs. It is deliberately not an
+    # uncategorized *transaction*: there is nothing in Actual to file.
+    anticipated_open = [item for item in anticipated if not item.off_budget and item.spend_cents > 0]
+    anticipated_cents = sum(item.spend_cents for item in anticipated_open)
+    anticipated_committed = 0
+    for item in anticipated_open:
+        category_id = item.category_id if item.category_id in by_id else ""
+        if category_id and category_id in income_ids:
+            category_id = ""
+        if category_id in committed_ids:
+            committed_spent[category_id] = committed_spent.get(category_id, 0) + item.spend_cents
+            anticipated_committed += item.spend_cents
+        else:
+            discretionary_charges[category_id] = (
+                discretionary_charges.get(category_id, 0) + item.spend_cents
+            )
+
     # A refund cancels its own category's spending for this month first. What it
     # cannot cancel there reverses a charge this month never counted, so it is
     # money handed back rather than spending pushed below zero. That is what
@@ -357,9 +384,6 @@ def build_budget_report(
         else:
             uncategorized_cents = net
     discretionary_total = sum(discretionary_by_category.values()) + uncategorized_cents
-
-    anticipated_open = [item for item in anticipated if not item.off_budget and item.spend_cents > 0]
-    anticipated_cents = sum(item.spend_cents for item in anticipated_open)
 
     committed_spent_total = sum(committed_spent.values())
     carried = committed_carryover(
@@ -406,7 +430,7 @@ def build_budget_report(
     # the sum the month is actually measured against.
     free_cents = expected_income - committed_cents
     available_cents = free_cents + returned_cents
-    spent_cents = discretionary_total + committed_overspend + anticipated_cents
+    spent_cents = discretionary_total + committed_overspend
     remaining_cents = available_cents - spent_cents
     configured = expected_income > 0
 
@@ -492,6 +516,7 @@ def build_budget_report(
         uncategorized_count=uncategorized_count,
         anticipated_cents=anticipated_cents,
         anticipated_count=len(anticipated_open),
+        anticipated_committed_cents=anticipated_committed,
         spent_cents=spent_cents,
         remaining_cents=remaining_cents,
         remaining_percent=remaining_percent,

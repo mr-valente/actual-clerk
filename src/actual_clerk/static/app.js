@@ -246,7 +246,7 @@ function budgetHero() {
         </div>
         <p class="hero-sub">${overspent
           ? `You are ${money(Math.abs(remaining))} past the free money for this month.`
-          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month, refunding a purchase from an earlier one.` : ""}${report.anticipated_cents ? ` Spending includes ${money(report.anticipated_cents)} from ${report.anticipated_count} charge${report.anticipated_count === 1 ? "" : "s"} your phone has seen that the bank has not posted yet.` : ""}</p>
+          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month, refunding a purchase from an earlier one.` : ""}${report.anticipated_cents ? ` ${money(report.anticipated_cents)} from ${report.anticipated_count} charge${report.anticipated_count === 1 ? "" : "s"} your phone has seen is counted before the bank posts it${report.anticipated_committed_cents ? `, ${money(report.anticipated_committed_cents)} of it against bills already budgeted` : ""}.` : ""}</p>
       </div>
       <div class="hero-side">
         <div class="hero-chip"><span>Safe to spend daily</span><strong>${money(report.daily_safe_to_spend_cents)}</strong></div>
@@ -577,7 +577,27 @@ function chargeLabel(item) {
   return (CHARGE_STATUS[item.status] || ["muted", titleCase(item.status)])[1];
 }
 
-function anticipatedChargeRow(item, { sources = [] } = {}) {
+function categoryChip(item) {
+  if (!item.category_id) return `<span class="status-chip muted" title="No category yet: counted as discretionary until one is known">Uncategorized</span>`;
+  const how = item.category_source === "taught" ? "taught" : `from memory · ${percent(item.category_confidence || 0)}`;
+  return `<span class="status-chip ok" title="${escapeHtml(how)}">${escapeHtml(item.category_name || item.category_id)}</span>`;
+}
+
+function teachControls(item, categories, aliases) {
+  if (item.status !== "open" || !categories.length) return "";
+  const groups = new Map();
+  for (const category of categories) {
+    const group = category.group_name || "";
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(category);
+  }
+  const options = [...groups.entries()].map(([group, items]) => `<optgroup label="${escapeHtml(group)}">${items.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === item.category_id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</optgroup>`).join("");
+  const alias = aliases.find((a) => a.alias_key === item.merchant_key);
+  return `<select class="select-inline" data-action="anticipated-teach-category" data-id="${escapeHtml(item.id)}" title="Teach Clerk where this merchant belongs; remembered for next time and for the bank's row when it lands"><option value="" ${item.category_id ? "" : "selected"}>Teach a category…</option>${options}</select>
+    <button class="button ghost small" data-action="anticipated-teach-alias" data-id="${escapeHtml(item.id)}" data-merchant="${escapeHtml(item.merchant || "")}" title="${alias ? `Posts as ${escapeHtml(alias.merchant_label || alias.merchant_key)}` : "Name the payee the bank posts this merchant as"}">${alias ? `Posts as ${escapeHtml((alias.merchant_label || alias.merchant_key).slice(0, 18))}` : "Posts as…"}</button>`;
+}
+
+function anticipatedChargeRow(item, { sources = [], categories = [], aliases = [] } = {}) {
   const [status] = CHARGE_STATUS[item.status] || ["muted"];
   const source = sources.find((s) => s.id === item.source_id);
   const where = item.account_name || source?.account_name || "";
@@ -597,8 +617,8 @@ function anticipatedChargeRow(item, { sources = [] } = {}) {
     <span class="dot ${status}"></span>
     <div class="row-title"><strong>${escapeHtml(item.merchant || item.title || "Charge")}</strong><small>${escapeHtml([source?.app_label, where].filter(Boolean).join(" → "))} · seen ${escapeHtml(relativeTime(item.noticed_at))}<br />${outcome}</small></div>
     <span class="row-amount money ${item.amount_cents < 0 ? "" : "positive"}">${money(item.amount_cents, { sign: true })}</span>
-    <div class="health-state">${statusChip(status, chargeLabel(item))}</div>
-    <div class="row-actions">${actions}</div>
+    <div class="health-state">${item.kind === "charge" ? categoryChip(item) : ""}${statusChip(status, chargeLabel(item))}</div>
+    <div class="row-actions">${teachControls(item, categories, aliases)}${actions}</div>
   </article>`;
 }
 
@@ -608,7 +628,7 @@ function anticipatedOverviewPanel(open) {
   const total = counted.reduce((sum, item) => sum - item.amount_cents, 0);
   return `<article class="panel">
     <header class="panel-head"><div><h2>Anticipated charges</h2><p>${counted.length} charge${counted.length === 1 ? "" : "s"} your phone has seen, ${money(total)} counted as spent until the bank posts ${counted.length === 1 ? "it" : "them"}. Nothing here is written into Actual.</p></div><a href="#accounts" class="panel-link">Phone sources</a></header>
-    <div class="status-list">${open.map((item) => anticipatedChargeRow(item)).join("")}</div>
+    <div class="status-list">${open.map((item) => anticipatedChargeRow(item, { categories: overview().categories || [] })).join("")}</div>
   </article>`;
 }
 
@@ -630,6 +650,8 @@ function phonePanel(phone) {
   const open = phone.open || [];
   const recent = (phone.recent || []).slice(0, 8);
   const accounts = phone.accounts || [];
+  const categories = phone.categories || [];
+  const aliases = phone.aliases || [];
   const intro = phone.enabled
     ? `Card-app notifications forwarded by the Actual Clerk phone app become anticipated charges: counted as spent the moment your card is charged, never written into Actual, and settled when the bank's own row arrives (within ${phone.match_window_days} days) or dropped after ${phone.expire_days}.${phone.token_configured ? "" : " No device token is set, so any device that can reach Clerk may forward notifications; set one under Settings → Phone app."}`
     : "Anticipated charges are turned off in Settings → Phone app.";
@@ -638,8 +660,9 @@ function phonePanel(phone) {
     <div class="status-list">${sources.length
       ? sources.map((source) => sourceRow(source, accounts)).join("")
       : emptyState("📱", "No phone sources yet", "Install the Actual Clerk phone app, point it at this server, and use Register a source to pick the card app's notification.")}</div>
-    ${open.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Waiting for the bank</h3><p>Counted as spent now; each settles against the matching transaction when it is imported.</p></div></header><div class="status-list">${open.map((item) => anticipatedChargeRow(item, { sources })).join("")}</div>` : ""}
+    ${open.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Waiting for the bank</h3><p>Counted as spent now, against the provisional category when one is known (from your history, or taught here) and against free money otherwise. Each settles against the matching transaction when it is imported.</p></div></header><div class="status-list">${open.map((item) => anticipatedChargeRow(item, { sources, categories, aliases })).join("")}</div>` : ""}
     ${recent.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Recently settled</h3><p>What the last notifications became.</p></div></header><div class="status-list">${recent.map((item) => anticipatedChargeRow(item, { sources })).join("")}</div>` : ""}
+    ${aliases.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Merchant aliases</h3><p>How the card app names a shop versus how the bank posts it; learned when a charge settles, or taught.</p></div></header><div class="status-list">${aliases.map((alias) => `<article class="data-row" style="grid-template-columns:30px minmax(0,1fr) auto"><span class="dot ok"></span><div class="row-title"><strong>${escapeHtml(alias.alias_label || alias.alias_key)} → ${escapeHtml(alias.merchant_label || alias.merchant_key)}</strong><small>${escapeHtml(alias.alias_key)} → ${escapeHtml(alias.merchant_key)} · ${escapeHtml(alias.source)}</small></div><div class="row-actions"><button class="button ghost small" data-action="anticipated-alias-delete" data-id="${escapeHtml(alias.alias_key)}">Forget</button></div></article>`).join("")}</div>` : ""}
   </article>`;
 }
 
@@ -1620,6 +1643,23 @@ document.addEventListener("click", async (event) => {
       await renderRoute({ quiet: true });
     } catch (error) { toast("Could not update the charge", error.message, "error"); }
   }
+  if (action === "anticipated-teach-alias") {
+    event.stopPropagation();
+    const payee = window.prompt(`What payee does the bank post "${target.dataset.merchant || "this merchant"}" as? Type it as it appears in Actual.`);
+    if (!payee || !payee.trim()) return;
+    try {
+      await api(`/api/anticipated/charges/${encodeURIComponent(target.dataset.id)}/alias`, { method: "POST", body: JSON.stringify({ payee: payee.trim() }) });
+      toast("Alias taught", "The merchant's history and memory now apply to this notification.");
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not teach the alias", error.message, "error"); }
+  }
+  if (action === "anticipated-alias-delete") {
+    event.stopPropagation();
+    try {
+      await api(`/api/anticipated/aliases/${encodeURIComponent(target.dataset.id)}`, { method: "DELETE" });
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not forget the alias", error.message, "error"); }
+  }
   if (action === "anticipated-source-remove") {
     event.stopPropagation();
     if (!window.confirm(`Remove ${target.dataset.name} as a source? Its anticipated charges are dropped; nothing in Actual changes.`)) return;
@@ -1810,6 +1850,19 @@ content.addEventListener("change", async (event) => {
 });
 
 content.addEventListener("change", async (event) => {
+  const teach = event.target.closest('[data-action="anticipated-teach-category"]');
+  if (teach) {
+    teach.disabled = true;
+    try {
+      await api(`/api/anticipated/charges/${encodeURIComponent(teach.dataset.id)}/category`, { method: "POST", body: JSON.stringify({ category_id: teach.value }) });
+      toast(teach.value ? "Category taught" : "Category cleared", teach.value ? "Counted against that category now, and remembered for the merchant." : "Memory decides again.");
+      await renderRoute({ quiet: true });
+    } catch (error) {
+      toast("Could not teach the category", error.message, "error");
+      teach.disabled = false;
+    }
+    return;
+  }
   const control = event.target.closest('[data-action="anticipated-source-account"], [data-action="anticipated-source-toggle"]');
   if (!control) return;
   const body = control.dataset.action === "anticipated-source-toggle"

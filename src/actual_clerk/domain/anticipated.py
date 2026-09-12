@@ -18,7 +18,7 @@ from __future__ import annotations
 
 import datetime
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
 from actual_clerk.domain.merchants import keys_related, normalize_merchant
@@ -166,6 +166,7 @@ def match_charges(
     *,
     window_days: int,
     used_transaction_ids: Iterable[str] = (),
+    aliases: Mapping[str, str] | None = None,
 ) -> list[ChargeMatch]:
     """Pair each open anticipation with the transaction that settles it.
 
@@ -178,6 +179,7 @@ def match_charges(
     """
 
     used = set(used_transaction_ids)
+    aliases = dict(aliases or {})
     by_account: dict[tuple[str, int], list[CandidateTransaction]] = {}
     for transaction in transactions:
         by_account.setdefault((transaction.account_id, transaction.amount_cents), []).append(
@@ -194,8 +196,11 @@ def match_charges(
         ]
         if not candidates:
             continue
-        best = min(candidates, key=lambda transaction, charge=charge: _rank(charge, transaction))
-        related = _rank(charge, best)[0] == 0
+        best = min(
+            candidates,
+            key=lambda transaction, charge=charge: _rank(charge, transaction, aliases),
+        )
+        related = _rank(charge, best, aliases)[0] == 0
         used.add(best.id)
         matches.append(
             ChargeMatch(
@@ -209,9 +214,25 @@ def match_charges(
     return matches
 
 
-def _rank(charge: AnticipatedCharge, transaction: CandidateTransaction) -> tuple[int, int, int]:
+def same_merchant(charge_key: str, transaction_key: str, aliases: Mapping[str, str]) -> bool:
+    """Whether a notification's merchant and a posted row name the same shop.
+
+    By key, or through a learned alias: "valve" on the phone posts as "steam"
+    on the statement.
+    """
+    if not charge_key or not transaction_key:
+        return False
+    if keys_related(charge_key, transaction_key):
+        return True
+    target = aliases.get(charge_key)
+    return bool(target) and keys_related(target, transaction_key)
+
+
+def _rank(
+    charge: AnticipatedCharge, transaction: CandidateTransaction, aliases: Mapping[str, str]
+) -> tuple[int, int, int]:
     """Lower sorts first: same merchant, then nearest date, then a bank-imported row."""
-    related = bool(charge.merchant_key) and keys_related(charge.merchant_key, transaction.merchant_key)
+    related = same_merchant(charge.merchant_key, transaction.merchant_key, aliases)
     return (
         0 if related else 1,
         abs((transaction.date - charge.noticed_date).days),

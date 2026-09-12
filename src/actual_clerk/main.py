@@ -48,6 +48,8 @@ from actual_clerk.schemas import (
     SandboxItemRequest,
     ServerTokenRequest,
     SettingsPatch,
+    TeachAliasRequest,
+    TeachCategoryRequest,
     UpdateLinkRequest,
     UpdateSourceRequest,
 )
@@ -1429,8 +1431,68 @@ async def anticipated_overview(request: Request) -> dict[str, Any]:
             if c["status"] != anticipated.OPEN
         ],
         "accounts": _anticipated_accounts(request),
+        "categories": [
+            category
+            for category in (database.get_snapshot(OVERVIEW_SNAPSHOT) or {}).get("categories") or []
+            if not category.get("is_income")
+        ],
+        "aliases": [_serialize_record(alias) for alias in database.list_aliases()],
         "budget": _budget_summary(request),
     }
+
+
+def _anticipated_charge_or_404(request: Request, charge_id: str) -> dict[str, Any]:
+    row = _database(request).get_anticipated_charge(charge_id)
+    if not row:
+        raise HTTPException(status_code=404, detail="Anticipated charge not found")
+    return row
+
+
+@app.post("/api/anticipated/charges/{charge_id}/category")
+async def anticipated_teach_category(
+    charge_id: str, payload: TeachCategoryRequest, request: Request
+) -> dict[str, Any]:
+    """Name where this charge belongs; Clerk remembers it for the merchant."""
+    database = _database(request)
+    row = _anticipated_charge_or_404(request, charge_id)
+    name = ""
+    if payload.category_id:
+        name = _category_name(database, payload.category_id)
+        if not name:
+            raise HTTPException(status_code=404, detail="That category is not in the last snapshot")
+    anticipated.teach_category(database, row, category_id=payload.category_id, category_name=name)
+    with contextlib.suppress(Exception):
+        await _jobs(request).refresh_now()
+    return {"charge": anticipated.public_charge(database.get_anticipated_charge(charge_id) or row)}
+
+
+@app.post("/api/anticipated/charges/{charge_id}/alias")
+async def anticipated_teach_alias(
+    charge_id: str, payload: TeachAliasRequest, request: Request
+) -> dict[str, Any]:
+    """Name the payee the bank posts this merchant as, so history and memory apply."""
+    database = _database(request)
+    row = _anticipated_charge_or_404(request, charge_id)
+    alias = anticipated.teach_alias(database, row, payee=payload.payee)
+    if alias is None:
+        raise HTTPException(
+            status_code=422, detail="Neither the notification nor the payee yields a merchant key"
+        )
+    with contextlib.suppress(Exception):
+        await _jobs(request).refresh_now()
+    return {
+        "alias": _serialize_record(alias),
+        "charge": anticipated.public_charge(database.get_anticipated_charge(charge_id) or row),
+    }
+
+
+@app.delete("/api/anticipated/aliases/{alias_key}")
+async def anticipated_delete_alias(alias_key: str, request: Request) -> dict[str, Any]:
+    if not _database(request).delete_alias(alias_key):
+        raise HTTPException(status_code=404, detail="Alias not found")
+    with contextlib.suppress(Exception):
+        await _jobs(request).refresh_now()
+    return {"deleted": True}
 
 
 @app.patch("/api/anticipated/sources/{source_id}")

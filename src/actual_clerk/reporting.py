@@ -208,6 +208,7 @@ def to_anticipated_infos(
                 account_id=str(charge.get("actual_account_id") or ""),
                 off_budget=bool(account.get("off_budget")),
                 merchant=str(charge.get("merchant") or ""),
+                category_id=str(charge.get("category_id") or ""),
             )
         )
     return infos

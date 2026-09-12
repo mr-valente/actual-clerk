@@ -409,7 +409,12 @@ private fun RegisterScreen(prefs: Prefs, knownAccounts: List<Account>, onBack: (
                                         reply.optJSONObject("charge")?.let { charge ->
                                             val merchant = charge.optString("merchant").ifBlank { notification.title }
                                             val amount = ForwardWorker.formatCents(charge.optLong("amount_cents"))
-                                            val detail = if (charge.optString("status") == "open") "$amount · counted as spent until the bank posts it" else "$amount · ${charge.optString("status")}"
+                                            val category = charge.optString("category_name")
+                                            val detail = when {
+                                                charge.optString("status") == "open" && category.isNotBlank() -> "$amount · $category (provisional)"
+                                                charge.optString("status") == "open" -> "$amount · no category yet, counted as discretionary"
+                                                else -> "$amount · ${charge.optString("status")}"
+                                            }
                                             prefs.appendLog(LogEntry(System.currentTimeMillis(), merchant, detail, true))
                                         }
                                         chosen = null
@@ -495,9 +500,10 @@ private fun LogScreen(prefs: Prefs, onBack: () -> Unit) {
                     kind == "unknown" -> "No amount read"
                     else -> status
                 }
+                val category = charge.optString("category_name")
                 val detail = when (status) {
                     "matched" -> "as ${charge.optString("matched_payee")} on ${charge.optString("matched_date")}"
-                    else -> charge.optString("noticed_date")
+                    else -> listOf(charge.optString("noticed_date"), category).filter { it.isNotBlank() }.joinToString(" · ")
                 }
                 ServerCharge(
                     charge.optString("merchant").ifBlank { charge.optString("title").ifBlank { "Charge" } },

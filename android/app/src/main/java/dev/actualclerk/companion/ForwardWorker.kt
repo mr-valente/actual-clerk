@@ -69,9 +69,11 @@ class ForwardWorker(context: Context, params: WorkerParameters) : Worker(context
         val amount = formatCents(cents)
         val status = charge.optString("status")
         val kind = charge.optString("kind")
+        val category = charge.optString("category_name")
         val detail = when {
             !reply.optBoolean("created", true) -> "$amount · already known"
-            status == "open" && kind == "charge" -> "$amount · counted as spent until the bank posts it"
+            status == "open" && kind == "charge" && category.isNotBlank() -> "$amount · $category (provisional)"
+            status == "open" && kind == "charge" -> "$amount · no category yet, counted as discretionary"
             status == "open" -> "$amount · a credit, recorded but not counted"
             status == "matched" -> "$amount · already in Actual"
             kind == "declined" -> "$amount · declined, not counted"

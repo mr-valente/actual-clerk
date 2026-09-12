@@ -150,8 +150,13 @@ it, and some issuers never expose it as pending. The Android companion app
 those notifications; Clerk reads the amount, direction, and merchant out of
 the text (`domain/anticipated.py`, so the reading can improve without a new
 app build) and stores one *anticipated charge* per notification in its own
-SQLite. An open charge on an on-budget account is added to the month's
-spending as discretionary; free money is untouched. Every path that rebuilds
+SQLite. Each open charge is given a provisional category through the same
+memory the filing cascade uses (history plus applied decisions, same
+thresholds, no model), looked up through a learned merchant alias first; the
+user can teach a category or an alias, and teaching writes memory. A
+categorized charge is charged to its category as a posted row would be, so a
+budgeted bill draws on its budget; an uncategorized one is discretionary.
+Free money is untouched. Every path that rebuilds
 the overview first reconciles open charges against the snapshot: same account,
 same amount, dated within the match window, preferring the row whose merchant
 key relates to the notification's, then the nearest date, one transaction per

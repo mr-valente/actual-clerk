@@ -278,6 +278,12 @@ CREATE TABLE IF NOT EXISTS anticipated_charges (
     text TEXT NOT NULL DEFAULT '',
     noticed_at REAL NOT NULL,
     noticed_date TEXT NOT NULL,
+    -- A provisional category, from memory or taught by hand, so a charge for
+    -- an already-budgeted bill draws on that bill rather than on free money.
+    category_id TEXT NOT NULL DEFAULT '',
+    category_name TEXT NOT NULL DEFAULT '',
+    category_source TEXT NOT NULL DEFAULT '',
+    category_confidence REAL NOT NULL DEFAULT 0,
     status TEXT NOT NULL DEFAULT 'open',
     matched_transaction_id TEXT NOT NULL DEFAULT '',
     matched_payee TEXT NOT NULL DEFAULT '',
@@ -291,6 +297,20 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_anticipated_notification
 ON anticipated_charges(source_id, notification_key);
 CREATE INDEX IF NOT EXISTS ix_anticipated_status ON anticipated_charges(status, noticed_at DESC);
 CREATE INDEX IF NOT EXISTS ix_anticipated_noticed ON anticipated_charges(noticed_at DESC);
+
+-- A card app and the bank name the same shop differently ("Valve" on the
+-- phone, "Steam" on the statement). Learned when an anticipation settles, or
+-- taught by hand, so the next notification matches by merchant and inherits
+-- the merchant's category.
+CREATE TABLE IF NOT EXISTS merchant_aliases (
+    alias_key TEXT PRIMARY KEY,
+    merchant_key TEXT NOT NULL,
+    alias_label TEXT NOT NULL DEFAULT '',
+    merchant_label TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT 'settled',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
 """
 
 
@@ -349,6 +369,7 @@ class Database:
             connection.executescript(SCHEMA)
             self._migrate_health_candidates(connection)
             self._migrate_bank_links(connection)
+            self._migrate_anticipated(connection)
             self._restore_digests(connection)
             now = time.time()
             # A job that was running when the process died has no worker to
@@ -415,6 +436,25 @@ class Database:
             if columns and column not in columns:
                 connection.execute(
                     f"ALTER TABLE bank_links ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
+                )
+
+    @staticmethod
+    def _migrate_anticipated(connection: sqlite3.Connection) -> None:
+        """Add the provisional-category columns to ledgers from the first companion builds."""
+
+        columns = {
+            row["name"] for row in connection.execute("PRAGMA table_info(anticipated_charges)")
+        }
+        additions = {
+            "category_id": "TEXT NOT NULL DEFAULT ''",
+            "category_name": "TEXT NOT NULL DEFAULT ''",
+            "category_source": "TEXT NOT NULL DEFAULT ''",
+            "category_confidence": "REAL NOT NULL DEFAULT 0",
+        }
+        for column, definition in additions.items():
+            if columns and column not in columns:
+                connection.execute(
+                    f"ALTER TABLE anticipated_charges ADD COLUMN {column} {definition}"
                 )
 
     # ------------------------------------------------------------------ settings
@@ -1738,6 +1778,76 @@ class Database:
                     now,
                     charge_id,
                 ),
+            )
+        return cursor.rowcount > 0
+
+    def set_anticipated_category(
+        self,
+        charge_id: str,
+        *,
+        category_id: str,
+        category_name: str,
+        source: str,
+        confidence: float = 0.0,
+    ) -> bool:
+        """Record the provisional category of one anticipation."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE anticipated_charges SET category_id=?, category_name=?, category_source=?, "
+                "category_confidence=?, updated_at=? WHERE id=?",
+                (category_id, category_name[:200], source, float(confidence), time.time(), charge_id),
+            )
+        return cursor.rowcount > 0
+
+    def upsert_alias(
+        self,
+        alias_key: str,
+        merchant_key: str,
+        *,
+        alias_label: str = "",
+        merchant_label: str = "",
+        source: str = "settled",
+    ) -> dict[str, Any] | None:
+        """Remember that a notification's merchant posts under another key.
+
+        A taught alias is a statement of intent and is not overwritten by a
+        later settlement; a settled one yields to whatever settles next.
+        """
+        if not alias_key or not merchant_key or alias_key == merchant_key:
+            return None
+        now = time.time()
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO merchant_aliases(alias_key,merchant_key,alias_label,merchant_label,source,"
+                "created_at,updated_at) VALUES(?,?,?,?,?,?,?) "
+                "ON CONFLICT(alias_key) DO UPDATE SET "
+                "merchant_key=CASE WHEN merchant_aliases.source='taught' AND excluded.source!='taught' "
+                "THEN merchant_aliases.merchant_key ELSE excluded.merchant_key END, "
+                "alias_label=CASE WHEN excluded.alias_label!='' THEN excluded.alias_label ELSE merchant_aliases.alias_label END, "
+                "merchant_label=CASE WHEN excluded.merchant_label!='' THEN excluded.merchant_label ELSE merchant_aliases.merchant_label END, "
+                "source=CASE WHEN merchant_aliases.source='taught' AND excluded.source!='taught' "
+                "THEN 'taught' ELSE excluded.source END, updated_at=excluded.updated_at",
+                (alias_key, merchant_key, alias_label[:120], merchant_label[:120], source, now, now),
+            )
+            row = connection.execute(
+                "SELECT * FROM merchant_aliases WHERE alias_key=?", (alias_key,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_aliases(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM merchant_aliases ORDER BY updated_at DESC"
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def alias_map(self) -> dict[str, str]:
+        return {row["alias_key"]: row["merchant_key"] for row in self.list_aliases()}
+
+    def delete_alias(self, alias_key: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM merchant_aliases WHERE alias_key=?", (alias_key,)
             )
         return cursor.rowcount > 0
 

@@ -280,3 +280,44 @@ async def test_registering_from_a_notification_records_it_as_a_charge(client):
 async def test_registering_without_a_sample_records_nothing(client):
     seed_overview(client.database)
     assert (await register(client)).json()["charge"] is None
+
+
+def seed_categories(database):
+    snapshot = database.get_snapshot(OVERVIEW_SNAPSHOT)
+    snapshot["categories"] = [
+        {"id": "cat-games", "name": "Games", "group_name": "Fun", "is_income": False},
+        {"id": "cat-pay", "name": "Paycheck", "group_name": "Income", "is_income": True},
+    ]
+    snapshot.pop("snapshot_updated_at", None)
+    database.set_snapshot(OVERVIEW_SNAPSHOT, snapshot)
+
+
+async def test_a_category_can_be_taught_and_cleared(client):
+    seed_overview(client.database)
+    seed_categories(client.database)
+    await register(client)
+    charge = (await client.post("/api/anticipated/device/notifications", json=notification("Your purchase for $3.19 at Valve was approved."))).json()["charge"]
+    assert charge["category_id"] == ""
+    taught = await client.post(f"/api/anticipated/charges/{charge['id']}/category", json={"category_id": "cat-games"})
+    assert taught.status_code == 200
+    assert taught.json()["charge"]["category_name"] == "Games"
+    assert taught.json()["charge"]["category_source"] == "taught"
+    assert (await client.post(f"/api/anticipated/charges/{charge['id']}/category", json={"category_id": "nope"})).status_code == 404
+    cleared = await client.post(f"/api/anticipated/charges/{charge['id']}/category", json={"category_id": ""})
+    assert cleared.json()["charge"]["category_id"] == ""
+    body = (await client.get("/api/anticipated")).json()
+    assert [c["id"] for c in body["categories"]] == ["cat-games"]
+
+
+async def test_an_alias_can_be_taught_and_forgotten(client):
+    seed_overview(client.database)
+    await register(client)
+    charge = (await client.post("/api/anticipated/device/notifications", json=notification("Your purchase for $3.19 at Valve was approved."))).json()["charge"]
+    taught = await client.post(f"/api/anticipated/charges/{charge['id']}/alias", json={"payee": "Steam"})
+    assert taught.status_code == 200
+    assert taught.json()["alias"]["alias_key"] == "valve"
+    assert taught.json()["alias"]["merchant_key"] == "steam"
+    assert taught.json()["alias"]["source"] == "taught"
+    assert [a["alias_key"] for a in (await client.get("/api/anticipated")).json()["aliases"]] == ["valve"]
+    assert (await client.delete("/api/anticipated/aliases/valve")).json() == {"deleted": True}
+    assert (await client.delete("/api/anticipated/aliases/valve")).status_code == 404
