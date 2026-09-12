@@ -11,6 +11,7 @@ user does in Actual afterwards.
 | [stage-1.md](stage-1.md) | Rules live in Clerk: the resolver, proposals, the Intelligence page, and what was verified |
 | [stage-2.md](stage-2.md) | Taking the simple rules over from Actual: classification, replay, import, retire, restore, and the lab run |
 | [stage-3.md](stage-3.md) | One identity: aliases from every source, the payee catalogue read as evidence, the Merchants section, teaching as a rule |
+| [stage-4.md](stage-4.md) | Learning from Actual: corrections, disputes, rule-change and retire proposals, category repair, the digest line |
 
 Stages are implemented one at a time on the `feature/plaid` branch; each ends
 with a checkpoint before the next begins.

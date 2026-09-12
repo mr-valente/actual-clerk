@@ -284,3 +284,83 @@ def resolve(
                 },
             )
     return None
+
+
+# ------------------------------------------------------------- observations
+#
+# What Actual shows Clerk about its own work. Every decision Clerk applied
+# is compared with the transaction's current category: the same means it
+# stands, a different one set by hand is a correction, and a correction to a
+# rule's decision is a dispute against that rule.
+
+OBSERVED_STANDING = "standing"
+OBSERVED_CORRECTED = "corrected"
+OBSERVED_CLEARED = "cleared"
+OBSERVED_GONE = "gone"
+
+
+@dataclass(frozen=True)
+class Observation:
+    decision_id: str
+    status: str
+    category_id: str = ""
+    category_name: str = ""
+    reason: str = ""
+
+
+def observe_decisions(
+    decisions: Iterable[Mapping[str, Any]],
+    transactions: Iterable[Mapping[str, Any]],
+) -> list[Observation]:
+    """Compare applied decisions with the transactions as Actual holds them now.
+
+    A decision whose transaction is not in the snapshot is reported as gone
+    only when the snapshot should have held it; the caller limits decisions
+    to the snapshot's own window. A transaction turned into a transfer is
+    gone as well: there is nothing to learn from a category that no longer
+    applies.
+    """
+
+    current = {str(row.get("id")): row for row in transactions}
+    observations: list[Observation] = []
+    for decision in decisions:
+        decision_id = str(decision.get("id") or "")
+        applied = str(decision.get("category_id") or "")
+        if not decision_id or not applied:
+            continue
+        row = current.get(str(decision.get("transaction_id") or ""))
+        if row is None:
+            observations.append(Observation(decision_id, OBSERVED_GONE, reason="deleted"))
+            continue
+        if row.get("is_transfer"):
+            observations.append(Observation(decision_id, OBSERVED_GONE, reason="transfer"))
+            continue
+        now = str(row.get("category_id") or "")
+        if now == applied:
+            observations.append(Observation(decision_id, OBSERVED_STANDING))
+        elif not now:
+            observations.append(Observation(decision_id, OBSERVED_CLEARED, reason="uncategorized"))
+        else:
+            observations.append(
+                Observation(
+                    decision_id,
+                    OBSERVED_CORRECTED,
+                    category_id=now,
+                    category_name=str(row.get("category_name") or ""),
+                    reason="recategorized",
+                )
+            )
+    return observations
+
+
+def rules_needing_repair(
+    rules: Iterable[Mapping[str, Any]], categories: Iterable[Mapping[str, Any]]
+) -> list[dict[str, Any]]:
+    """Active rules whose category is no longer in the budget."""
+    known = {str(category.get("id")) for category in categories}
+    return [
+        dict(rule)
+        for rule in rules
+        if str(rule.get("status") or "active") == "active"
+        and str(rule.get("category_id") or "") not in known
+    ]

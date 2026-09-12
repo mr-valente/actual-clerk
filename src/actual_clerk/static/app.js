@@ -337,7 +337,7 @@ function decisionRow(item) {
     <span class="mark ${escapeHtml(item.source)}">${{ rule: "⚡", memory: "↺", model: "✦", unresolved: "?" }[item.source] || "•"}</span>
     <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${shortDate(item.transaction_date)} · <span class="money">${money(item.amount_cents)}</span> · ${escapeHtml(item.account_name)}</small></div>
     <div class="row-meta"><strong>${escapeHtml(item.category_name || item.proposed_category || "—")}</strong><br /><span>${escapeHtml(titleCase(item.source))} · ${percent(item.confidence)}</span></div>
-    <div>${statusChip(item.status)}</div>
+    <div>${item.observed === "corrected" || item.observed === "cleared" ? statusChip("warning", "Changed in Actual") : statusChip(item.status)}</div>
     <div class="row-meta">${relativeTime(item.created_at)}</div>
   </article>`;
 }
@@ -573,19 +573,40 @@ function proposalRow(item, categories) {
   const evidence = item.evidence || {};
   const known = categories.some((category) => category.id === body.category_id);
   const descriptors = (evidence.descriptors || []).filter((d) => d && d !== body.merchant_label).slice(0, 2);
-  const title = item.kind === "rule"
-    ? `${body.merchant_label || body.merchant_key || item.merchant_key} → ${body.category_name || "?"}`
-    : `${titleCase(item.kind)} · ${item.merchant_key}`;
-  const detail = item.kind === "rule"
-    ? `Make it a rule? ${escapeHtml(evidence.reason || "")}${descriptors.length ? ` Seen as ${escapeHtml(descriptors.join(", "))}.` : ""}${known ? "" : " The category is no longer in Actual."}`
-    : escapeHtml(evidence.reason || "");
-  return `<article class="data-row rule-row">
-    <span class="mark">?</span>
+  const merchant = body.merchant_label || body.merchant_key || item.merchant_key;
+  const picker = (selectedId, blank) => `<select class="select-inline" data-role="proposal-category" data-id="${escapeHtml(item.id)}" aria-label="Category">${categoryOptions(categories, selectedId, { blank })}</select>`;
+  let title = merchant;
+  let detail = escapeHtml(evidence.reason || "");
+  let control = "";
+  let acceptLabel = "Yes";
+  let ready = true;
+  if (item.kind === "rule") {
+    title = `${merchant} → ${body.category_name || "?"}`;
+    detail = `Make it a rule? ${escapeHtml(evidence.reason || "")}${descriptors.length ? ` Seen as ${escapeHtml(descriptors.join(", "))}.` : ""}${known ? "" : " The category is no longer in Actual."}`;
+    acceptLabel = "Make the rule";
+    ready = known;
+  } else if (item.kind === "rule_change") {
+    title = `${merchant}: ${body.from_category_name || "?"} → ${body.category_name || "?"}`;
+    detail = `Change the rule? ${escapeHtml(evidence.reason || "")}`;
+    control = picker(known ? body.category_id : "", known ? "" : "Choose a category…");
+    acceptLabel = "Change the rule";
+  } else if (item.kind === "rule_retire") {
+    title = `${merchant}: retire the ${body.from_category_name || ""} rule?`;
+    acceptLabel = "Retire it";
+  } else if (item.kind === "repair") {
+    title = `${merchant}: ${body.from_category_name || body.from_category_id || "a category"} is gone`;
+    detail = `${escapeHtml(evidence.reason || "")} Pick where it goes now.`;
+    control = picker("", "Choose a category…");
+    acceptLabel = "Repair";
+    ready = false;
+  }
+  return `<article class="data-row rule-row" data-proposal-id="${escapeHtml(item.id)}">
+    <span class="mark">${item.kind === "repair" ? "!" : "?"}</span>
     <div class="row-title"><strong>${escapeHtml(title)}</strong><small>${detail}</small></div>
-    <div class="row-meta">${evidence.observations ? `${evidence.observations} consistent filing(s)<br />` : ""}asked ${relativeTime(item.created_at)}</div>
+    <div class="row-meta">${control || `${evidence.observations ? `${evidence.observations} consistent filing(s)<br />` : evidence.disputes ? `${evidence.disputes} correction(s)<br />` : ""}`}<span>asked ${relativeTime(item.created_at)}</span></div>
     <div class="row-actions">
       <button class="button ghost small" data-action="proposal-decline" data-id="${escapeHtml(item.id)}">No</button>
-      <button class="button primary small" data-action="proposal-accept" data-id="${escapeHtml(item.id)}" ${item.kind === "rule" && known ? "" : "disabled"}>Make the rule</button>
+      <button class="button primary small" data-action="proposal-accept" data-id="${escapeHtml(item.id)}" ${ready ? "" : "disabled"}>${acceptLabel}</button>
     </div>
   </article>`;
 }
@@ -643,7 +664,7 @@ async function renderIntelligence() {
       <article class="metric-card"><span class="metric-icon">↺</span><span class="metric-label">Merchants learned</span><div class="metric-value">${counts.memory_merchants || 0}</div><span class="metric-note">${counts.aliases || 0} alias${counts.aliases === 1 ? "" : "es"} · from decisions applied or approved</span></article>
     </section>
     ${proposals.length ? `<article class="panel">
-      <header class="panel-head"><div><h2>Proposals</h2><p>Merchants Clerk has filed the same way often enough to ask whether that should be a rule.</p></div>${statusChip("suggested", `${proposals.length} waiting`)}</header>
+      <header class="panel-head"><div><h2>Proposals</h2><p>What Clerk wants to know: merchants filed the same way often enough to deserve a rule, rules your corrections in Actual disagree with, and rules whose category has left the budget.</p></div>${statusChip("suggested", `${proposals.length} waiting`)}</header>
       <div class="status-list">${proposals.map((item) => proposalRow(item, categories)).join("")}</div>
     </article>` : ""}
     <article class="panel" style="margin-top:18px">
@@ -1103,6 +1124,7 @@ async function showDecision(id) {
         ${item.status === "needs_review" && item.merchant_key && item.category_id ? `<button class="button secondary" data-action="review-accept" data-always="1" data-id="${escapeHtml(item.id)}" title="Apply the proposal and make it a rule">Apply and always</button>` : ""}
         ${item.status === "needs_review" ? `<button class="button primary" data-action="review-accept" data-id="${escapeHtml(item.id)}">Apply proposal</button>` : ""}
       </div>
+      ${item.observed && item.observed !== "standing" ? `<section class="detail-section"><h3>Seen in Actual afterwards</h3><div class="change-list"><div class="change"><i>${item.observed === "corrected" ? "✎" : "×"}</i><div><strong>${item.observed === "corrected" ? `Moved by hand to ${escapeHtml(item.observed_category_name || item.observed_category_id)}` : item.observed === "cleared" ? "Category cleared by hand" : "The transaction is gone or became a transfer"}</strong><small>Noticed ${escapeHtml(relativeTime(item.observed_at))}.${item.observed === "corrected" ? " Counted as a correction in memory" + (item.source === "rule" ? ", and as a dispute against the rule." : ".") : ""}</small></div></div></div></section>` : ""}
       ${rationale.rule ? `<section class="detail-section"><h3>Rule</h3><div class="change-list"><div class="change"><i>⚡</i><div><strong>Filed by a rule you set${rationale.rule.account_id ? " for this account" : ""}</strong><small>Matches “${escapeHtml(rationale.matched_key || rationale.rule.merchant_key)}”${rationale.rule.match === "family" ? " and its store variants" : ""}${rationale.alias ? `, reached through the alias “${escapeHtml(rationale.alias)}”` : ""}. <a href="#intelligence">Manage rules</a></small></div></div></div></section>` : ""}
       ${memory ? `<section class="detail-section"><h3>Memory evidence</h3><div class="change-list"><div class="change"><i>↺</i><div><strong>${memory.observations} prior sighting(s), ${percent(memory.share)} agreement</strong><small>Matched on “${escapeHtml(memory.matched_key)}”${memory.exact ? "" : " by merchant prefix"}. Confidence ${percent(memory.confidence)}.</small></div></div>${evidence.map((entry) => `<div class="change"><i>·</i><div><strong>${escapeHtml(entry.category_name || entry.category_id)}</strong><small>${percent(entry.share)} of this merchant's history · ${entry.sightings} sighting(s)</small></div></div>`).join("")}</div></section>` : ""}
       ${(rationale.examples || []).length ? `<section class="detail-section"><h3>Examples given to the model</h3><p class="muted" style="font-size:10px">${escapeHtml(rationale.examples.filter(Boolean).join(", "))}</p></section>` : ""}
@@ -1561,6 +1583,8 @@ async function renderSettings() {
           </div>
           ${settingToggle("rule_promotion_enabled", "Propose rules for settled merchants", "After the same merchant is filed the same way a few times, Clerk asks under Intelligence whether to make it a rule. Only you can say yes.", s.rule_promotion_enabled)}
           <div class="form-grid">${settingInput("rule_promote_after", "Consistent decisions before proposing a rule", s.rule_promote_after, { type: "number", min: 2, max: 25, full: true })}</div>
+          ${settingToggle("memory_learn_from_actual", "Learn from corrections made in Actual", "Every filing run compares what Clerk applied with what the transaction holds now. A category you changed by hand counts as a correction, and a correction to a rule's decision counts as a dispute against that rule.", s.memory_learn_from_actual)}
+          <div class="form-grid">${settingInput("memory_dispute_threshold", "Disputes before Clerk asks to change a rule", s.memory_dispute_threshold, { type: "number", min: 1, max: 20, full: true })}</div>
         </div></section>
 
         <section class="panel settings-section" id="settings-tags"><header class="panel-head"><div><h3>Tags</h3><p class="section-description">Written into transaction notes as #tags, which is how Actual stores them.</p></div></header><div class="panel-body">
@@ -1953,10 +1977,13 @@ document.addEventListener("click", async (event) => {
   if (action === "proposal-accept" || action === "proposal-decline") {
     event.stopPropagation();
     const accept = action === "proposal-accept";
+    const picker = document.querySelector(`[data-role="proposal-category"][data-id="${CSS.escape(target.dataset.id)}"]`);
+    const chosen = picker?.value || "";
+    if (accept && picker && !chosen) return toast("Choose a category first", "", "error");
     target.disabled = true;
     try {
-      await api(`/api/intelligence/proposals/${encodeURIComponent(target.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: accept ? "accept" : "decline" }) });
-      toast(accept ? "Rule made" : "Proposal declined", accept ? "This merchant is filed there from now on." : "Clerk will not ask this again.");
+      const result = await api(`/api/intelligence/proposals/${encodeURIComponent(target.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: accept ? "accept" : "decline", ...(chosen ? { category_id: chosen } : {}) }) });
+      toast(accept ? "Done" : "Proposal declined", accept ? (result.rule ? `${result.rule.merchant_label || result.rule.merchant_key} → ${result.rule.category_name}${result.rule.status === "retired" ? " (retired)" : ""}` : "") : "Clerk will not ask this again.");
       await renderRoute({ quiet: true });
     } catch (error) { toast("Could not resolve the proposal", error.message, "error"); target.disabled = false; }
   }
@@ -2152,9 +2179,9 @@ content.addEventListener("submit", async (event) => {
   const data = new FormData(form);
   const values = {};
   const locked = new Set(state.settings?.environment_overrides || []);
-  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "anticipated_match_window_days", "anticipated_expire_days"]);
+  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "memory_dispute_threshold", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "anticipated_match_window_days", "anticipated_expire_days"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "memory_learn_from_actual", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;
@@ -2203,6 +2230,14 @@ content.addEventListener("change", async (event) => {
   } finally {
     toggle.disabled = false;
   }
+});
+
+content.addEventListener("change", (event) => {
+  const picker = event.target.closest('[data-role="proposal-category"]');
+  if (!picker) return;
+  const row = picker.closest("[data-proposal-id]");
+  const accept = row?.querySelector('[data-action="proposal-accept"]');
+  if (accept) accept.disabled = !picker.value;
 });
 
 content.addEventListener("change", async (event) => {

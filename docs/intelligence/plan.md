@@ -393,6 +393,7 @@ Done: see [stage-3.md](stage-3.md).
 **Stage 4: learning from Actual.** Applied-decision observation, corrections
 and disputes, rule-change and retire proposals, category repair, the digest
 line.
+Done: see [stage-4.md](stage-4.md).
 
 **Stage 5: the model as consultant.** Same-merchant questions, rule hints in
 the category prompt, bulk rule proposals from history for a first run.

@@ -539,6 +539,52 @@ def test_a_hand_made_rule_withdraws_the_open_question(database):
     assert database.list_proposals(status="withdrawn")[0]["payload"] == {}
 
 
+# ---------------------------------------------------------- observations
+
+
+def test_an_observation_is_recorded_once_per_state_change(database):
+    decision_id = database.add_decision(decision(status="applied", transaction_date="2026-08-20"))
+    assert database.decisions_to_observe(since_date="2026-01-01")[0]["id"] == decision_id
+    assert database.decisions_to_observe(since_date="2026-09-01") == []
+    assert database.mark_observed(decision_id, "standing") is True
+    assert database.mark_observed(decision_id, "standing") is False
+    assert database.mark_observed(decision_id, "corrected", category_id="cat-dining", category_name="Dining")
+    stored = database.get_decision(decision_id)
+    assert stored["observed"] == "corrected" and stored["observed_category_name"] == "Dining"
+    # A correction is final: the decision is not looked at again.
+    assert database.decisions_to_observe(since_date="2026-01-01") == []
+
+
+def test_rule_disputes_count_up_and_reset(database):
+    rule = database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee")
+    assert database.record_rule_dispute(rule["id"]) == 1
+    assert database.record_rule_dispute(rule["id"]) == 2
+    database.reset_rule_disputes(rule["id"])
+    assert database.get_rule(rule["id"])["disputed_count"] == 0
+
+
+def test_older_decision_ledgers_gain_the_observation_columns(tmp_path):
+    import sqlite3
+
+    from actual_clerk.db import Database
+    path = tmp_path / "old.db"
+    raw = sqlite3.connect(path)
+    raw.executescript(
+        "CREATE TABLE decisions (id TEXT PRIMARY KEY, job_id TEXT, transaction_id TEXT NOT NULL, "
+        "account_id TEXT NOT NULL DEFAULT '', account_name TEXT NOT NULL DEFAULT '', payee_name TEXT NOT NULL DEFAULT '', "
+        "merchant_key TEXT NOT NULL DEFAULT '', transaction_date TEXT NOT NULL DEFAULT '', amount_cents INTEGER NOT NULL DEFAULT 0, "
+        "source TEXT NOT NULL, status TEXT NOT NULL, category_id TEXT, category_name TEXT NOT NULL DEFAULT '', "
+        "proposed_category TEXT NOT NULL DEFAULT '', confidence REAL NOT NULL DEFAULT 0, tags_json TEXT NOT NULL DEFAULT '[]', "
+        "rationale_json TEXT NOT NULL DEFAULT '{}', created_at REAL NOT NULL, resolved_at REAL);"
+        "INSERT INTO decisions(id,transaction_id,source,status,category_id,created_at) VALUES('d','t','memory','applied','c',1);"
+    )
+    raw.close()
+    old = Database(path)
+    old.initialize()
+    assert old.get_decision("d")["observed"] == ""
+    assert old.decisions_to_observe(since_date="")[0]["id"] == "d"
+
+
 # -------------------------------------------------------------- aliases
 
 

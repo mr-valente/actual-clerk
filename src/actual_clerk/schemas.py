@@ -68,6 +68,9 @@ class ResolveDecisionRequest(BaseModel):
 
 class ResolveProposalRequest(BaseModel):
     action: Literal["accept", "decline"]
+    # A repair, or a rule change the user wants to answer differently, names
+    # the category to use.
+    category_id: str | None = Field(default=None, max_length=100)
 
 
 class CreateRuleRequest(BaseModel):

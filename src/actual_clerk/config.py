@@ -112,6 +112,11 @@ class Settings(BaseModel):
     # --- Rule promotion ---------------------------------------------------
     rule_promotion_enabled: bool = True
     rule_promote_after: int = Field(default=3, ge=2, le=25)
+    # Corrections made by hand in Actual are read back as evidence, and a
+    # correction against a rule is a dispute; this many disputes ask whether
+    # the rule should change.
+    memory_learn_from_actual: bool = True
+    memory_dispute_threshold: int = Field(default=2, ge=1, le=20)
 
     # --- Tagging ----------------------------------------------------------
     tagging_enabled: bool = True
@@ -420,6 +425,8 @@ ENVIRONMENT_FIELDS = {
     "CLERK_ALLOW_NEW_CATEGORIES": "allow_new_categories",
     "CLERK_RULE_PROMOTION_ENABLED": "rule_promotion_enabled",
     "CLERK_RULE_PROMOTE_AFTER": "rule_promote_after",
+    "CLERK_MEMORY_LEARN_FROM_ACTUAL": "memory_learn_from_actual",
+    "CLERK_MEMORY_DISPUTE_THRESHOLD": "memory_dispute_threshold",
     "CLERK_TAGGING_ENABLED": "tagging_enabled",
     "CLERK_TAG": "clerk_tag",
     "CLERK_TAG_PROVENANCE": "tag_provenance",

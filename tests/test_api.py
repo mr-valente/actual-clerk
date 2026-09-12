@@ -489,6 +489,32 @@ async def test_accepting_a_rule_proposal_declares_the_rule(client):
     assert again.status_code == 409
 
 
+async def test_a_rule_change_proposal_updates_the_rule_and_clears_its_disputes(client):
+    snapshot_with_categories(client)
+    rule = client.database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee", category_name="Coffee")
+    client.database.record_rule_dispute(rule["id"])
+    proposal_id = client.database.add_proposal(kind="rule_change", merchant_key="blue bottle", payload={"rule_id": rule["id"], "category_id": "cat-dining"})
+    response = await client.post(f"/api/intelligence/proposals/{proposal_id}/resolve", json={"action": "accept"})
+    assert response.json()["rule"]["category_name"] == "Dining"
+    assert client.database.get_rule(rule["id"])["disputed_count"] == 0
+
+
+async def test_a_repair_needs_a_category_and_a_retire_retires(client):
+    snapshot_with_categories(client)
+    rule = client.database.upsert_rule(merchant_key="blue bottle", category_id="cat-gone", category_name="Old")
+    repair = client.database.add_proposal(kind="repair", merchant_key="blue bottle", payload={"rule_id": rule["id"]})
+    missing = await client.post(f"/api/intelligence/proposals/{repair}/resolve", json={"action": "accept"})
+    assert missing.status_code == 422
+    # Handed back open, so it can be answered properly.
+    fixed = await client.post(f"/api/intelligence/proposals/{repair}/resolve", json={"action": "accept", "category_id": "cat-coffee"})
+    assert fixed.json()["rule"]["category_id"] == "cat-coffee"
+    retire = client.database.add_proposal(kind="rule_retire", merchant_key="blue bottle", payload={"rule_id": rule["id"]})
+    response = await client.post(f"/api/intelligence/proposals/{retire}/resolve", json={"action": "accept"})
+    assert response.json()["rule"]["status"] == "retired"
+    orphan = client.database.add_proposal(kind="rule_change", merchant_key="nobody", payload={"rule_id": "nope"})
+    assert (await client.post(f"/api/intelligence/proposals/{orphan}/resolve", json={"action": "accept"})).status_code == 409
+
+
 async def test_declining_a_proposal_declares_nothing(client):
     proposal_id = client.database.add_proposal(kind="rule", merchant_key="blue bottle", payload={"category_id": "cat-coffee"})
     response = await client.post(f"/api/intelligence/proposals/{proposal_id}/resolve", json={"action": "decline"})

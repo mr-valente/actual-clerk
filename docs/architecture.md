@@ -110,6 +110,25 @@ Transactions a rule filed are counted against the rule rather than learned
 from: the rule is already the user's word, and feeding it back into memory
 would only make the evidence agree with itself.
 
+### Learning from Actual
+
+Every filing run compares each decision Clerk applied with the transaction
+as Actual holds it now. The same category means the decision stands. A
+different one, set by hand, is a *correction*: recorded in memory with
+correction weight under the new category, so the evidence follows what the
+user actually did without the user ever opening Clerk. A correction to a
+decision a rule made is also a *dispute* against that rule; after
+`memory_dispute_threshold` of them Clerk records a proposal to change the
+rule (or to retire it, when the category was cleared rather than moved). A
+transaction that is gone or became a transfer teaches nothing. Each
+decision is looked at until a correction settles it, so a category changed
+weeks later is still noticed.
+
+A rule whose category has left the budget files nothing and becomes a
+*repair* proposal, which asks for the replacement. Actual used to rewrite
+its own rules when a category was deleted; that choice is now the user's to
+make on the Intelligence page.
+
 ## Tagging
 
 Categories answer *which budget line*; tags answer *what kind of spending this was*. Actual stores tags inline in a transaction's notes as `#tag`, with colour and description in its own tag table.

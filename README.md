@@ -245,6 +245,8 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_ALLOW_NEW_CATEGORIES` | `false` | Surface suggestions for missing categories |
 | `CLERK_RULE_PROMOTION_ENABLED` | `true` | Propose a rule once a merchant is settled |
 | `CLERK_RULE_PROMOTE_AFTER` | `3` | Consistent decisions before proposing |
+| `CLERK_MEMORY_LEARN_FROM_ACTUAL` | `true` | Read categories changed by hand in Actual as corrections |
+| `CLERK_MEMORY_DISPUTE_THRESHOLD` | `2` | Corrections against a rule before Clerk asks to change it |
 
 ### Tags
 

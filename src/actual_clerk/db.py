@@ -82,7 +82,13 @@ CREATE TABLE IF NOT EXISTS decisions (
     tags_json TEXT NOT NULL DEFAULT '[]',
     rationale_json TEXT NOT NULL DEFAULT '{}',
     created_at REAL NOT NULL,
-    resolved_at REAL
+    resolved_at REAL,
+    -- What Actual later showed about this decision: '' until looked at,
+    -- then standing, corrected, cleared, or gone.
+    observed TEXT NOT NULL DEFAULT '',
+    observed_at REAL,
+    observed_category_id TEXT NOT NULL DEFAULT '',
+    observed_category_name TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_open_transaction
 ON decisions(transaction_id) WHERE status = 'needs_review';
@@ -413,6 +419,7 @@ class Database:
             self._migrate_health_candidates(connection)
             self._migrate_bank_links(connection)
             self._migrate_anticipated(connection)
+            self._migrate_decisions(connection)
             self._restore_digests(connection)
             now = time.time()
             # A job that was running when the process died has no worker to
@@ -499,6 +506,21 @@ class Database:
                 connection.execute(
                     f"ALTER TABLE anticipated_charges ADD COLUMN {column} {definition}"
                 )
+
+    @staticmethod
+    def _migrate_decisions(connection: sqlite3.Connection) -> None:
+        """Add the observation columns to decision ledgers from before Stage 4."""
+
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(decisions)")}
+        additions = {
+            "observed": "TEXT NOT NULL DEFAULT ''",
+            "observed_at": "REAL",
+            "observed_category_id": "TEXT NOT NULL DEFAULT ''",
+            "observed_category_name": "TEXT NOT NULL DEFAULT ''",
+        }
+        for column, definition in additions.items():
+            if columns and column not in columns:
+                connection.execute(f"ALTER TABLE decisions ADD COLUMN {column} {definition}")
 
     # ------------------------------------------------------------------ settings
 
@@ -932,6 +954,54 @@ class Database:
                     )
             connection.commit()
         return resolved
+
+    def decisions_to_observe(self, *, since_date: str, limit: int = 5000) -> list[dict[str, Any]]:
+        """Applied decisions the snapshot can still vouch for, not yet settled by a correction."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM decisions WHERE status='applied' AND category_id IS NOT NULL "
+                "AND category_id!='' AND transaction_date>=? AND observed IN ('','standing') "
+                "ORDER BY created_at DESC LIMIT ?",
+                (since_date, limit),
+            ).fetchall()
+        return [self._decision_row(row) for row in rows]
+
+    def mark_observed(
+        self,
+        decision_id: str,
+        status: str,
+        *,
+        category_id: str = "",
+        category_name: str = "",
+    ) -> bool:
+        """Record what Actual showed; only a change of state counts as new."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE decisions SET observed=?, observed_at=?, observed_category_id=?, "
+                "observed_category_name=? WHERE id=? AND observed!=?",
+                (status, time.time(), category_id, category_name, decision_id, status),
+            )
+        return cursor.rowcount > 0
+
+    def record_rule_dispute(self, rule_id: str) -> int:
+        """Count a hand correction against a rule; returns the running total."""
+        now = time.time()
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE merchant_rules SET disputed_count=disputed_count+1, updated_at=? WHERE id=?",
+                (now, rule_id),
+            )
+            row = connection.execute(
+                "SELECT disputed_count FROM merchant_rules WHERE id=?", (rule_id,)
+            ).fetchone()
+        return int(row["disputed_count"]) if row else 0
+
+    def reset_rule_disputes(self, rule_id: str) -> None:
+        with self.connect() as connection:
+            connection.execute(
+                "UPDATE merchant_rules SET disputed_count=0, updated_at=? WHERE id=?",
+                (time.time(), rule_id),
+            )
 
     @staticmethod
     def _decision_row(row: sqlite3.Row) -> dict[str, Any]:

@@ -6,8 +6,10 @@ from actual_clerk.domain.intelligence import (
     Rule,
     RuleBook,
     canonical_key,
+    observe_decisions,
     payee_aliases,
     resolve,
+    rules_needing_repair,
 )
 from actual_clerk.domain.memory import MerchantMemory
 
@@ -202,3 +204,47 @@ def test_an_ambiguous_descriptor_and_a_chain_are_left_alone():
     ])
     # valve -> steam would point at a key that is itself an alias; both are dropped.
     assert chained == {}
+
+
+# --------------------------------------------------------------- observations
+
+
+def decision(decision_id, transaction_id, category_id="cat-coffee"):
+    return {"id": decision_id, "transaction_id": transaction_id, "category_id": category_id}
+
+
+def test_applied_decisions_are_compared_with_what_actual_holds_now():
+    observations = observe_decisions(
+        [
+            decision("d-same", "t1"),
+            decision("d-moved", "t2"),
+            decision("d-cleared", "t3"),
+            decision("d-gone", "t4"),
+            decision("d-transfer", "t5"),
+            decision("d-none", "t1", category_id=""),
+        ],
+        [
+            {"id": "t1", "category_id": "cat-coffee"},
+            {"id": "t2", "category_id": "cat-dining", "category_name": "Dining"},
+            {"id": "t3", "category_id": None},
+            {"id": "t5", "category_id": "cat-coffee", "is_transfer": True},
+        ],
+    )
+    by_id = {item.decision_id: item for item in observations}
+    assert by_id["d-same"].status == "standing"
+    assert by_id["d-moved"].status == "corrected"
+    assert by_id["d-moved"].category_id == "cat-dining"
+    assert by_id["d-moved"].category_name == "Dining"
+    assert by_id["d-cleared"].status == "cleared"
+    assert by_id["d-gone"].status == "gone" and by_id["d-gone"].reason == "deleted"
+    assert by_id["d-transfer"].status == "gone" and by_id["d-transfer"].reason == "transfer"
+    assert "d-none" not in by_id
+
+
+def test_only_active_rules_with_a_missing_category_need_repair():
+    rules = [
+        {"id": "ok", "category_id": "cat-coffee", "status": "active"},
+        {"id": "gone", "category_id": "cat-old", "status": "active"},
+        {"id": "paused", "category_id": "cat-old", "status": "paused"},
+    ]
+    assert [rule["id"] for rule in rules_needing_repair(rules, [{"id": "cat-coffee"}])] == ["gone"]

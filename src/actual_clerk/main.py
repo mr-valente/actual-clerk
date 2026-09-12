@@ -149,6 +149,7 @@ def _serialize_record(record: dict[str, Any]) -> dict[str, Any]:
         "last_seen",
         "updated_at",
         "last_applied_at",
+        "observed_at",
     ):
         if field in result:
             result[field] = _timestamp(result.get(field))
@@ -870,26 +871,50 @@ async def resolve_proposal(
         database.resolve_proposal(proposal_id, "declined")
         return {"status": "declined"}
     body = proposal["payload"]
-    if proposal["kind"] == "rule":
-        category_name = _category_name(database, body.get("category_id", "")) or body.get(
-            "category_name", ""
-        )
+    kind = proposal["kind"]
+
+    def hand_back(detail: str) -> HTTPException:
+        database.resolve_proposal(proposal_id, "open")
+        return HTTPException(status_code=422, detail=detail)
+
+    if kind == "rule":
+        category_id = payload.category_id or body.get("category_id", "")
+        category_name = _category_name(database, category_id) or body.get("category_name", "")
         rule = _declare_rule(
             database,
             merchant_key=body.get("merchant_key") or proposal["merchant_key"],
             merchant_label=body.get("merchant_label", ""),
-            category_id=body.get("category_id", ""),
+            category_id=category_id,
             category_name=category_name,
             account_id=body.get("account_id", ""),
             source="proposal",
         )
         if rule is None:
-            database.resolve_proposal(proposal_id, "open")
-            raise HTTPException(status_code=422, detail="The proposal no longer names a category")
+            raise hand_back("The proposal no longer names a category")
         database.resolve_proposal(proposal_id, "accepted")
         return {"status": "accepted", "rule": _serialize_record(rule)}
-    database.resolve_proposal(proposal_id, "open")
-    raise HTTPException(status_code=422, detail=f"Clerk cannot act on a {proposal['kind']} proposal yet")
+
+    rule_id = str(body.get("rule_id") or "")
+    rule = database.get_rule(rule_id) if rule_id else None
+    if rule is None:
+        database.resolve_proposal(proposal_id, "withdrawn")
+        raise HTTPException(status_code=409, detail="The rule this proposal is about is gone")
+    if kind in ("rule_change", "repair"):
+        category_id = payload.category_id or body.get("category_id", "")
+        category_name = _category_name(database, category_id)
+        if not category_id or not category_name:
+            raise hand_back("Choose a category that is in Actual")
+        updated = database.update_rule(
+            rule_id, category_id=category_id, category_name=category_name, status="active"
+        )
+        database.reset_rule_disputes(rule_id)
+        database.resolve_proposal(proposal_id, "accepted")
+        return {"status": "accepted", "rule": _serialize_record(updated)}
+    if kind == "rule_retire":
+        updated = database.update_rule(rule_id, status="retired")
+        database.resolve_proposal(proposal_id, "accepted")
+        return {"status": "accepted", "rule": _serialize_record(updated)}
+    raise hand_back(f"Clerk cannot act on a {kind} proposal")
 
 
 @app.post("/api/categories", status_code=status.HTTP_201_CREATED)

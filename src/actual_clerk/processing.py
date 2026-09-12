@@ -34,9 +34,13 @@ from actual_clerk.domain import tagging
 from actual_clerk.domain.health import evaluate_accounts, summarize
 from actual_clerk.domain.intelligence import (
     ALIAS_ACTUAL_PAYEE,
+    OBSERVED_CLEARED,
+    OBSERVED_CORRECTED,
     SOURCE_RULE,
     RuleBook,
+    observe_decisions,
     payee_aliases,
+    rules_needing_repair,
 )
 from actual_clerk.plaid_links import read_items, readings
 from actual_clerk.plaid_sync import PlaidSyncEngine
@@ -410,6 +414,15 @@ class JobManager:
             self.database.open_review_transaction_ids() if retry_reviews else None
         )
 
+        # What Actual shows about Clerk's earlier work: corrections become
+        # evidence, and corrections against a rule become disputes.
+        learned = (
+            self._learn_from_actual(snapshot, settings, job_id=job["id"])
+            if settings.memory_learn_from_actual
+            else {}
+        )
+        repairs = self._propose_repairs(snapshot)
+
         stored = _stored_memory(self.database, snapshot)
         rules = RuleBook.from_rows(self.database.active_rules())
         # The payee catalogue in Actual is the user's own alias table; read it
@@ -445,6 +458,10 @@ class JobManager:
                 "full_history": full,
                 "review_retry": retry_reviews,
                 "reviews_resolved": sum(review_resolutions.values()),
+                "aliases_learned": aliases_learned,
+                "corrections": learned.get("corrections", 0),
+                "disputes": learned.get("disputes", 0),
+                "repairs": repairs,
             }
 
         self.database.update_job(
@@ -496,11 +513,145 @@ class JobManager:
         summary["written"] = len(applied_ids)
         summary["rule_proposals"] = promotions
         summary["aliases_learned"] = aliases_learned
+        summary["corrections"] = learned.get("corrections", 0)
+        summary["disputes"] = learned.get("disputes", 0)
+        summary["repairs"] = repairs
         summary["lookback_days"] = lookback
         summary["full_history"] = full
         summary["review_retry"] = retry_reviews
         summary["reviews_resolved"] = sum(review_resolutions.values())
         return summary
+
+    def _learn_from_actual(
+        self, snapshot: dict[str, Any], settings: Settings, *, job_id: str
+    ) -> dict[str, int]:
+        """Read hand corrections in Actual back as evidence and as disputes."""
+        history_start = snapshot.get("history_start")
+        since = history_start.isoformat() if history_start else "0000-00-00"
+        decisions = self.database.decisions_to_observe(since_date=since)
+        if not decisions:
+            return {}
+        counts = {"standing": 0, "corrections": 0, "cleared": 0, "gone": 0, "disputes": 0}
+        proposals = 0
+        names = {
+            str(category["id"]): str(category["name"]) for category in snapshot["categories"]
+        }
+        for observation in observe_decisions(decisions, snapshot["transactions"]):
+            changed = self.database.mark_observed(
+                observation.decision_id,
+                observation.status,
+                category_id=observation.category_id,
+                category_name=observation.category_name,
+            )
+            if not changed:
+                continue
+            if observation.status not in (OBSERVED_CORRECTED, OBSERVED_CLEARED):
+                counts["standing" if observation.status == "standing" else "gone"] += 1
+                continue
+            decision = next(item for item in decisions if item["id"] == observation.decision_id)
+            merchant_key = str(decision.get("merchant_key") or "")
+            if observation.status == OBSERVED_CORRECTED:
+                counts["corrections"] += 1
+                self.database.record_memory(
+                    merchant_key,
+                    observation.category_id,
+                    names.get(observation.category_id, observation.category_name),
+                    correction=True,
+                )
+            else:
+                counts["cleared"] += 1
+            rule_id = str((decision.get("rationale") or {}).get("rule", {}).get("id") or "")
+            if decision.get("source") != SOURCE_RULE or not rule_id:
+                continue
+            counts["disputes"] += 1
+            disputes = self.database.record_rule_dispute(rule_id)
+            if disputes >= settings.memory_dispute_threshold and self._propose_rule_change(
+                rule_id, merchant_key, observation, names, disputes
+            ):
+                proposals += 1
+        if counts["corrections"] or counts["disputes"] or counts["cleared"]:
+            self.database.add_event(
+                job_id,
+                "info",
+                "learned_from_actual",
+                f"Read {counts['corrections']} correction(s) made in Actual"
+                + (f", {counts['disputes']} against a rule" if counts["disputes"] else ""),
+                {**counts, "proposals": proposals},
+            )
+        return counts
+
+    def _propose_rule_change(
+        self,
+        rule_id: str,
+        merchant_key: str,
+        observation: Any,
+        names: dict[str, str],
+        disputes: int,
+    ) -> bool:
+        rule = self.database.get_rule(rule_id)
+        if not rule or rule["status"] != "active":
+            return False
+        if observation.status == OBSERVED_CORRECTED:
+            kind = "rule_change"
+            category_name = names.get(observation.category_id, observation.category_name)
+            payload = {
+                "rule_id": rule_id,
+                "merchant_key": merchant_key,
+                "merchant_label": rule["merchant_label"],
+                "from_category_id": rule["category_id"],
+                "from_category_name": rule["category_name"],
+                "category_id": observation.category_id,
+                "category_name": category_name,
+            }
+            reason = (
+                f"You have moved {disputes} transaction(s) this rule filed as "
+                f"{rule['category_name']}; the latest went to {category_name}."
+            )
+        else:
+            kind = "rule_retire"
+            payload = {
+                "rule_id": rule_id,
+                "merchant_key": merchant_key,
+                "merchant_label": rule["merchant_label"],
+                "from_category_id": rule["category_id"],
+                "from_category_name": rule["category_name"],
+            }
+            reason = (
+                f"You have cleared the category on {disputes} transaction(s) this rule "
+                f"filed as {rule['category_name']}."
+            )
+        return bool(
+            self.database.add_proposal(
+                kind=kind,
+                merchant_key=merchant_key,
+                payload=payload,
+                evidence={"disputes": disputes, "reason": reason},
+            )
+        )
+
+    def _propose_repairs(self, snapshot: dict[str, Any]) -> int:
+        """Ask for a category wherever a rule's category has left the budget."""
+        proposed = 0
+        for rule in rules_needing_repair(self.database.active_rules(), snapshot["categories"]):
+            if self.database.add_proposal(
+                kind="repair",
+                merchant_key=rule["merchant_key"],
+                payload={
+                    "rule_id": rule["id"],
+                    "merchant_key": rule["merchant_key"],
+                    "merchant_label": rule["merchant_label"],
+                    "from_category_id": rule["category_id"],
+                    "from_category_name": rule["category_name"],
+                },
+                evidence={
+                    "reason": (
+                        f"The category {rule['category_name'] or rule['category_id']} is no "
+                        "longer in Actual, so this rule files nothing until it has a new one."
+                    )
+                },
+            ):
+                proposed += 1
+        return proposed
 
     def _propose_rules(
         self,
@@ -650,6 +801,7 @@ class JobManager:
                 report=overview["budget"],
                 health=self.database.health_snapshots(),
                 review_count=self.database.counts()["needs_review"],
+                proposal_count=self.database.counts()["proposals"],
                 accounts=overview["accounts"],
                 currency=settings.budget_currency,
                 today=today,

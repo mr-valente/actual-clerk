@@ -154,6 +154,7 @@ def build_digest(
     title: str = "The Morning Report",
     sections: dict[str, bool] | None = None,
     previous: dict[str, Any] | None = None,
+    proposal_count: int = 0,
 ) -> dict[str, Any]:
     """Compose the digest payload: its fixed title, body, tags, and priority."""
 
@@ -311,6 +312,10 @@ def build_digest(
         waiting = []
         if review_count:
             waiting.append(f"{plural(review_count, 'transaction')} to review in Clerk")
+        if proposal_count:
+            waiting.append(
+                f"{plural(proposal_count, 'question')} about your rules under Intelligence"
+            )
         uncategorized = int(report.get("uncategorized_count", 0))
         if uncategorized:
             waiting.append(

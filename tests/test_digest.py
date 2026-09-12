@@ -31,6 +31,12 @@ def digest(report=None, **kwargs):
     return build_digest(report={**HEALTHY_REPORT, **(report or {})}, **options)
 
 
+def test_open_proposals_are_listed_as_waiting():
+    payload = digest(review_count=0, proposal_count=2)
+    assert "2 questions about your rules under Intelligence" in payload["message"]
+    assert "Waiting for you" in payload["message"]
+
+
 def only(*names):
     """Every block off but the ones named, as the settings checkboxes do."""
     blocks = (

@@ -341,6 +341,61 @@ async def test_filing_reads_the_payee_catalogue_as_aliases(manager, settings_man
     assert manager.database.list_aliases()[0]["source"] == "actual_payee"
 
 
+async def test_a_correction_made_in_actual_becomes_evidence_and_disputes_a_rule(manager, settings_manager):
+    settings_manager.update({"ai_enabled": False, "memory_dispute_threshold": 2})
+    rule = manager.database.upsert_rule(merchant_key="blue bottle coffee", category_id="cat-coffee", category_name="Coffee")
+    # Two rows the rule filed, which the user has since moved to Dining in Actual.
+    for n in range(2):
+        manager.gateway.snap["transactions"].append(
+            transaction(TODAY - datetime.timedelta(days=n + 1), -700, payee="Blue Bottle Coffee", category_id="cat-dining", category_name="Dining", transaction_id=f"txn-moved-{n}")
+        )
+        manager.database.add_decision({
+            "transaction_id": f"txn-moved-{n}", "merchant_key": "blue bottle coffee", "payee_name": "Blue Bottle Coffee",
+            "transaction_date": (TODAY - datetime.timedelta(days=n + 1)).isoformat(), "source": "rule", "status": "applied",
+            "category_id": "cat-coffee", "category_name": "Coffee", "confidence": 1.0,
+            "rationale": {"rule": {"id": rule["id"]}},
+        })
+    job = await run_job(manager, "categorize")
+    assert job["result"]["corrections"] == 2
+    assert job["result"]["disputes"] == 2
+    memory = {row["category_id"]: row for row in manager.database.memory_for("blue bottle coffee")}
+    assert memory["cat-dining"]["corrections"] == 2
+    assert manager.database.get_rule(rule["id"])["disputed_count"] == 2
+    [proposal] = manager.database.list_proposals()
+    assert proposal["kind"] == "rule_change"
+    assert proposal["payload"]["category_id"] == "cat-dining"
+    assert proposal["evidence"]["disputes"] == 2
+    for n in range(2):
+        [recorded] = [d for d in manager.database.list_decisions() if d["transaction_id"] == f"txn-moved-{n}"]
+        assert recorded["observed"] == "corrected"
+    # The next run finds nothing new to learn.
+    again = await run_job(manager, "categorize")
+    assert again["result"]["corrections"] == 0
+
+
+async def test_learning_from_actual_can_be_switched_off(manager, settings_manager):
+    settings_manager.update({"ai_enabled": False, "memory_learn_from_actual": False})
+    manager.gateway.snap["transactions"].append(
+        transaction(TODAY - datetime.timedelta(days=1), -700, payee="Blue Bottle Coffee", category_id="cat-dining", category_name="Dining", transaction_id="txn-moved")
+    )
+    manager.database.add_decision({"transaction_id": "txn-moved", "merchant_key": "blue bottle coffee", "transaction_date": (TODAY - datetime.timedelta(days=1)).isoformat(), "source": "memory", "status": "applied", "category_id": "cat-coffee", "category_name": "Coffee"})
+    job = await run_job(manager, "categorize")
+    assert job["result"]["corrections"] == 0
+    assert manager.database.memory_for("blue bottle coffee") == []
+
+
+async def test_a_rule_whose_category_left_the_budget_asks_for_repair(manager, settings_manager):
+    settings_manager.update({"ai_enabled": False})
+    manager.database.upsert_rule(merchant_key="blue bottle coffee", category_id="cat-gone", category_name="Old")
+    job = await run_job(manager, "categorize")
+    assert job["result"]["repairs"] == 1
+    [proposal] = manager.database.list_proposals()
+    assert proposal["kind"] == "repair"
+    assert "no longer in Actual" in proposal["evidence"]["reason"]
+    # The rule filed nothing; memory and the review queue take over.
+    assert "rule" not in job["result"]["by_source"]
+
+
 async def test_a_rule_files_without_memory_and_counts_its_work(manager, settings_manager):
     settings_manager.update({"ai_enabled": False, "apply_mode": "review"})
     rule = manager.database.upsert_rule(
