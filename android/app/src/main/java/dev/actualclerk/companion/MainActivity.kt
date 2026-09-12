@@ -395,7 +395,7 @@ private fun RegisterScreen(prefs: Prefs, knownAccounts: List<Account>, onBack: (
                                         runCatching {
                                             ClerkApi(prefs).registerSource(
                                                 notification.packageName, notification.appLabel, account.id,
-                                                notification.title, notification.text,
+                                                notification.title, notification.text, notification.postedAt,
                                             )
                                         }
                                     }
@@ -404,6 +404,13 @@ private fun RegisterScreen(prefs: Prefs, knownAccounts: List<Account>, onBack: (
                                         val source = reply.optJSONObject("source")?.let { Source.fromJson(it) }
                                         if (source != null) {
                                             prefs.sources = prefs.sources.filter { it.packageName != source.packageName } + source
+                                        }
+                                        // The sample was forwarded by Clerk on the phone's behalf; log what it became.
+                                        reply.optJSONObject("charge")?.let { charge ->
+                                            val merchant = charge.optString("merchant").ifBlank { notification.title }
+                                            val amount = ForwardWorker.formatCents(charge.optLong("amount_cents"))
+                                            val detail = if (charge.optString("status") == "open") "$amount · counted as spent until the bank posts it" else "$amount · ${charge.optString("status")}"
+                                            prefs.appendLog(LogEntry(System.currentTimeMillis(), merchant, detail, true))
                                         }
                                         chosen = null
                                         onBack()

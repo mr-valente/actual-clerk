@@ -250,3 +250,33 @@ async def test_noticed_date_follows_the_configured_time_zone(client):
     posted = int(datetime.datetime(2026, 8, 22, 3, tzinfo=datetime.UTC).timestamp() * 1000)
     body = (await client.post("/api/anticipated/device/notifications", json=notification("A charge of $5.00 at SHOP was approved.", posted_at_ms=posted))).json()
     assert body["charge"]["noticed_date"] == "2026-08-21"
+
+
+async def test_registering_from_a_notification_records_it_as_a_charge(client):
+    seed_overview(client.database)
+    response = await register(
+        client,
+        sample_title="Venture Credit Card…4273",
+        sample_text="Your purchase for $3.19 at Valve was approved.",
+        sample_posted_at_ms=1_755_780_000_000,
+    )
+    assert response.status_code == 201
+    charge = response.json()["charge"]
+    assert charge["amount_cents"] == -319
+    assert charge["merchant"] == "Valve"
+    assert charge["status"] == "open"
+    assert len((await client.get("/api/anticipated")).json()["open"]) == 1
+    # Registering again with the same sample is not a second charge.
+    again = await register(
+        client,
+        sample_title="Venture Credit Card…4273",
+        sample_text="Your purchase for $3.19 at Valve was approved.",
+        sample_posted_at_ms=1_755_780_000_000,
+    )
+    assert again.json()["charge"]["id"] == charge["id"]
+    assert len((await client.get("/api/anticipated")).json()["open"]) == 1
+
+
+async def test_registering_without_a_sample_records_nothing(client):
+    seed_overview(client.database)
+    assert (await register(client)).json()["charge"] is None

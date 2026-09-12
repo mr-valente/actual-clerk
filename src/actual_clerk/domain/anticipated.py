@@ -37,8 +37,10 @@ _MONEY = re.compile(
     r"(?<![\w.])(?:\$|USD\s?)\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?(?!\d)",
 )
 _DECLINED = re.compile(r"\b(declined|denied|not approved|was blocked)\b")
+# "Credit card" names the instrument, not the direction: the Capital One
+# title is "Venture Credit Card…4273" on an ordinary purchase.
 _CREDIT = re.compile(
-    r"\b(credit(?:ed)?|refund(?:ed)?|returned|reversal|reversed|"
+    r"\b(credit(?:ed)?(?!\s+card)|refund(?:ed)?|returned|reversal|reversed|"
     r"payment\b.{0,80}?\b(?:received|posted|processed|scheduled|applied)|"
     r"thank you for your payment|deposit(?:ed)?|cash ?back)\b"
 )

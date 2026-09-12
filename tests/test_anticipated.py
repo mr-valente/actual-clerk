@@ -49,6 +49,8 @@ TODAY = datetime.date(2026, 8, 21)
         ("Capital One", "Your payment of $500.00 was received. Thank you!", KIND_CREDIT, 50000, ""),
         ("Capital One", "A $99.99 charge at ACME was declined.", KIND_DECLINED, -9999, "ACME"),
         ("Capital One", "Your statement is ready to view.", KIND_UNKNOWN, 0, ""),
+        # The real thing, as seen on a Pixel on 2026-09-11.
+        ("Venture Credit Card…4273", "Your purchase for $3.19 at Valve was approved.", KIND_CHARGE, -319, "Valve"),
     ],
 )
 def test_notifications_are_read_for_amount_direction_and_merchant(title, text, kind, cents, merchant):

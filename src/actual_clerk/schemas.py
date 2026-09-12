@@ -286,6 +286,10 @@ class RegisterSourceRequest(BaseModel):
     actual_account_id: str = Field(min_length=1, max_length=100)
     sample_title: str = Field(default="", max_length=400)
     sample_text: str = Field(default="", max_length=2000)
+    # When the sample was posted on the phone. The notification a source is
+    # registered from is usually the charge that prompted the registration,
+    # so it is recorded as one rather than waiting for the next.
+    sample_posted_at_ms: int = Field(default=0, ge=0)
 
     @field_validator("device_name", "app_label", "sample_title", "sample_text")
     @classmethod

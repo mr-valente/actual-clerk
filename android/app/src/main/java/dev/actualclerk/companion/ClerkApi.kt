@@ -24,6 +24,7 @@ class ClerkApi(private val prefs: Prefs) {
         accountId: String,
         sampleTitle: String,
         sampleText: String,
+        samplePostedAtMs: Long,
     ): JSONObject = request(
         "POST",
         "/api/anticipated/device/sources",
@@ -34,7 +35,8 @@ class ClerkApi(private val prefs: Prefs) {
             .put("app_label", appLabel)
             .put("actual_account_id", accountId)
             .put("sample_title", sampleTitle.take(400))
-            .put("sample_text", sampleText.take(2000)),
+            .put("sample_text", sampleText.take(2000))
+            .put("sample_posted_at_ms", samplePostedAtMs),
     )
 
     fun unregisterSource(sourceId: String): JSONObject = request(

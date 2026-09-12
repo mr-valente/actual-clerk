@@ -1300,10 +1300,27 @@ async def anticipated_register_source(
     name = _account_name(request, payload.actual_account_id)
     if not name:
         raise HTTPException(status_code=404, detail="That Actual account is not in the last snapshot")
-    source = _database(request).upsert_notification_source(
-        {**payload.model_dump(), "account_name": name, "enabled": True}
-    )
-    return {"source": _serialize_source(source)}
+    database = _database(request)
+    fields = payload.model_dump(exclude={"sample_posted_at_ms"})
+    source = database.upsert_notification_source({**fields, "account_name": name, "enabled": True})
+    # The notification picked at registration is almost always the purchase
+    # that prompted it, and the listener only sees notifications posted from
+    # now on, so the sample is forwarded on the phone's behalf.
+    charge = None
+    if payload.sample_title or payload.sample_text:
+        row, created = anticipated.record_notification(
+            database,
+            _settings_manager(request).get(),
+            source=source,
+            posted_at_ms=payload.sample_posted_at_ms,
+            title=payload.sample_title,
+            text=payload.sample_text,
+        )
+        if created and row["status"] == anticipated.OPEN:
+            with contextlib.suppress(Exception):
+                await _jobs(request).refresh_now()
+        charge = anticipated.public_charge(database.get_anticipated_charge(row["id"]) or row)
+    return {"source": _serialize_source(source), "charge": charge}
 
 
 @app.delete("/api/anticipated/device/sources/{source_id}")
