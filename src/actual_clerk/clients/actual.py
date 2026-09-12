@@ -448,6 +448,24 @@ class ActualGateway:
     async def find_account(self, name: str) -> dict[str, Any] | None:
         return await self._call("findAccount", {"name": name})
 
+    # ---------------------------------------------------------------- rules
+    #
+    # Clerk holds the simple payee-to-category rules itself. These read what
+    # Actual still has, retire a rule Clerk has taken over, and put one back
+    # verbatim from the copy Clerk stored when it imported it.
+
+    async def list_rules(self) -> list[dict[str, Any]]:
+        return list(await self._call("listRules") or [])
+
+    async def list_payees(self) -> list[dict[str, Any]]:
+        return list(await self._call("listPayees") or [])
+
+    async def delete_rule(self, rule_id: str) -> dict[str, Any]:
+        return await self._call("deleteRule", {"ruleId": rule_id})
+
+    async def restore_rule(self, rule: dict[str, Any]) -> dict[str, Any]:
+        return await self._call("restoreRule", {"rule": rule})
+
     async def diagnostics(self) -> dict[str, Any]:
         return await self._call("diagnostics")
 

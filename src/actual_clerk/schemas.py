@@ -91,6 +91,13 @@ class CreateRuleRequest(BaseModel):
         return self
 
 
+class ActualRulesRequest(BaseModel):
+    """Import, retire, or restore Actual rules: all that qualify, or the ids named."""
+
+    rule_ids: list[str] = Field(default_factory=list, max_length=2000)
+    dry_run: bool = False
+
+
 class UpdateRuleRequest(BaseModel):
     category_id: str | None = Field(default=None, max_length=100)
     status: Literal["active", "paused", "retired"] | None = None

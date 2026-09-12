@@ -593,6 +593,61 @@ export class ActualService {
     return { id, match_value: params.matchValue, category_id: params.categoryId };
   }
 
+  // ------------------------------------------------------------ rules
+  //
+  // Clerk holds the simple payee-to-category rules itself. These methods let
+  // it read what Actual still has, retire a rule it has taken over, and put
+  // one back verbatim. The public API returns each rule in its serialized
+  // shape ({id, stage, conditionsOp, conditions, actions}); the stored
+  // condition field names may be either the public ones (payee, account) or
+  // the internal columns (description, acct) depending on the rule's age, so
+  // the Python side accepts both.
+
+  async listRules() {
+    await this.api.sync();
+    const rules = await this.api.getRules();
+    return (rules || []).map(rule => ({
+      id: cleanString(rule.id),
+      stage: cleanString(rule.stage) || 'default',
+      conditions_op: cleanString(rule.conditionsOp) || 'and',
+      conditions: Array.isArray(rule.conditions) ? rule.conditions : [],
+      actions: Array.isArray(rule.actions) ? rule.actions : [],
+    }));
+  }
+
+  async listPayees() {
+    const payees = await this.api.getPayees();
+    return (payees || []).map(payee => ({
+      id: cleanString(payee.id),
+      name: cleanString(payee.name),
+      transfer_account_id: cleanString(payee.transfer_acct),
+    }));
+  }
+
+  async deleteRule(params) {
+    const id = cleanString(params.ruleId);
+    if (!id) throw new Error('A rule id is required');
+    const deleted = await this.api.deleteRule(id);
+    await this.api.sync();
+    return { id, deleted: deleted !== false };
+  }
+
+  async restoreRule(params) {
+    const rule = params.rule && typeof params.rule === 'object' ? params.rule : null;
+    if (!rule || !Array.isArray(rule.conditions) || !Array.isArray(rule.actions)) {
+      throw new Error('A rule with conditions and actions is required');
+    }
+    const created = await this.api.createRule({
+      stage: cleanString(rule.stage) || 'default',
+      conditionsOp: cleanString(rule.conditionsOp || rule.conditions_op) || 'and',
+      conditions: rule.conditions,
+      actions: rule.actions,
+    });
+    await this.api.sync();
+    const id = typeof created === 'object' && created ? created.id : created;
+    return { id: cleanString(id), previous_id: cleanString(rule.id) };
+  }
+
   async findAccount(params) {
     const requested = cleanString(params.name).trim().toLocaleLowerCase();
     const account = (await this.api.getAccounts()).find(
@@ -938,6 +993,10 @@ export class ActualService {
       ensureTags: () => this.ensureTags(params),
       createCategory: () => this.createCategory(params),
       createCategoryRule: () => this.createCategoryRule(params),
+      listRules: () => this.listRules(),
+      listPayees: () => this.listPayees(),
+      deleteRule: () => this.deleteRule(params),
+      restoreRule: () => this.restoreRule(params),
       findAccount: () => this.findAccount(params),
       diagnostics: () => this.diagnostics(),
       listAccountsDetailed: () => this.listAccountsDetailed(),

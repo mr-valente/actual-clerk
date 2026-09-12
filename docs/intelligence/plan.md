@@ -382,6 +382,7 @@ Done: see [stage-1.md](stage-1.md).
 `deleteRule` with contract tests; the rule classifier and replay; the From
 Actual panel with import, retire, restore and dry runs. Verified in the lab
 against a copy of the real budget, then run for real.
+Done: see [stage-2.md](stage-2.md).
 
 **Stage 3: one identity.** Alias sources generalized, the payee catalogue
 read as alias evidence, canonicalization in the resolver for both the

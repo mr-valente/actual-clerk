@@ -139,6 +139,33 @@ class FakeGateway:
     async def account_transactions(self, account_id, *, start=None, end=None):
         return []
 
+    # ---- rules in Actual, scripted per test
+    actual_rules: list[dict[str, Any]] = []
+    payees: list[dict[str, Any]] = []
+
+    async def list_rules(self):
+        return [dict(rule) for rule in self.actual_rules]
+
+    async def list_payees(self):
+        return [dict(payee) for payee in self.payees]
+
+    async def delete_rule(self, rule_id):
+        if self.error is not None:
+            raise self.error
+        self.actual_rules = [rule for rule in self.actual_rules if rule["id"] != rule_id]
+        self.deleted_rules = getattr(self, "deleted_rules", [])
+        self.deleted_rules.append(rule_id)
+        return {"id": rule_id, "deleted": True}
+
+    async def restore_rule(self, rule):
+        if self.error is not None:
+            raise self.error
+        self.restored_rules = getattr(self, "restored_rules", [])
+        self.restored_rules.append(rule)
+        created = {**rule, "id": f"restored-{len(self.restored_rules)}"}
+        self.actual_rules.append(created)
+        return {"id": created["id"], "previous_id": rule.get("id", "")}
+
     async def import_transactions(self, account_id, transactions, *, dry_run=False):
         return {"added": [], "updated": [], "errors": [], "preview": [], "dry_run": dry_run}
 
@@ -499,6 +526,167 @@ async def test_applying_a_merchant_with_always_declares_one_rule_for_the_group(c
 
 async def test_the_old_actual_rule_endpoints_are_gone(client):
     assert (await client.get("/api/rules")).status_code == 404
+
+
+# ------------------------------------------------------- takeover from Actual
+
+
+def actual_with_rules(client, gateway):
+    """A budget whose rule table holds one simple rule, one scoped rule, and one transfer rule."""
+    snapshot_with_categories(client)
+    gateway.snapshot_payload = {
+        "accounts": [{"id": "acct-1", "name": "Checking", "closed": False, "off_budget": False, "sync_source": "", "external_id": "", "balance_cents": 0, "cleared_balance_cents": 0, "unconfirmed_transfers": [], "last_sync": None, "type": "checking", "last_transaction_date": None}],
+        "categories": [
+            {"id": "cat-coffee", "name": "Coffee", "group_name": "Everyday", "is_income": False, "hidden": False},
+            {"id": "cat-dining", "name": "Dining", "group_name": "Everyday", "is_income": False, "hidden": False},
+        ],
+        "transactions": [
+            {"id": f"t{n}", "date": "2026-08-01", "amount_cents": -500, "category_id": "cat-coffee", "category_name": "Coffee", "payee_name": "Blue Bottle", "imported_description": "", "merchant_key": "blue bottle", "account_id": "acct-1", "account_name": "Checking", "is_transfer": False, "is_starting_balance": False, "off_budget": False, "closed_account": False, "is_child": False}
+            for n in range(3)
+        ],
+        "budgeted": {},
+        "budgeted_history": {},
+        "income_history": [],
+        "tags": [],
+        "history_start": "2026-01-01",
+        "collected_at": "2026-08-21T00:00:00Z",
+    }
+    gateway.payees = [
+        {"id": "p-bb", "name": "Blue Bottle", "transfer_account_id": ""},
+        {"id": "p-sb", "name": "Starbucks", "transfer_account_id": ""},
+        {"id": "p-xfer", "name": "", "transfer_account_id": "acct-2"},
+    ]
+    gateway.actual_rules = [
+        {"id": "r-simple", "stage": "default", "conditions_op": "and", "conditions": [{"op": "is", "field": "payee", "value": "p-bb", "type": "id"}], "actions": [{"op": "set", "field": "category", "value": "cat-coffee", "type": "id"}]},
+        {"id": "r-scoped", "stage": "default", "conditions_op": "and", "conditions": [{"op": "is", "field": "account", "value": "acct-1", "type": "id"}, {"op": "is", "field": "payee", "value": "p-sb", "type": "id"}], "actions": [{"op": "set", "field": "category", "value": "cat-dining", "type": "id"}]},
+        {"id": "r-transfer", "stage": "default", "conditions_op": "and", "conditions": [{"op": "is", "field": "account", "value": "acct-1", "type": "id"}, {"op": "is", "field": "payee", "value": "p-bb", "type": "id"}], "actions": [{"op": "set", "field": "payee", "value": "p-xfer", "type": "id"}]},
+    ]
+
+
+async def test_reading_actual_classifies_and_replays_every_rule(client, gateway):
+    actual_with_rules(client, gateway)
+    body = (await client.get("/api/intelligence/actual")).json()
+    assert body["counts"] == {"in_actual": 3, "movable": 2, "kept": 1, "imported_present": 0, "retired": 0}
+    by_id = {rule["id"]: rule for rule in body["rules"]}
+    simple = by_id["r-simple"]
+    assert simple["disposition"] == "move"
+    assert simple["translations"][0]["merchant_key"] == "blue bottle"
+    assert simple["translations"][0]["replay"] == {"matched": 3, "agree": 3, "disagree": 0, "disagreeing": {}}
+    assert simple["translations"][0]["existing"] is None
+    scoped = by_id["r-scoped"]
+    assert scoped["translations"][0]["account_name"] == "Checking"
+    kept = by_id["r-transfer"]
+    assert kept["disposition"] == "kept"
+    assert "set the payee" in kept["reason"]
+    assert kept["summary"] == "If account is Checking and payee is Blue Bottle, set the payee"
+
+
+async def test_a_dry_run_import_changes_nothing(client, gateway):
+    actual_with_rules(client, gateway)
+    body = (await client.post("/api/intelligence/actual/import", json={"dry_run": True})).json()
+    assert body["dry_run"] is True
+    assert [item["merchant_key"] for item in body["imported"]] == ["blue bottle", "starbucks"]
+    assert client.database.active_rules() == []
+
+
+async def test_importing_copies_simple_rules_and_leaves_actual_alone(client, gateway):
+    actual_with_rules(client, gateway)
+    client.database.add_proposal(kind="rule", merchant_key="blue bottle", payload={})
+    body = (await client.post("/api/intelligence/actual/import", json={})).json()
+    assert len(body["imported"]) == 2 and body["skipped"] == []
+    rules = {rule["merchant_key"]: rule for rule in client.database.active_rules()}
+    assert rules["blue bottle"]["source"] == "imported"
+    assert rules["blue bottle"]["actual_rule_id"] == "r-simple"
+    assert rules["blue bottle"]["actual_status"] == "present"
+    assert "r-simple" in rules["blue bottle"]["actual_rule_json"]
+    assert rules["starbucks"]["account_id"] == "acct-1"
+    assert len(gateway.actual_rules) == 3, "import never touches Actual"
+    # The open question about that merchant is answered by the import.
+    assert client.database.list_proposals() == []
+    # Reading again shows them as managed, and nothing left to move.
+    reading = (await client.get("/api/intelligence/actual")).json()
+    assert reading["counts"]["movable"] == 0
+    assert reading["counts"]["imported_present"] == 2
+    again = (await client.post("/api/intelligence/actual/import", json={})).json()
+    assert again["imported"] == []
+
+
+async def test_importing_can_be_limited_to_named_rules_and_skips_problems(client, gateway):
+    actual_with_rules(client, gateway)
+    gateway.actual_rules.append({"id": "r-gone", "stage": "default", "conditions_op": "and", "conditions": [{"op": "is", "field": "payee", "value": "p-missing", "type": "id"}], "actions": [{"op": "set", "field": "category", "value": "cat-coffee", "type": "id"}]})
+    body = (await client.post("/api/intelligence/actual/import", json={"rule_ids": ["r-simple", "r-gone", "r-transfer"]})).json()
+    assert [item["merchant_key"] for item in body["imported"]] == ["blue bottle"]
+    assert "no longer exists" in body["skipped"][0]["reason"]
+    assert [rule["merchant_key"] for rule in client.database.active_rules()] == ["blue bottle"]
+
+
+async def test_a_clerk_rule_that_disagrees_blocks_the_import_of_that_merchant(client, gateway):
+    actual_with_rules(client, gateway)
+    client.database.upsert_rule(merchant_key="blue bottle", category_id="cat-dining", category_name="Dining")
+    reading = (await client.get("/api/intelligence/actual")).json()
+    translation = next(rule for rule in reading["rules"] if rule["id"] == "r-simple")["translations"][0]
+    assert translation["existing"]["agrees"] is False
+    assert "already files this merchant as Dining" in translation["problem"]
+    body = (await client.post("/api/intelligence/actual/import", json={"rule_ids": ["r-simple"]})).json()
+    assert body["imported"] == [] and len(body["skipped"]) == 1
+
+
+async def test_a_clerk_rule_that_agrees_is_adopted_as_the_imported_one(client, gateway):
+    actual_with_rules(client, gateway)
+    mine = client.database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee", category_name="Coffee")
+    body = (await client.post("/api/intelligence/actual/import", json={"rule_ids": ["r-simple"]})).json()
+    assert body["imported"][0]["already_in_clerk"] is True
+    stored = client.database.get_rule(mine["id"])
+    assert stored["source"] == "user" and stored["actual_rule_id"] == "r-simple"
+
+
+async def test_retiring_deletes_imported_rules_from_actual_and_restore_brings_them_back(client, gateway):
+    actual_with_rules(client, gateway)
+    await client.post("/api/intelligence/actual/import", json={})
+    preview = (await client.post("/api/intelligence/actual/retire", json={"dry_run": True})).json()
+    assert sorted(item["actual_rule_id"] for item in preview["retired"]) == ["r-scoped", "r-simple"]
+    assert len(gateway.actual_rules) == 3
+
+    body = (await client.post("/api/intelligence/actual/retire", json={})).json()
+    assert sorted(item["actual_rule_id"] for item in body["retired"]) == ["r-scoped", "r-simple"]
+    assert sorted(gateway.deleted_rules) == ["r-scoped", "r-simple"]
+    assert [rule["id"] for rule in gateway.actual_rules] == ["r-transfer"], "the transfer rule stays"
+    assert {rule["actual_status"] for rule in client.database.active_rules()} == {"retired"}
+    reading = (await client.get("/api/intelligence/actual")).json()
+    assert reading["counts"] == {"in_actual": 1, "movable": 0, "kept": 1, "imported_present": 0, "retired": 2}
+    # Retiring again finds nothing to do.
+    assert (await client.post("/api/intelligence/actual/retire", json={})).json()["retired"] == []
+
+    restored = (await client.post("/api/intelligence/actual/restore", json={"rule_ids": ["r-simple"]})).json()
+    assert restored["restored"][0]["new_actual_rule_id"] == "restored-1"
+    assert gateway.restored_rules[0]["id"] == "r-simple"
+    assert gateway.restored_rules[0]["conditions"][0]["value"] == "p-bb"
+    blue = next(rule for rule in client.database.active_rules() if rule["merchant_key"] == "blue bottle")
+    assert blue["actual_status"] == "restored" and blue["actual_rule_id"] == "restored-1"
+    # A restored rule is present in Actual again and can be retired again.
+    again = (await client.post("/api/intelligence/actual/retire", json={"dry_run": True})).json()
+    assert [item["actual_rule_id"] for item in again["retired"]] == ["restored-1"]
+
+
+async def test_a_paused_clerk_rule_keeps_its_actual_rule_in_place(client, gateway):
+    actual_with_rules(client, gateway)
+    await client.post("/api/intelligence/actual/import", json={})
+    blue = next(rule for rule in client.database.active_rules() if rule["merchant_key"] == "blue bottle")
+    client.database.update_rule(blue["id"], status="paused")
+    body = (await client.post("/api/intelligence/actual/retire", json={})).json()
+    assert [item["actual_rule_id"] for item in body["retired"]] == ["r-scoped"]
+    assert "r-simple" in [rule["id"] for rule in gateway.actual_rules]
+
+
+async def test_a_failed_delete_is_reported_and_leaves_the_rule_present(client, gateway):
+    actual_with_rules(client, gateway)
+    await client.post("/api/intelligence/actual/import", json={})
+    gateway.error = ActualGatewayError("Actual is down")
+    body = (await client.post("/api/intelligence/actual/retire", json={"rule_ids": ["r-simple"]})).json()
+    assert body["retired"] == []
+    assert body["failed"][0]["actual_rule_id"] == "r-simple"
+    blue = next(rule for rule in client.database.active_rules() if rule["merchant_key"] == "blue bottle")
+    assert blue["actual_status"] == "present"
 
 
 # ------------------------------------------------------------------ settings

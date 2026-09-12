@@ -167,6 +167,43 @@ test('promoted category rules match the Actual payee', async () => {
   assert.equal(syncs, 1);
 });
 
+test('rules and payees are read in Clerk\'s shape, and a rule can be retired and restored', async () => {
+  const deleted = [];
+  const created = [];
+  let syncs = 0;
+  const api = {
+    sync: async () => { syncs += 1; },
+    getRules: async () => [
+      { id: 'r1', stage: null, conditionsOp: 'and', conditions: [{ op: 'is', field: 'payee', value: 'p1', type: 'id' }], actions: [{ op: 'set', field: 'category', value: 'c1', type: 'id' }] },
+      { id: 'r2', stage: 'pre', conditionsOp: 'or', conditions: 'not-a-list', actions: [{ op: 'delete-transaction' }] },
+    ],
+    getPayees: async () => [{ id: 'p1', name: 'Blue Bottle', transfer_acct: null }, { id: 'p2', name: '', transfer_acct: 'acct-1' }],
+    deleteRule: async id => { deleted.push(id); return true; },
+    createRule: async rule => { created.push(rule); return { id: 'r-new' }; },
+  };
+  const service = new ActualService(api);
+  service.initialized = true;
+
+  assert.deepEqual(await service.listRules(), [
+    { id: 'r1', stage: 'default', conditions_op: 'and', conditions: [{ op: 'is', field: 'payee', value: 'p1', type: 'id' }], actions: [{ op: 'set', field: 'category', value: 'c1', type: 'id' }] },
+    { id: 'r2', stage: 'pre', conditions_op: 'or', conditions: [], actions: [{ op: 'delete-transaction' }] },
+  ]);
+  assert.deepEqual(await service.listPayees(), [
+    { id: 'p1', name: 'Blue Bottle', transfer_account_id: '' },
+    { id: 'p2', name: '', transfer_account_id: 'acct-1' },
+  ]);
+  assert.deepEqual(await service.deleteRule({ ruleId: 'r1' }), { id: 'r1', deleted: true });
+  assert.deepEqual(deleted, ['r1']);
+  await assert.rejects(() => service.deleteRule({}), /rule id is required/);
+
+  const stored = { id: 'r1', stage: 'default', conditions_op: 'and', conditions: [{ op: 'is', field: 'payee', value: 'p1', type: 'id' }], actions: [{ op: 'set', field: 'category', value: 'c1', type: 'id' }] };
+  assert.deepEqual(await service.restoreRule({ rule: stored }), { id: 'r-new', previous_id: 'r1' });
+  assert.deepEqual(created, [{ stage: 'default', conditionsOp: 'and', conditions: stored.conditions, actions: stored.actions }]);
+  await assert.rejects(() => service.restoreRule({ rule: { conditions: [] } }), /conditions and actions/);
+  // One sync to read, one after the delete, one after the restore.
+  assert.equal(syncs, 3);
+});
+
 test('transaction change reporting distinguishes additions from reconciliations', () => {
   const before = [{ id: 'one', amount: 100, date: '2026-09-01' }];
   const after = [{ id: 'one', amount: 200, date: '2026-09-01' }, { id: 'two', amount: 50, date: '2026-09-01' }];
@@ -382,7 +419,7 @@ test('account transactions are read in Clerk\'s shape', async () => {
 test('every bank-link method is reachable through dispatch', async () => {
   const service = new ActualService({});
   service.initialized = true;
-  for (const method of ['listAccountsDetailed', 'accountTransactions', 'unlinkAccount', 'simpleFinServerStatus', 'simpleFinServerAccounts', 'linkSimpleFinAccount', 'setServerSecret', 'createAccount', 'importTransactions']) {
+  for (const method of ['listAccountsDetailed', 'accountTransactions', 'unlinkAccount', 'simpleFinServerStatus', 'simpleFinServerAccounts', 'linkSimpleFinAccount', 'setServerSecret', 'createAccount', 'importTransactions', 'listRules', 'listPayees', 'deleteRule', 'restoreRule']) {
     // Each rejects on its own validation rather than on "Unknown Actual worker method".
     await assert.rejects(() => service.dispatch(method, {}), error => !/Unknown Actual worker method/.test(error.message));
   }

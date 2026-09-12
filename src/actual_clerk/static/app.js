@@ -12,6 +12,8 @@ const state = {
   data: null,
   reviews: [],
   intelligence: null,
+  actualRules: null,
+  actualRulesError: "",
   ruleSearch: "",
   showRetiredRules: false,
   accounts: null,
@@ -618,6 +620,8 @@ function filterRuleRows() {
 }
 
 async function renderIntelligence() {
+  // A link straight to the From Actual panel reads the rule table on arrival.
+  if (location.hash === "#intelligence-actual" && !state.actualRules && !state.actualRulesError) await readActualRules();
   const page = await api(`/api/intelligence${state.showRetiredRules ? "?include_retired=true" : ""}`);
   if (state.route !== "intelligence") return;
   state.intelligence = page;
@@ -654,13 +658,85 @@ async function renderIntelligence() {
       <div class="toolbar"><input class="search-input" id="rule-search" type="search" value="${escapeHtml(state.ruleSearch)}" placeholder="Filter rules" aria-label="Filter rules" /><span class="muted" style="font-size:11px">${live.length} rule${live.length === 1 ? "" : "s"}${retired.length ? ` · ${retired.length} retired` : ""}</span></div>
       <div class="status-list" id="rule-list">${live.length ? live.map((item) => ruleRow(item, categories, accounts)).join("") : emptyState("⚡", "No rules yet", "Use Always on a review, Make it a rule on a decision, or add one here. Rules Clerk proposes appear above once a merchant has been filed the same way a few times.")}</div>
       ${state.showRetiredRules && retired.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Retired</h3><p>No longer applied. Reinstate one to bring it back.</p></div></header><div class="status-list">${retired.map((item) => ruleRow(item, categories, accounts)).join("")}</div>` : ""}
-    </article>`;
+    </article>
+    ${actualPanel()}`;
   if (state.ruleSearch) filterRuleRows();
   if (restoreSearchFocus) {
     const search = document.querySelector("#rule-search");
     search?.focus();
     search?.setSelectionRange(search.value.length, search.value.length);
   }
+}
+
+
+function actualRuleRow(rule) {
+  const move = rule.disposition === "move";
+  const managed = rule.managed || [];
+  const problems = rule.translations.filter((t) => t.problem);
+  const state = managed.length
+    ? (managed.every((m) => m.actual_status === "retired") ? ["muted", "Retired in Actual"] : ["ok", "In Clerk, still in Actual"])
+    : move ? (problems.length === rule.translations.length ? ["error", "Cannot move"] : problems.length ? ["warning", "Partly"] : ["suggested", "Ready to move"]) : ["muted", "Stays in Actual"];
+  const detail = move
+    ? rule.translations.map((t) => {
+      const replay = t.replay || {};
+      const where = t.account_id ? ` on ${escapeHtml(t.account_name || "an account")}` : "";
+      const played = replay.matched ? `${replay.matched} past row${replay.matched === 1 ? "" : "s"}, ${replay.agree} filed as ${escapeHtml(t.category_name)}${replay.disagree ? `, ${replay.disagree} as ${escapeHtml(Object.keys(replay.disagreeing || {}).join(", "))}` : ""}` : "no past rows to compare";
+      return `<div><strong>“${escapeHtml(t.merchant_key || "—")}”</strong>${where} → ${escapeHtml(t.category_name || "?")} · ${played}${t.problem ? ` · <span class="negative">${escapeHtml(t.problem)}</span>` : t.existing ? " · already a Clerk rule" : ""}</div>`;
+    }).join("")
+    : escapeHtml(rule.reason);
+  return `<article class="data-row" style="grid-template-columns:30px minmax(0,1fr) auto auto">
+    <span class="dot ${state[0] === "suggested" ? "stale" : state[0]}"></span>
+    <div class="row-title"><strong>${escapeHtml(rule.summary)}</strong><small>${detail}</small></div>
+    <div class="health-state">${statusChip(state[0], state[1])}</div>
+    <div class="row-actions">${move && !managed.length && problems.length < rule.translations.length ? `<button class="button ghost small" data-action="actual-import" data-ids="${escapeHtml(rule.id)}">Import</button>` : ""}${managed.length && managed.every((m) => m.actual_status !== "retired") ? `<button class="button ghost small" data-action="actual-retire" data-ids="${escapeHtml(rule.id)}">Retire in Actual</button>` : ""}</div>
+  </article>`;
+}
+
+function actualPanel() {
+  const reading = state.actualRules;
+  const counts = reading?.counts || {};
+  const rules = reading?.rules || [];
+  const movable = rules.filter((rule) => rule.disposition === "move" && !(rule.managed || []).length);
+  const present = rules.filter((rule) => (rule.managed || []).some((m) => m.actual_status !== "retired"));
+  const kept = rules.filter((rule) => rule.disposition !== "move");
+  const retiredCount = counts.retired || 0;
+  return `<article class="panel" id="actual-rules-panel" style="margin-top:18px">
+    <header class="panel-head"><div><h2>From Actual</h2><p>Actual's own rule table. Rules that only pick a category can move here; rules that set a transfer payee, delete a transaction, or depend on more than the payee stay in Actual. Each step has a preview and can be undone.</p></div>
+      <div class="panel-actions">${reading
+        ? `<button class="button ghost small" data-action="actual-read">Re-read</button>
+           <button class="button ghost small" data-action="actual-import" data-dry="1" ${movable.length ? "" : "disabled"}>Preview import</button>
+           <button class="button secondary small" data-action="actual-import" ${movable.length ? "" : "disabled"}>Import ${movable.length || ""}</button>
+           <button class="button ghost small" data-action="actual-retire" data-dry="1" ${present.length ? "" : "disabled"}>Preview retire</button>
+           <button class="button danger small" data-action="actual-retire" ${present.length ? "" : "disabled"}>Retire ${present.length || ""} in Actual</button>
+           <button class="button ghost small" data-action="actual-restore" ${retiredCount ? "" : "disabled"}>Restore ${retiredCount || ""} to Actual</button>`
+        : `<button class="button primary small" data-action="actual-read" style="white-space:nowrap">Read Actual's rules</button>`}</div></header>
+    ${state.actualRulesError ? `<div class="alert-banner"><span>!</span><div><strong>Could not read Actual</strong><p>${escapeHtml(state.actualRulesError)}</p></div></div>` : ""}
+    ${reading ? `
+      <div class="toolbar"><span class="muted" style="font-size:11px">${counts.in_actual || 0} rule${counts.in_actual === 1 ? "" : "s"} in Actual · ${movable.length} ready to move · ${present.length} imported and still in Actual · ${retiredCount} retired · ${kept.length} kept</span></div>
+      <div class="status-list" id="actual-rules-list">${rules.length ? [...movable, ...present, ...kept].map(actualRuleRow).join("") : emptyState("✓", "No rules in Actual", "Nothing to take over.")}</div>
+      <div id="actual-rules-result"></div>`
+      : `<div class="panel-body"><p class="muted" style="margin:0;font-size:11px">Reads the live rule table and replays each rule over your history to show what it would have matched. Nothing changes until you import, retire, or restore.</p></div>`}
+  </article>`;
+}
+
+function renderActualResult(kind, result) {
+  const box = document.querySelector("#actual-rules-result");
+  if (!box) return;
+  const lines = [];
+  const label = result.dry_run ? "Would " : "";
+  for (const item of result.imported || []) lines.push(`${label}import “${item.merchant_key}” → ${item.category_name}${item.account_id ? " (one account)" : ""}${item.already_in_clerk ? " · already a Clerk rule, adopted" : ""}`);
+  for (const item of result.skipped || []) lines.push(`Skipped “${item.merchant_key || item.merchant_label}”: ${item.reason}`);
+  for (const item of result.retired || []) lines.push(`${label}retire in Actual: ${(item.merchants || []).join(", ")}`);
+  for (const item of result.restored || []) lines.push(`${label}restore to Actual: ${(item.merchants || []).join(", ")}`);
+  for (const item of result.failed || []) lines.push(`Failed ${(item.merchants || []).join(", ")}: ${item.error}`);
+  if (!lines.length) lines.push(`Nothing to ${kind}.`);
+  box.innerHTML = `<div class="panel-body"><h3 style="margin:0 0 8px;font-size:12px">${result.dry_run ? "Preview" : "Done"}</h3><div class="change-list">${lines.map((line) => `<div class="change"><i>→</i><div><small style="color:var(--ink-soft)">${escapeHtml(line)}</small></div></div>`).join("")}</div></div>`;
+}
+
+async function readActualRules() {
+  state.actualRulesError = "";
+  try { state.actualRules = await api("/api/intelligence/actual"); }
+  catch (error) { state.actualRulesError = error.message; }
 }
 
 let ruleKeyPreviewTimer = null;
@@ -1848,6 +1924,31 @@ document.addEventListener("click", async (event) => {
       await renderRoute({ quiet: true });
     } catch (error) { toast("Could not make the rule", error.message, "error"); target.disabled = false; }
   }
+  if (action === "actual-read") {
+    event.preventDefault();
+    target.disabled = true;
+    await readActualRules();
+    await renderIntelligence();
+  }
+  if (action === "actual-import" || action === "actual-retire" || action === "actual-restore") {
+    event.preventDefault();
+    const kind = action.replace("actual-", "");
+    const dry = target.dataset.dry === "1";
+    const ids = (target.dataset.ids || "").split(",").filter(Boolean);
+    if (!dry && kind === "retire" && !window.confirm(`Delete ${ids.length ? "this rule" : "every imported rule"} from Actual?\n\nClerk keeps a copy and files these merchants itself from the next sync on. Restore puts them back.`)) return;
+    if (!dry && kind === "restore" && !window.confirm("Recreate the retired rules in Actual from the copies Clerk kept?\n\nActual will apply them at import again; Clerk's rules stay too.")) return;
+    target.disabled = true;
+    try {
+      const result = await api(`/api/intelligence/actual/${kind}`, { method: "POST", body: JSON.stringify({ rule_ids: ids, dry_run: dry }) });
+      if (!dry) {
+        await readActualRules();
+        await renderIntelligence();
+        toast({ import: "Imported into Clerk", retire: "Retired in Actual", restore: "Restored to Actual" }[kind], "");
+      }
+      renderActualResult(kind, result);
+    } catch (error) { toast(`Could not ${kind}`, error.message, "error"); }
+    finally { target.disabled = false; }
+  }
   if (action === "rules-show-retired") {
     event.preventDefault();
     state.showRetiredRules = !state.showRetiredRules;
@@ -2095,8 +2196,8 @@ async function navigateFromHash() {
   const requested = anchor.split("-")[0] || "overview";
   state.route = pageMeta[requested] ? requested : "overview";
   await renderRoute();
-  if (anchor.startsWith("settings-")) {
-    requestAnimationFrame(() => document.getElementById(anchor)?.scrollIntoView({
+  if (anchor.startsWith("settings-") || anchor === "intelligence-actual") {
+    requestAnimationFrame(() => document.getElementById(anchor === "intelligence-actual" ? "actual-rules-panel" : anchor)?.scrollIntoView({
       behavior: document.documentElement.dataset.motion === "reduced" || (document.documentElement.dataset.motion === "system" && reducedMotionQuery.matches) ? "auto" : "smooth",
       block: "start",
     }));

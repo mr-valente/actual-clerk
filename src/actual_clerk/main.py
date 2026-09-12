@@ -19,6 +19,7 @@ from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ValidationError
 
 from actual_clerk import __version__, anticipated
+from actual_clerk import intelligence as takeover
 from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
 from actual_clerk.clients.ntfy import NotificationError, NtfyClient
 from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleClient
@@ -32,6 +33,7 @@ from actual_clerk.plaid_links import describe, public_item, read_items
 from actual_clerk.plaid_sync import PlaidSyncEngine
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
 from actual_clerk.schemas import (
+    ActualRulesRequest,
     BulkResolveRequest,
     ClaimSetupTokenRequest,
     CreateCategoryRequest,
@@ -776,6 +778,48 @@ async def retire_rule(rule_id: str, request: Request) -> dict[str, Any]:
     _rule_or_404(request, rule_id)
     rule = _database(request).update_rule(rule_id, status="retired")
     return {"rule": _serialize_record(rule)}
+
+
+async def _live_snapshot(request: Request) -> tuple[dict[str, Any], Any]:
+    settings = _settings_manager(request).get()
+    today = datetime.now(settings.zone).date()
+    return await _jobs(request).snapshot(today=today), today
+
+
+@app.get("/api/intelligence/actual")
+async def intelligence_actual(request: Request) -> dict[str, Any]:
+    """What Actual's rule table holds: what can move, what stays, and how each replays."""
+    snapshot, today = await _live_snapshot(request)
+    return await takeover.read_actual(
+        _gateway(request), _database(request), today=today, snapshot=snapshot
+    )
+
+
+@app.post("/api/intelligence/actual/import")
+async def intelligence_import(payload: ActualRulesRequest, request: Request) -> dict[str, Any]:
+    snapshot, today = await _live_snapshot(request)
+    return await takeover.import_rules(
+        _gateway(request),
+        _database(request),
+        snapshot=snapshot,
+        today=today,
+        rule_ids=payload.rule_ids,
+        dry_run=payload.dry_run,
+    )
+
+
+@app.post("/api/intelligence/actual/retire")
+async def intelligence_retire(payload: ActualRulesRequest, request: Request) -> dict[str, Any]:
+    return await takeover.retire_rules(
+        _gateway(request), _database(request), rule_ids=payload.rule_ids, dry_run=payload.dry_run
+    )
+
+
+@app.post("/api/intelligence/actual/restore")
+async def intelligence_restore(payload: ActualRulesRequest, request: Request) -> dict[str, Any]:
+    return await takeover.restore_rules(
+        _gateway(request), _database(request), rule_ids=payload.rule_ids, dry_run=payload.dry_run
+    )
 
 
 @app.post("/api/intelligence/proposals/{proposal_id}/resolve")
