@@ -63,6 +63,21 @@ class TransactionInfo:
         return -self.amount_cents if self.amount_cents < 0 else 0
 
 
+@dataclass(frozen=True)
+class AnticipatedInfo:
+    """A charge a card app announced that the bank feed has not delivered yet."""
+
+    id: str
+    amount_cents: int  # Actual's sign: negative for money going out
+    account_id: str = ""
+    off_budget: bool = False
+    merchant: str = ""
+
+    @property
+    def spend_cents(self) -> int:
+        return -self.amount_cents if self.amount_cents < 0 else 0
+
+
 @dataclass
 class BudgetReport:
     month: str
@@ -89,6 +104,10 @@ class BudgetReport:
     discretionary_spent_cents: int
     uncategorized_cents: int
     uncategorized_count: int
+    # Announced by a card app but not yet posted by the bank. Counted as spent
+    # now, held outside Actual, and released when the real row arrives.
+    anticipated_cents: int
+    anticipated_count: int
     spent_cents: int
     remaining_cents: int
     remaining_percent: float
@@ -220,12 +239,19 @@ def build_budget_report(
     committed_groups: Sequence[str] = (),
     income_override_cents: int = 0,
     income_lookback_months: int = 3,
+    anticipated: Sequence[AnticipatedInfo] = (),
 ) -> BudgetReport:
     """Compute the month-to-date free-money report.
 
     `transactions` may span more than the reporting month; anything outside it
     is used only to work out what earlier months left available to a committed
     category, never as this month's spending.
+
+    `anticipated` charges are money the card has authorised that the bank has
+    not delivered. They count as discretionary spending -- nothing yet says
+    which category they will land in, and the conservative reading of a charge
+    is that it competes for free money -- and the day the bank posts the real
+    row, it is that row that counts instead.
     """
 
     start, end = month_bounds(today)
@@ -332,6 +358,9 @@ def build_budget_report(
             uncategorized_cents = net
     discretionary_total = sum(discretionary_by_category.values()) + uncategorized_cents
 
+    anticipated_open = [item for item in anticipated if not item.off_budget and item.spend_cents > 0]
+    anticipated_cents = sum(item.spend_cents for item in anticipated_open)
+
     committed_spent_total = sum(committed_spent.values())
     carried = committed_carryover(
         committed_ids=committed_ids,
@@ -377,7 +406,7 @@ def build_budget_report(
     # the sum the month is actually measured against.
     free_cents = expected_income - committed_cents
     available_cents = free_cents + returned_cents
-    spent_cents = discretionary_total + committed_overspend
+    spent_cents = discretionary_total + committed_overspend + anticipated_cents
     remaining_cents = available_cents - spent_cents
     configured = expected_income > 0
 
@@ -461,6 +490,8 @@ def build_budget_report(
         discretionary_spent_cents=discretionary_total,
         uncategorized_cents=uncategorized_cents,
         uncategorized_count=uncategorized_count,
+        anticipated_cents=anticipated_cents,
+        anticipated_count=len(anticipated_open),
         spent_cents=spent_cents,
         remaining_cents=remaining_cents,
         remaining_percent=remaining_percent,

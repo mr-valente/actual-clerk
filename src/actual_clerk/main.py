@@ -5,6 +5,7 @@ import hashlib
 import logging
 import mimetypes
 import os
+import secrets
 import sqlite3
 import sys
 from contextlib import asynccontextmanager
@@ -17,7 +18,7 @@ from fastapi import FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.responses import HTMLResponse, JSONResponse
 from pydantic import ValidationError
 
-from actual_clerk import __version__
+from actual_clerk import __version__, anticipated
 from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
 from actual_clerk.clients.ntfy import NotificationError, NtfyClient
 from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleClient
@@ -36,16 +37,19 @@ from actual_clerk.schemas import (
     CreateLinkRequest,
     EnqueueRequest,
     ExchangeRequest,
+    ForwardNotificationRequest,
     LinkTokenRequest,
     MigrateToPlaidRequest,
     MigrateToSimpleFinRequest,
     MonitoringRequest,
+    RegisterSourceRequest,
     ResolveDecisionRequest,
     ResolveRuleRequest,
     SandboxItemRequest,
     ServerTokenRequest,
     SettingsPatch,
     UpdateLinkRequest,
+    UpdateSourceRequest,
 )
 
 log = logging.getLogger(__name__)
@@ -1207,6 +1211,268 @@ async def migrate_to_simplefin(payload: MigrateToSimpleFinRequest, request: Requ
     )
     await _jobs(request).enqueue("sync", trigger="manual")
     return {"dry_run": False, **summary, "linked": linked, "sync_queued": True}
+
+
+# ---------------------------------------------------- anticipated charges
+#
+# The phone companion forwards card-app notifications here. Everything under
+# /api/anticipated/device/ is what the phone calls and is the only part of
+# Clerk an outside device writes to, so it can be gated by a device token.
+# The rest is the web UI's view of the same ledger. Nothing here writes to
+# Actual: an anticipated charge lives in Clerk until the bank's own row
+# arrives through the ordinary import and settles it.
+
+
+def _require_device(request: Request) -> None:
+    settings = _settings_manager(request).get()
+    if not settings.anticipated_enabled:
+        raise HTTPException(status_code=409, detail="Anticipated charges are turned off in Settings")
+    expected = settings.secret_value("anticipated_device_token")
+    if not expected:
+        return
+    header = request.headers.get("authorization", "")
+    presented = header[7:].strip() if header.lower().startswith("bearer ") else ""
+    presented = presented or request.headers.get("x-clerk-device-token", "").strip()
+    if not presented or not secrets.compare_digest(presented, expected):
+        raise HTTPException(status_code=401, detail="The device token is missing or wrong")
+
+
+def _anticipated_accounts(request: Request) -> list[dict[str, Any]]:
+    """Open Actual accounts a phone source can point at, from the last snapshot."""
+    snapshot = _database(request).get_snapshot(OVERVIEW_SNAPSHOT) or {}
+    return [
+        {
+            "id": account["id"],
+            "name": account["name"],
+            "off_budget": bool(account.get("off_budget")),
+            "sync_source": account.get("sync_source") or "",
+        }
+        for account in snapshot.get("accounts") or []
+        if not account.get("closed")
+    ]
+
+
+def _account_name(request: Request, account_id: str) -> str:
+    return next((a["name"] for a in _anticipated_accounts(request) if a["id"] == account_id), "")
+
+
+def _serialize_source(source: dict[str, Any]) -> dict[str, Any]:
+    return _serialize_record({**source, "last_seen": source.get("last_seen_at")})
+
+
+def _budget_summary(request: Request) -> dict[str, Any]:
+    settings = _settings_manager(request).get()
+    report = (_database(request).get_snapshot(OVERVIEW_SNAPSHOT) or {}).get("budget") or {}
+    return {
+        "configured": bool(report.get("configured")),
+        "remaining_cents": int(report.get("remaining_cents", 0)),
+        "available_cents": int(report.get("available_cents", 0)),
+        "spent_cents": int(report.get("spent_cents", 0)),
+        "anticipated_cents": int(report.get("anticipated_cents", 0)),
+        "anticipated_count": int(report.get("anticipated_count", 0)),
+        "daily_safe_to_spend_cents": int(report.get("daily_safe_to_spend_cents", 0)),
+        "currency": settings.budget_currency,
+        "month": report.get("month") or "",
+    }
+
+
+@app.get("/api/anticipated/device/hello")
+async def anticipated_hello(request: Request, device_id: str = Query(default="")) -> dict[str, Any]:
+    """The phone's one bootstrap call: proves the token, lists accounts and its sources."""
+    _require_device(request)
+    database = _database(request)
+    sources = database.list_notification_sources(device_id=device_id) if device_id else []
+    return {
+        "ok": True,
+        "version": __version__,
+        "accounts": _anticipated_accounts(request),
+        "sources": [_serialize_source(source) for source in sources],
+        "budget": _budget_summary(request),
+    }
+
+
+@app.post("/api/anticipated/device/sources", status_code=status.HTTP_201_CREATED)
+async def anticipated_register_source(
+    payload: RegisterSourceRequest, request: Request
+) -> dict[str, Any]:
+    """Point one app's notifications on one phone at an Actual account."""
+    _require_device(request)
+    name = _account_name(request, payload.actual_account_id)
+    if not name:
+        raise HTTPException(status_code=404, detail="That Actual account is not in the last snapshot")
+    source = _database(request).upsert_notification_source(
+        {**payload.model_dump(), "account_name": name, "enabled": True}
+    )
+    return {"source": _serialize_source(source)}
+
+
+@app.delete("/api/anticipated/device/sources/{source_id}")
+async def anticipated_unregister_source(
+    source_id: str, request: Request, device_id: str = Query(default="")
+) -> dict[str, Any]:
+    _require_device(request)
+    database = _database(request)
+    source = database.get_notification_source(source_id)
+    if not source or (device_id and source["device_id"] != device_id):
+        raise HTTPException(status_code=404, detail="Source not found")
+    database.delete_notification_source(source_id)
+    return {"deleted": True}
+
+
+@app.post("/api/anticipated/device/notifications", status_code=status.HTTP_202_ACCEPTED)
+async def anticipated_forward(payload: ForwardNotificationRequest, request: Request) -> dict[str, Any]:
+    """One notification from the phone becomes at most one anticipated charge.
+
+    Clerk reads the amount, the direction, and the merchant out of the text
+    itself, so the phone never needs to know what a bank's wording looks like
+    and the reading can improve without a new app build. The reply carries the
+    budget as it now stands, which is what the phone shows in its own toast.
+    """
+    _require_device(request)
+    database = _database(request)
+    settings = _settings_manager(request).get()
+    source = database.find_notification_source(payload.device_id, payload.package_name)
+    if source is None:
+        raise HTTPException(
+            status_code=404,
+            detail="This app is not registered as a source on this device; register it first",
+        )
+    if not source["enabled"]:
+        return {"accepted": False, "reason": "source_disabled", "source_id": source["id"]}
+    row, created = anticipated.record_notification(
+        database,
+        settings,
+        source=source,
+        posted_at_ms=payload.posted_at_ms,
+        title=payload.title,
+        text=payload.text,
+        key=payload.notification_key,
+    )
+    refreshed = False
+    refresh_error = ""
+    if created and row["status"] == anticipated.OPEN:
+        # The bank may already hold this charge (the phone was offline, or the
+        # feed was quick). Reading the budget now settles it immediately and
+        # gives the phone a figure that already reflects the charge.
+        try:
+            await _jobs(request).refresh_now()
+            refreshed = True
+        except ActualGatewayError as exc:
+            refresh_error = str(exc)
+        except Exception as exc:  # noqa: BLE001 - the charge is stored; the read is best effort
+            refresh_error = f"{type(exc).__name__}: {exc}"
+            log.warning("Anticipated charge stored but the budget could not be re-read: %s", exc)
+    current = database.get_anticipated_charge(row["id"]) or row
+    return {
+        "accepted": True,
+        "created": created,
+        "charge": anticipated.public_charge(current),
+        "refreshed": refreshed,
+        "refresh_error": refresh_error,
+        "budget": _budget_summary(request),
+    }
+
+
+@app.get("/api/anticipated/device/charges")
+async def anticipated_device_charges(
+    request: Request,
+    device_id: str = Query(default=""),
+    limit: int = Query(default=50, ge=1, le=500),
+) -> dict[str, Any]:
+    _require_device(request)
+    database = _database(request)
+    sources = database.list_notification_sources(device_id=device_id) if device_id else []
+    charges = database.list_anticipated_charges(
+        source_ids=[source["id"] for source in sources], limit=limit
+    )
+    return {
+        "charges": [anticipated.public_charge(charge) for charge in charges],
+        "budget": _budget_summary(request),
+    }
+
+
+@app.get("/api/anticipated")
+async def anticipated_overview(request: Request) -> dict[str, Any]:
+    """Sources, what is still anticipated, and what was settled recently."""
+    settings = _settings_manager(request).get()
+    database = _database(request)
+    return {
+        "enabled": settings.anticipated_enabled,
+        "token_configured": bool(settings.secret_value("anticipated_device_token")),
+        "match_window_days": settings.anticipated_match_window_days,
+        "expire_days": settings.anticipated_expire_days,
+        "sources": [_serialize_source(s) for s in database.list_notification_sources()],
+        "open": [
+            anticipated.public_charge(c)
+            for c in database.list_anticipated_charges(status=anticipated.OPEN, limit=200)
+        ],
+        "recent": [
+            anticipated.public_charge(c)
+            for c in database.list_anticipated_charges(limit=60)
+            if c["status"] != anticipated.OPEN
+        ],
+        "accounts": _anticipated_accounts(request),
+        "budget": _budget_summary(request),
+    }
+
+
+@app.patch("/api/anticipated/sources/{source_id}")
+async def anticipated_update_source(
+    source_id: str, payload: UpdateSourceRequest, request: Request
+) -> dict[str, Any]:
+    database = _database(request)
+    if not database.get_notification_source(source_id):
+        raise HTTPException(status_code=404, detail="Source not found")
+    fields: dict[str, Any] = {}
+    if payload.actual_account_id is not None:
+        name = _account_name(request, payload.actual_account_id)
+        if not name:
+            raise HTTPException(status_code=404, detail="That Actual account is not in the last snapshot")
+        fields["actual_account_id"] = payload.actual_account_id
+        fields["account_name"] = name
+    if payload.enabled is not None:
+        fields["enabled"] = payload.enabled
+    source = database.update_notification_source(source_id, **fields)
+    with contextlib.suppress(Exception):
+        await _jobs(request).refresh_now()
+    return {"source": _serialize_source(source or {})}
+
+
+@app.delete("/api/anticipated/sources/{source_id}")
+async def anticipated_delete_source(source_id: str, request: Request) -> dict[str, Any]:
+    if not _database(request).delete_notification_source(source_id):
+        raise HTTPException(status_code=404, detail="Source not found")
+    with contextlib.suppress(Exception):
+        await _jobs(request).refresh_now()
+    return {"deleted": True}
+
+
+@app.post("/api/anticipated/charges/{charge_id}/dismiss")
+async def anticipated_dismiss(charge_id: str, request: Request) -> dict[str, Any]:
+    """Stop counting one anticipation without waiting for it to expire."""
+    database = _database(request)
+    if not database.get_anticipated_charge(charge_id):
+        raise HTTPException(status_code=404, detail="Anticipated charge not found")
+    if not database.resolve_anticipated_charge(
+        charge_id, anticipated.DISMISSED, match_reason="dismissed by hand"
+    ):
+        raise HTTPException(status_code=409, detail="This charge is no longer open")
+    with contextlib.suppress(Exception):
+        await _jobs(request).refresh_now()
+    return {"status": anticipated.DISMISSED}
+
+
+@app.post("/api/anticipated/charges/{charge_id}/reopen")
+async def anticipated_reopen(charge_id: str, request: Request) -> dict[str, Any]:
+    """Count a settled or dismissed anticipation again, for a match that was wrong."""
+    database = _database(request)
+    if not database.get_anticipated_charge(charge_id):
+        raise HTTPException(status_code=404, detail="Anticipated charge not found")
+    if not database.reopen_anticipated_charge(charge_id):
+        raise HTTPException(status_code=409, detail="This charge is already open, or was never read")
+    with contextlib.suppress(Exception):
+        await _jobs(request).refresh_now()
+    return {"status": anticipated.OPEN}
 
 
 # ------------------------------------------------------------------- settings

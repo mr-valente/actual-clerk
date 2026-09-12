@@ -58,6 +58,10 @@ Unspent budget carries forward to its own category for up to a year, so a variab
 
 A refund settles against the month that paid for the purchase. Return something you bought this month and the two cancel; when the purchase belongs to a month already reported, that report stands and the money comes back as yours to spend now — never as spending pushed below zero, which is how a budget ends up claiming you have more than a whole month left.
 
+### Counts a card charge the moment it happens
+
+Some card feeds are slow by design: a purchase made this morning reaches Actual a day or three later, and some issuers never expose it as pending at all. The card's own phone app, though, announces the charge instantly. A small Android companion app forwards those notifications to Clerk, which counts each as an **anticipated charge**: spent as far as the budget is concerned, held in Clerk's own ledger, and never written into Actual. When the bank's transaction arrives through the ordinary feed, Clerk settles the anticipation against it and the real row takes over; one that never posts stops counting after two weeks. [How it works and how to build the app](docs/anticipated-charges.md).
+
 ### Finds the commitments you forgot about
 
 Clerk detects anything billing on a schedule three or more times, tells you what it costs per month, flags subscription price increases, flags an expected charge that never arrived, and points out which ones have no budget set. It is the working list for the budget setup above.
@@ -139,7 +143,11 @@ transaction, converting it to a transfer, or otherwise making it ineligible
 for filing. Clerk retains that outcome in Activity without learning merchant
 memory from a choice made outside Clerk.
 
-### 6. Turn on the morning report
+### 6. Forward card notifications from your phone (optional)
+
+Build the companion app with `scripts/build-android.sh` (Docker does the whole Android build; the APK lands in `dist/android/`), set a device token under **Settings → Phone app**, and pair the phone. Then register the card app's notification as a source and pick the Actual account its charges belong to. See [anticipated charges](docs/anticipated-charges.md).
+
+### 7. Turn on the morning report
 
 In **Settings → Notifications**, enable ntfy and pick a hard-to-guess topic on [ntfy.sh](https://ntfy.sh) (or point at your own server). Subscribe to the same topic on your phone. Then, under **Settings → Morning report**, set the delivery time and time zone.
 
@@ -148,7 +156,7 @@ The notification header is yours to name — *The Morning Report* by default —
 | Block | Shows |
 | --- | --- |
 | Free money left | The headline figure and how much of the month remains |
-| Spent so far | What has gone out since the 1st, against what was free |
+| Spent so far | What has gone out since the 1st, against what was free, naming any charges the phone has seen that the bank has not posted |
 | Safe to spend a day | What you can spend daily and still finish level |
 | Pace for the month | Whether you are ahead of or behind an even spend |
 | Projected month end | Where the month lands at the current pace (off by default) |
@@ -209,6 +217,10 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_PLAID_DELETE_REMOVED_PENDING` | `true` | Delete a withdrawn pending charge while it is still uncleared |
 | `CLERK_PLAID_STARTING_BALANCE` | `true` | Add an opening balance on the first import into an empty account |
 | `CLERK_PLAID_ADOPT_WINDOW_DAYS` | `14` | Days either side of the import date a previous provider's row may be adopted |
+| `CLERK_ANTICIPATED_ENABLED` | `true` | Count charges the phone companion has seen but the bank has not posted |
+| `CLERK_ANTICIPATED_DEVICE_TOKEN` | — | Token the phone must present; prefer setting it in the UI |
+| `CLERK_ANTICIPATED_MATCH_WINDOW_DAYS` | `10` | Days after the notification the bank's row may still be dated |
+| `CLERK_ANTICIPATED_EXPIRE_DAYS` | `14` | Days before an unposted anticipated charge stops counting |
 | `CLERK_OPENAI_BASE_URL` | `http://host.docker.internal:11434/v1` | OpenAI-compatible endpoint |
 | `CLERK_OPENAI_API_KEY` | — | Only if your server requires one |
 | `CLERK_MODEL` | `qwen2.5:14b` | Model name |
@@ -323,6 +335,7 @@ uv run --extra dev pytest
 uv run --extra dev ruff check src tests
 npm test
 uv run actual-clerk          # http://localhost:8080
+scripts/build-android.sh     # the phone companion APK, built in Docker
 ```
 
 Node 20 or newer is required for a source checkout; the container includes

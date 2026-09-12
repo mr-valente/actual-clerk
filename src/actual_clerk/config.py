@@ -65,6 +65,21 @@ class Settings(BaseModel):
     # How far either side of the cutover date a foreign-id row may be adopted.
     plaid_adopt_window_days: int = Field(default=14, ge=0, le=90)
 
+    # --- Anticipated charges (phone companion) ----------------------------
+    # A card app's notification announces a purchase before the bank feed
+    # carries it. The companion app forwards those to Clerk, which counts each
+    # as spent until the matching transaction arrives -- never writing it into
+    # Actual. The device token is optional but recommended: Clerk has no login
+    # of its own, and these are the only endpoints an outside device writes to.
+    anticipated_enabled: bool = True
+    anticipated_device_token: SecretStr = SecretStr("")
+    # How many days after the notification the bank's transaction may still be
+    # dated and be recognised as the same charge.
+    anticipated_match_window_days: int = Field(default=10, ge=1, le=60)
+    # An anticipation older than this that nothing has settled stops counting;
+    # the bank is evidently never going to post it.
+    anticipated_expire_days: int = Field(default=14, ge=1, le=90)
+
     # --- Local OpenAI-compatible endpoint ---------------------------------
     openai_base_url: str = "http://host.docker.internal:11434/v1"
     openai_api_key: SecretStr = SecretStr("")
@@ -274,6 +289,13 @@ class Settings(BaseModel):
             )
         return value
 
+    @field_validator("anticipated_device_token", mode="before")
+    @classmethod
+    def strip_device_token(cls, value: Any) -> Any:
+        if isinstance(value, str):
+            return value.strip()
+        return value
+
     @model_validator(mode="after")
     def coherent_configuration(self) -> Settings:
         if self.notifications_enabled and not self.ntfy_topic:
@@ -284,6 +306,10 @@ class Settings(BaseModel):
             raise ValueError("the model context must reserve at least 2048 input tokens")
         if self.tag_provenance and not self.clerk_tag:
             raise ValueError("a Clerk tag is required when provenance tagging is enabled")
+        if self.anticipated_expire_days < self.anticipated_match_window_days:
+            raise ValueError(
+                "anticipated charges must stay open at least as long as the match window"
+            )
         return self
 
     @property
@@ -344,6 +370,7 @@ SECRET_FIELDS = (
     "simplefin_access_url",
     "simplefin_setup_token",
     "plaid_secret",
+    "anticipated_device_token",
     "openai_api_key",
     "ntfy_token",
 )
@@ -370,6 +397,10 @@ ENVIRONMENT_FIELDS = {
     "CLERK_PLAID_DELETE_REMOVED_PENDING": "plaid_delete_removed_pending",
     "CLERK_PLAID_STARTING_BALANCE": "plaid_starting_balance",
     "CLERK_PLAID_ADOPT_WINDOW_DAYS": "plaid_adopt_window_days",
+    "CLERK_ANTICIPATED_ENABLED": "anticipated_enabled",
+    "CLERK_ANTICIPATED_DEVICE_TOKEN": "anticipated_device_token",
+    "CLERK_ANTICIPATED_MATCH_WINDOW_DAYS": "anticipated_match_window_days",
+    "CLERK_ANTICIPATED_EXPIRE_DAYS": "anticipated_expire_days",
     "CLERK_OPENAI_BASE_URL": "openai_base_url",
     "CLERK_OPENAI_API_KEY": "openai_api_key",
     "CLERK_MODEL": "model",

@@ -12,3 +12,11 @@ dist/
 lab/data/
 lab/.env
 node_modules/
+
+# Android companion app: build output and the signing key
+android/build/
+android/app/build/
+android/.gradle/
+android/local.properties
+android/keystore/*
+!android/keystore/.gitkeep

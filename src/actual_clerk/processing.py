@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Sequence
 from typing import Any
 
+from actual_clerk import anticipated
 from actual_clerk.categorize import (
     STATUS_APPLIED,
     Categorizer,
@@ -354,12 +355,23 @@ class JobManager:
         review_resolutions = _reconcile_open_reviews(
             self.database, snapshot, open_review_ids, job_id=job["id"]
         )
-        await self._refresh_overview(snapshot, settings, today)
+        overview = await self._refresh_overview(snapshot, settings, today)
         result["accounts"] = len(snapshot["accounts"])
         result["transactions"] = len(snapshot["transactions"])
         result["reviews_resolved"] = sum(review_resolutions.values())
         if review_resolutions:
             result["review_resolutions"] = review_resolutions
+        settled = overview.get("anticipated_summary") or {}
+        if settled.get("matched") or settled.get("expired"):
+            result["anticipated"] = settled
+            self.database.add_event(
+                job["id"],
+                "info",
+                "anticipated_settled",
+                f"{settled.get('matched', 0)} anticipated charge(s) settled against Actual"
+                + (f", {settled['expired']} expired unposted" if settled.get("expired") else ""),
+                settled,
+            )
 
         if settings.categorization_enabled:
             self._enqueue_nowait("categorize", trigger="sync")
@@ -666,8 +678,18 @@ class JobManager:
         health: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         unmonitored = self.database.unmonitored_account_ids()
+        # Settle what the phone announced against what Actual now holds, then
+        # count whatever is still outstanding as spent. This is the one place
+        # every path to a fresh overview passes through.
+        anticipations = anticipated.reconcile(self.database, snapshot, settings, today=today)
         overview = {
-            "budget": budget_report(snapshot, settings, today=today),
+            "budget": budget_report(
+                snapshot, settings, today=today, anticipated=anticipations["open"]
+            ),
+            "anticipated": anticipations["open"],
+            "anticipated_summary": {
+                key: value for key, value in anticipations.items() if key != "open"
+            },
             "freshness": freshness(
                 snapshot, settings, today=today, unmonitored_ids=unmonitored
             ),
@@ -757,6 +779,8 @@ def _describe(kind: str, result: dict[str, Any]) -> str:
             parts.insert(0, note)
         if result.get("reviews_resolved"):
             parts.append(f"{result['reviews_resolved']} review(s) resolved")
+        if (result.get("anticipated") or {}).get("matched"):
+            parts.append(f"{result['anticipated']['matched']} anticipated charge(s) settled")
         return ", ".join(parts)
     if kind == "categorize":
         description = (

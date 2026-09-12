@@ -430,3 +430,13 @@ def test_an_overspent_month_leads_with_how_far_past_it_is():
     headline = next(line for line in payload["message"].splitlines() if "over budget" in line)
     assert headline == "- $995.90 over budget \u00b7 49%"
     assert "left" not in headline
+
+
+def test_charges_the_phone_has_seen_are_named_inside_the_spending():
+    payload = digest({"anticipated_cents": 2500, "anticipated_count": 2})
+    assert "Including $25.00 from 2 charges your phone has seen" in payload["message"]
+    assert "not posted yet" in payload["message"]
+
+
+def test_nothing_is_said_about_anticipated_charges_when_there_are_none():
+    assert "your phone" not in digest()["message"]

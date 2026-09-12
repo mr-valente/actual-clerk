@@ -10,3 +10,5 @@ docs
 .ruff_cache
 __pycache__
 *.pyc
+android
+dist

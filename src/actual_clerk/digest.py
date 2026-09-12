@@ -240,6 +240,13 @@ def build_digest(
                     f"Plus {format_money(returned, currency)} refunded from an "
                     "earlier month"
                 )
+            anticipated = int(report.get("anticipated_cents", 0))
+            if anticipated > 0:
+                budget_items.append(
+                    f"Including {format_money(anticipated, currency)} from "
+                    f"{plural(int(report.get('anticipated_count', 0)), 'charge')} your "
+                    "phone has seen that the bank has not posted yet"
+                )
         if show("safe_to_spend") and remaining > 0:
             safe = int(report.get("daily_safe_to_spend_cents", 0))
             budget_items.append(

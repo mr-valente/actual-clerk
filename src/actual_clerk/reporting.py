@@ -13,6 +13,7 @@ from typing import Any
 
 from actual_clerk.config import Settings
 from actual_clerk.domain.budget import (
+    AnticipatedInfo,
     CategoryInfo,
     TransactionInfo,
     build_budget_report,
@@ -181,8 +182,43 @@ def to_simplefin_accounts(payload: dict[str, Any] | None) -> list[RemoteAccountI
     return to_remote_accounts(payload, provider=SIMPLEFIN)
 
 
+def to_anticipated_infos(
+    snapshot: dict[str, Any], charges: Sequence[dict[str, Any]]
+) -> list[AnticipatedInfo]:
+    """Open anticipations, with each account's budget standing read off the snapshot.
+
+    A charge on an off-budget or closed account never competes for free money,
+    and one whose account Actual no longer knows is left out the same way.
+    """
+
+    accounts = {
+        str(account.get("id") or ""): account for account in snapshot.get("accounts") or []
+    }
+    infos = []
+    for charge in charges:
+        if charge.get("status", "open") != "open":
+            continue
+        account = accounts.get(str(charge.get("actual_account_id") or ""))
+        if account is None or account.get("closed"):
+            continue
+        infos.append(
+            AnticipatedInfo(
+                id=str(charge.get("id") or ""),
+                amount_cents=int(charge.get("amount_cents", 0)),
+                account_id=str(charge.get("actual_account_id") or ""),
+                off_budget=bool(account.get("off_budget")),
+                merchant=str(charge.get("merchant") or ""),
+            )
+        )
+    return infos
+
+
 def budget_report(
-    snapshot: dict[str, Any], settings: Settings, *, today: datetime.date
+    snapshot: dict[str, Any],
+    settings: Settings,
+    *,
+    today: datetime.date,
+    anticipated: Sequence[dict[str, Any]] = (),
 ) -> dict[str, Any]:
     _, end = month_bounds(today)
     report = build_budget_report(
@@ -197,6 +233,7 @@ def budget_report(
         committed_groups=settings.committed_groups,
         income_override_cents=settings.monthly_income_override_cents,
         income_lookback_months=settings.income_lookback_months,
+        anticipated=to_anticipated_infos(snapshot, anticipated),
     )
     return report.as_dict()
 

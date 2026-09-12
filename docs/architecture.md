@@ -26,6 +26,8 @@ Single durable job worker
     +---- SimpleFIN client   (direct, read-only, balances and errors)
     +---- Model client       (OpenAI-compatible chat completions)
     +---- ntfy client        (morning digest and connection alerts)
+    |
+Phone companion app --- POST /api/anticipated/device/* (card notifications in)
 ```
 
 The optional `model_reasoning` setting asks a hybrid local model to spend less
@@ -139,6 +141,24 @@ A refund belongs to the month that was charged for the purchase, so it is netted
 Each delivered digest stores the budget-state fields that actually move free money (`free_cents`, `returned_cents`, `spent_cents`, and `remaining_cents`) plus the current per-account SimpleFIN `balance-date`. Calendar-derived pace and daily-safe figures are intentionally excluded from change detection. If the budget-state tuple matches the prior delivered report in the same month, the financial blocks collapse to a quiet message while connection and review warnings remain. An advancing `balance-date` proves that newer bank data arrived; a non-advancing value proves only that SimpleFIN exposed no newer balance timestamp, because the protocol describes when the balance became its current value rather than a universal last-polled timestamp.
 
 Overspending is measured against a committed category's accrued balance, not against one month's budget in isolation. A bill budgeted a twelfth at a time takes money out of free money every month, so charging the full invoice against the single month it lands in would bill the same money twice. Unspent budget therefore carries forward to its own category over a rolling twelve months -- one annual cycle. Overspending does not carry the other way: a month that ran over was already charged to free money then, and never becomes a debt the following month has to clear as well. The same mechanism absorbs the swings in a variable bill, which is why the setup guides recommend budgeting an average rather than a worst case.
+
+## Anticipated charges
+
+A card app's notification announces a purchase before the bank feed carries
+it, and some issuers never expose it as pending. The Android companion app
+(`android/`, built in a container by `scripts/build-android.sh`) forwards
+those notifications; Clerk reads the amount, direction, and merchant out of
+the text (`domain/anticipated.py`, so the reading can improve without a new
+app build) and stores one *anticipated charge* per notification in its own
+SQLite. An open charge on an on-budget account is added to the month's
+spending as discretionary; free money is untouched. Every path that rebuilds
+the overview first reconciles open charges against the snapshot: same account,
+same amount, dated within the match window, preferring the row whose merchant
+key relates to the notification's, then the nearest date, one transaction per
+charge. Matched charges leave the report, and one nothing settles within the
+expiry period is retired as never posted. Nothing is written into Actual;
+the bank feed remains the record. See
+[anticipated charges](anticipated-charges.md).
 
 ## Failure boundaries
 

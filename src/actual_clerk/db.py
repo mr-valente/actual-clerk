@@ -5,6 +5,7 @@ import sqlite3
 import threading
 import time
 import uuid
+from collections.abc import Sequence
 from typing import Any
 
 ACTIVE_STATUSES = ("queued", "running", "retry_wait")
@@ -240,6 +241,56 @@ CREATE TABLE IF NOT EXISTS import_adoptions (
     created_at REAL NOT NULL
 );
 CREATE INDEX IF NOT EXISTS ix_import_adoptions_created ON import_adoptions(created_at DESC);
+
+-- Card-app notifications forwarded by the phone companion. A source is one
+-- app on one phone, pointed at the Actual account whose charges it announces.
+CREATE TABLE IF NOT EXISTS notification_sources (
+    id TEXT PRIMARY KEY,
+    device_id TEXT NOT NULL DEFAULT '',
+    device_name TEXT NOT NULL DEFAULT '',
+    package_name TEXT NOT NULL,
+    app_label TEXT NOT NULL DEFAULT '',
+    actual_account_id TEXT NOT NULL DEFAULT '',
+    account_name TEXT NOT NULL DEFAULT '',
+    sample_title TEXT NOT NULL DEFAULT '',
+    sample_text TEXT NOT NULL DEFAULT '',
+    enabled INTEGER NOT NULL DEFAULT 1,
+    last_seen_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_sources_device_package
+ON notification_sources(device_id, package_name);
+
+-- One anticipated charge per notification. Never written into Actual: it
+-- counts as spent until the bank feed delivers the matching transaction,
+-- at which point it is settled against that row and leaves the report.
+CREATE TABLE IF NOT EXISTS anticipated_charges (
+    id TEXT PRIMARY KEY,
+    source_id TEXT NOT NULL REFERENCES notification_sources(id) ON DELETE CASCADE,
+    actual_account_id TEXT NOT NULL DEFAULT '',
+    notification_key TEXT NOT NULL,
+    kind TEXT NOT NULL DEFAULT 'charge',
+    amount_cents INTEGER NOT NULL DEFAULT 0,
+    merchant TEXT NOT NULL DEFAULT '',
+    merchant_key TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    text TEXT NOT NULL DEFAULT '',
+    noticed_at REAL NOT NULL,
+    noticed_date TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'open',
+    matched_transaction_id TEXT NOT NULL DEFAULT '',
+    matched_payee TEXT NOT NULL DEFAULT '',
+    matched_date TEXT NOT NULL DEFAULT '',
+    match_reason TEXT NOT NULL DEFAULT '',
+    resolved_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_anticipated_notification
+ON anticipated_charges(source_id, notification_key);
+CREATE INDEX IF NOT EXISTS ix_anticipated_status ON anticipated_charges(status, noticed_at DESC);
+CREATE INDEX IF NOT EXISTS ix_anticipated_noticed ON anticipated_charges(noticed_at DESC);
 """
 
 
@@ -1469,6 +1520,254 @@ class Database:
             rows = connection.execute(query, params).fetchall()
         return [dict(row) for row in rows]
 
+
+    # ------------------------------------------------- anticipated charges
+
+    SOURCE_FIELDS = (
+        "device_id",
+        "device_name",
+        "package_name",
+        "app_label",
+        "actual_account_id",
+        "account_name",
+        "sample_title",
+        "sample_text",
+        "enabled",
+        "last_seen_at",
+    )
+
+    def upsert_notification_source(self, source: dict[str, Any]) -> dict[str, Any]:
+        """Register one app on one phone, or refresh it if it is already known."""
+        device_id = str(source.get("device_id") or "")
+        package_name = str(source.get("package_name") or "")
+        if not device_id or not package_name:
+            raise ValueError("A notification source needs a device id and a package name")
+        now = time.time()
+        with self.connect() as connection:
+            existing = connection.execute(
+                "SELECT * FROM notification_sources WHERE device_id=? AND package_name=?",
+                (device_id, package_name),
+            ).fetchone()
+            merged = (
+                dict(existing)
+                if existing
+                else {"id": str(uuid.uuid4()), "created_at": now, "enabled": 1}
+            )
+            for field in self.SOURCE_FIELDS:
+                if field in source:
+                    merged[field] = source[field]
+            merged["enabled"] = 1 if merged.get("enabled", 1) else 0
+            merged["updated_at"] = now
+            columns = ["id", "created_at", "updated_at", *self.SOURCE_FIELDS]
+            assignments = ", ".join(f"{name}=excluded.{name}" for name in columns[2:])
+            connection.execute(
+                f"INSERT INTO notification_sources({','.join(columns)}) "
+                f"VALUES({','.join('?' for _ in columns)}) "
+                f"ON CONFLICT(id) DO UPDATE SET {assignments}",
+                [merged.get(column, "" if column not in ("last_seen_at",) else None) for column in columns],
+            )
+        return self.get_notification_source(merged["id"]) or merged
+
+    def update_notification_source(self, source_id: str, **fields: Any) -> dict[str, Any] | None:
+        unknown = set(fields) - set(self.SOURCE_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown source fields: {', '.join(sorted(unknown))}")
+        if not fields:
+            return self.get_notification_source(source_id)
+        if "enabled" in fields:
+            fields["enabled"] = 1 if fields["enabled"] else 0
+        assignments = ", ".join(f"{name}=?" for name in fields)
+        with self.connect() as connection:
+            connection.execute(
+                f"UPDATE notification_sources SET {assignments}, updated_at=? WHERE id=?",
+                [*fields.values(), time.time(), source_id],
+            )
+            if "actual_account_id" in fields:
+                # An open anticipation follows its source to the new account;
+                # settled history stays where it was settled.
+                connection.execute(
+                    "UPDATE anticipated_charges SET actual_account_id=?, updated_at=? "
+                    "WHERE source_id=? AND status='open'",
+                    (fields["actual_account_id"], time.time(), source_id),
+                )
+        return self.get_notification_source(source_id)
+
+    def get_notification_source(self, source_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM notification_sources WHERE id=?", (source_id,)
+            ).fetchone()
+        return self._source_row(row) if row else None
+
+    def find_notification_source(self, device_id: str, package_name: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM notification_sources WHERE device_id=? AND package_name=?",
+                (device_id, package_name),
+            ).fetchone()
+        return self._source_row(row) if row else None
+
+    def list_notification_sources(self, *, device_id: str | None = None) -> list[dict[str, Any]]:
+        query = "SELECT * FROM notification_sources"
+        params: list[Any] = []
+        if device_id is not None:
+            query += " WHERE device_id=?"
+            params.append(device_id)
+        with self.connect() as connection:
+            rows = connection.execute(query + " ORDER BY created_at", params).fetchall()
+        return [self._source_row(row) for row in rows]
+
+    def delete_notification_source(self, source_id: str) -> bool:
+        """Forget a source and every anticipation it produced."""
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM notification_sources WHERE id=?", (source_id,)
+            )
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _source_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["enabled"] = bool(item.get("enabled", 1))
+        return item
+
+    def add_anticipated_charge(self, charge: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Record one notification; the same notification twice is one charge."""
+        now = time.time()
+        charge_id = str(uuid.uuid4())
+        status = str(charge.get("status") or "open")
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM anticipated_charges WHERE source_id=? AND notification_key=?",
+                (charge["source_id"], charge["notification_key"]),
+            ).fetchone()
+            if existing:
+                connection.commit()
+                return dict(existing), False
+            connection.execute(
+                "INSERT INTO anticipated_charges(id,source_id,actual_account_id,notification_key,"
+                "kind,amount_cents,merchant,merchant_key,title,text,noticed_at,noticed_date,status,"
+                "resolved_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                (
+                    charge_id,
+                    charge["source_id"],
+                    charge.get("actual_account_id", ""),
+                    charge["notification_key"],
+                    charge.get("kind", "charge"),
+                    int(charge.get("amount_cents", 0)),
+                    (charge.get("merchant") or "")[:200],
+                    charge.get("merchant_key", ""),
+                    (charge.get("title") or "")[:400],
+                    (charge.get("text") or "")[:2000],
+                    float(charge["noticed_at"]),
+                    charge["noticed_date"],
+                    status,
+                    None if status == "open" else now,
+                    now,
+                    now,
+                ),
+            )
+            connection.execute(
+                "UPDATE notification_sources SET last_seen_at=?, updated_at=? WHERE id=?",
+                (now, now, charge["source_id"]),
+            )
+            row = connection.execute(
+                "SELECT * FROM anticipated_charges WHERE id=?", (charge_id,)
+            ).fetchone()
+            connection.commit()
+        return dict(row), True
+
+    def get_anticipated_charge(self, charge_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM anticipated_charges WHERE id=?", (charge_id,)
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_anticipated_charges(
+        self,
+        *,
+        status: str | None = None,
+        source_ids: Sequence[str] | None = None,
+        limit: int = 200,
+    ) -> list[dict[str, Any]]:
+        clauses: list[str] = []
+        params: list[Any] = []
+        if status:
+            clauses.append("status=?")
+            params.append(status)
+        if source_ids is not None:
+            if not source_ids:
+                return []
+            clauses.append(f"source_id IN ({','.join('?' for _ in source_ids)})")
+            params.extend(source_ids)
+        query = "SELECT * FROM anticipated_charges"
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY noticed_at DESC LIMIT ?"
+        params.append(limit)
+        with self.connect() as connection:
+            rows = connection.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def resolve_anticipated_charge(
+        self,
+        charge_id: str,
+        status: str,
+        *,
+        matched_transaction_id: str = "",
+        matched_payee: str = "",
+        matched_date: str = "",
+        match_reason: str = "",
+    ) -> bool:
+        """Close an open anticipation. Only an open one can be closed, once."""
+        now = time.time()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE anticipated_charges SET status=?, matched_transaction_id=?, matched_payee=?, "
+                "matched_date=?, match_reason=?, resolved_at=?, updated_at=? "
+                "WHERE id=? AND status='open'",
+                (
+                    status,
+                    matched_transaction_id,
+                    matched_payee[:200],
+                    matched_date,
+                    match_reason[:200],
+                    now,
+                    now,
+                    charge_id,
+                ),
+            )
+        return cursor.rowcount > 0
+
+    def reopen_anticipated_charge(self, charge_id: str) -> bool:
+        now = time.time()
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE anticipated_charges SET status='open', matched_transaction_id='', "
+                "matched_payee='', matched_date='', match_reason='', resolved_at=NULL, updated_at=? "
+                "WHERE id=? AND status IN ('matched','expired','dismissed')",
+                (now, charge_id),
+            )
+        return cursor.rowcount > 0
+
+    def matched_transaction_ids(self) -> set[str]:
+        """Transactions already claimed by a settled anticipation."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT matched_transaction_id FROM anticipated_charges "
+                "WHERE status='matched' AND matched_transaction_id != ''"
+            ).fetchall()
+        return {row["matched_transaction_id"] for row in rows}
+
+    def delete_anticipated_charge(self, charge_id: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM anticipated_charges WHERE id=?", (charge_id,)
+            )
+        return cursor.rowcount > 0
+
     def counts(self) -> dict[str, int]:
         with self.connect() as connection:
             jobs = {
@@ -1490,6 +1789,9 @@ class Database:
             degraded = connection.execute(
                 "SELECT COUNT(*) FROM account_health WHERE status NOT IN ('ok','not_linked','muted')"
             ).fetchone()[0]
+            anticipated = connection.execute(
+                "SELECT COUNT(*) FROM anticipated_charges WHERE status='open' AND kind='charge'"
+            ).fetchone()[0]
         return {
             "active_jobs": sum(jobs.get(status, 0) for status in ACTIVE_STATUSES),
             "failed_jobs": jobs.get("failed", 0),
@@ -1497,4 +1799,5 @@ class Database:
             "applied_today": applied_today,
             "rule_suggestions": rule_suggestions,
             "degraded_accounts": degraded,
+            "anticipated_open": anticipated,
         }

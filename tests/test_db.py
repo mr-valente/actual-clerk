@@ -480,6 +480,7 @@ def test_dashboard_counts_reflect_the_work_outstanding(database):
         "applied_today": 1,
         "rule_suggestions": 1,
         "degraded_accounts": 1,
+        "anticipated_open": 0,
     }
 
 

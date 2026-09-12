@@ -246,7 +246,7 @@ function budgetHero() {
         </div>
         <p class="hero-sub">${overspent
           ? `You are ${money(Math.abs(remaining))} past the free money for this month.`
-          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month, refunding a purchase from an earlier one.` : ""}</p>
+          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month, refunding a purchase from an earlier one.` : ""}${report.anticipated_cents ? ` Spending includes ${money(report.anticipated_cents)} from ${report.anticipated_count} charge${report.anticipated_count === 1 ? "" : "s"} your phone has seen that the bank has not posted yet.` : ""}</p>
       </div>
       <div class="hero-side">
         <div class="hero-chip"><span>Safe to spend daily</span><strong>${money(report.daily_safe_to_spend_cents)}</strong></div>
@@ -271,6 +271,7 @@ function budgetHero() {
       <div><span>Committed overspend</span><strong class="money ${report.committed_overspend_cents ? "negative" : ""}">${money(report.committed_overspend_cents)}</strong></div>
       ${report.committed_carried_cents ? `<div><span>Set aside from earlier months</span><strong class="money positive">${money(report.committed_carried_cents)}</strong></div>` : ""}
       ${returned ? `<div><span>Refunded from earlier months</span><strong class="money positive">${money(returned)}</strong></div>` : ""}
+      ${report.anticipated_cents ? `<div><span>Anticipated, not yet posted</span><strong class="money">${money(report.anticipated_cents)} · ${report.anticipated_count}</strong></div>` : ""}
       <div><span>Uncategorized</span><strong class="money">${money(report.uncategorized_cents)}${report.uncategorized_count ? ` · ${report.uncategorized_count}` : ""}</strong></div>
     </div>
   </section>`;
@@ -447,7 +448,8 @@ async function renderOverview() {
           <div class="status-list">${health.length ? health.slice(0, 6).map((item) => healthRow(item)).join("") : emptyState("⇄", "No connection data yet", "Clerk checks every linked account against its bank provider. Run a sync, or connect SimpleFIN or Plaid on the Connections page.")}</div>
         </article>
       </div>
-    </section>`;
+    </section>
+    ${anticipatedOverviewPanel(view.anticipated || [])}`;
 }
 
 // A backlog is made of merchants, not transactions: the same coffee shop can
@@ -560,6 +562,87 @@ async function renderReview() {
     </article>`;
 }
 
+// ------------------------------------------------- anticipated charges
+
+const CHARGE_STATUS = {
+  open: ["stale", "Anticipated"],
+  matched: ["ok", "Posted"],
+  expired: ["muted", "Never posted"],
+  dismissed: ["muted", "Dismissed"],
+  ignored: ["muted", "Not counted"],
+};
+
+function chargeLabel(item) {
+  if (item.status === "ignored") return item.kind === "declined" ? "Declined" : item.kind === "unknown" ? "No amount read" : "Not counted";
+  return (CHARGE_STATUS[item.status] || ["muted", titleCase(item.status)])[1];
+}
+
+function anticipatedChargeRow(item, { sources = [] } = {}) {
+  const [status] = CHARGE_STATUS[item.status] || ["muted"];
+  const source = sources.find((s) => s.id === item.source_id);
+  const where = item.account_name || source?.account_name || "";
+  const outcome = item.status === "matched"
+    ? `Posted as ${escapeHtml(item.matched_payee || "a transaction")} on ${shortDate(item.matched_date)} (${escapeHtml(item.match_reason || "")})`
+    : item.status === "open"
+      ? `Waiting for the bank · counts as spent${item.kind === "credit" ? " (a credit, so not counted)" : ""}`
+      : item.status === "expired"
+        ? "Nothing matching arrived, so it stopped counting"
+        : item.status === "dismissed" ? "Dismissed by hand" : escapeHtml((item.text || "").slice(0, 110));
+  const actions = item.status === "open"
+    ? `<button class="button ghost small" data-action="anticipated-dismiss" data-id="${escapeHtml(item.id)}" title="Stop counting this charge now">Dismiss</button>`
+    : item.status === "matched" || item.status === "dismissed" || item.status === "expired"
+      ? `<button class="button ghost small" data-action="anticipated-reopen" data-id="${escapeHtml(item.id)}" title="Count it again, for a match that was wrong">Reopen</button>`
+      : "";
+  return `<article class="data-row" style="grid-template-columns:30px minmax(0,1fr) auto auto auto" title="${escapeHtml(item.title || "")}: ${escapeHtml(item.text || "")}">
+    <span class="dot ${status}"></span>
+    <div class="row-title"><strong>${escapeHtml(item.merchant || item.title || "Charge")}</strong><small>${escapeHtml([source?.app_label, where].filter(Boolean).join(" → "))} · seen ${escapeHtml(relativeTime(item.noticed_at))}<br />${outcome}</small></div>
+    <span class="row-amount money ${item.amount_cents < 0 ? "" : "positive"}">${money(item.amount_cents, { sign: true })}</span>
+    <div class="health-state">${statusChip(status, chargeLabel(item))}</div>
+    <div class="row-actions">${actions}</div>
+  </article>`;
+}
+
+function anticipatedOverviewPanel(open) {
+  const counted = open.filter((item) => item.counts);
+  if (!open.length) return "";
+  const total = counted.reduce((sum, item) => sum - item.amount_cents, 0);
+  return `<article class="panel">
+    <header class="panel-head"><div><h2>Anticipated charges</h2><p>${counted.length} charge${counted.length === 1 ? "" : "s"} your phone has seen, ${money(total)} counted as spent until the bank posts ${counted.length === 1 ? "it" : "them"}. Nothing here is written into Actual.</p></div><a href="#accounts" class="panel-link">Phone sources</a></header>
+    <div class="status-list">${open.map((item) => anticipatedChargeRow(item)).join("")}</div>
+  </article>`;
+}
+
+function sourceRow(source, accounts) {
+  const options = accounts.map((account) => `<option value="${escapeHtml(account.id)}" ${account.id === source.actual_account_id ? "selected" : ""}>${escapeHtml(account.name)}${account.off_budget ? " (off budget)" : ""}</option>`).join("");
+  const known = accounts.some((account) => account.id === source.actual_account_id);
+  return `<article class="data-row" style="grid-template-columns:30px minmax(0,1fr) auto auto auto">
+    <span class="dot ${source.enabled ? (known ? "ok" : "error") : "muted"}"></span>
+    <div class="row-title"><strong>${escapeHtml(source.app_label || source.package_name)}</strong><small>${escapeHtml(source.device_name || source.device_id)} · ${escapeHtml(source.package_name)}${source.last_seen ? ` · last notification ${escapeHtml(relativeTime(source.last_seen))}` : " · nothing forwarded yet"}${known ? "" : " · the linked account is no longer in Actual"}</small></div>
+    <select class="select-inline" data-action="anticipated-source-account" data-id="${escapeHtml(source.id)}" title="Which Actual account this app's charges land in">${known ? "" : `<option value="${escapeHtml(source.actual_account_id)}" selected>${escapeHtml(source.account_name || "Unknown account")}</option>`}${options}</select>
+    <label class="toggle-control compact" title="${source.enabled ? "Forwarding is on" : "Forwarding is paused"}"><input type="checkbox" data-action="anticipated-source-toggle" data-id="${escapeHtml(source.id)}" ${source.enabled ? "checked" : ""} /><i aria-hidden="true"></i></label>
+    <div class="row-actions"><button class="button danger small" data-action="anticipated-source-remove" data-id="${escapeHtml(source.id)}" data-name="${escapeHtml(source.app_label || source.package_name)}">Remove</button></div>
+  </article>`;
+}
+
+function phonePanel(phone) {
+  if (!phone) return "";
+  const sources = phone.sources || [];
+  const open = phone.open || [];
+  const recent = (phone.recent || []).slice(0, 8);
+  const accounts = phone.accounts || [];
+  const intro = phone.enabled
+    ? `Card-app notifications forwarded by the Actual Clerk phone app become anticipated charges: counted as spent the moment your card is charged, never written into Actual, and settled when the bank's own row arrives (within ${phone.match_window_days} days) or dropped after ${phone.expire_days}.${phone.token_configured ? "" : " No device token is set, so any device that can reach Clerk may forward notifications; set one under Settings → Phone app."}`
+    : "Anticipated charges are turned off in Settings → Phone app.";
+  return `<article class="panel" id="phone-panel">
+    <header class="panel-head"><div><h2>Phone notifications</h2><p>${escapeHtml(intro)}</p></div><div class="panel-actions"><a class="button ghost small" href="#settings-phone">Phone app settings</a></div></header>
+    <div class="status-list">${sources.length
+      ? sources.map((source) => sourceRow(source, accounts)).join("")
+      : emptyState("📱", "No phone sources yet", "Install the Actual Clerk phone app, point it at this server, and use Register a source to pick the card app's notification.")}</div>
+    ${open.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Waiting for the bank</h3><p>Counted as spent now; each settles against the matching transaction when it is imported.</p></div></header><div class="status-list">${open.map((item) => anticipatedChargeRow(item, { sources })).join("")}</div>` : ""}
+    ${recent.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Recently settled</h3><p>What the last notifications became.</p></div></header><div class="status-list">${recent.map((item) => anticipatedChargeRow(item, { sources })).join("")}</div>` : ""}
+  </article>`;
+}
+
 function plaidItemStatus(item) {
   if (item.status === "needs_repair") return ["error", "Needs repair"];
   if (item.status === "error") return ["error", "Error"];
@@ -607,12 +690,14 @@ function plaidPanel(plaid) {
 }
 
 async function renderAccounts() {
-  const [accounts, plaid] = await Promise.all([
+  const [accounts, plaid, phone] = await Promise.all([
     api("/api/accounts"),
     api("/api/plaid/items").catch((error) => ({ configured: true, items: [], error: error.message })),
+    api("/api/anticipated").catch(() => null),
   ]);
   state.accounts = accounts;
   state.plaid = plaid;
+  state.phone = phone;
   const health = state.accounts.health || [];
   const events = state.accounts.events || [];
   const linked = health.filter((item) => item.status !== "not_linked");
@@ -624,6 +709,7 @@ async function renderAccounts() {
     ${degraded.length ? `<div class="alert-banner critical"><span>!</span><div><strong>${degraded.length} connection${degraded.length === 1 ? "" : "s"} need attention</strong>${connectionRemedies(degraded)}</div></div>` : ""}
     ${plaid?.error ? `<div class="alert-banner"><span>!</span><div><strong>Plaid could not be read</strong><p>${escapeHtml(plaid.error)}</p></div></div>` : ""}
     ${plaidPanel(plaid)}
+    ${phonePanel(phone)}
     <article class="panel">
       <header class="panel-head"><div><h2>Accounts</h2><p>${linked.length} linked to bank sync, ${health.length - linked.length} manual${muted.length ? `, ${muted.length} not monitored` : ""} · the switch turns Clerk's watching on or off without unlinking anything in Actual</p></div></header>
       <div class="status-list">${health.length ? health.map((item) => healthRow(item, { toggle: true })).join("") : emptyState("⇄", "No accounts checked yet", configured ? "Run a connection check to populate this list." : "Connect Actual first in Settings.")}</div>
@@ -1129,6 +1215,7 @@ async function renderSettings() {
         <a href="#settings-actual">Actual Budget</a>
         <a href="#settings-simplefin">SimpleFIN</a>
         <a href="#settings-plaid">Plaid</a>
+        <a href="#settings-phone">Phone app</a>
         <a href="#settings-model">Local model</a>
         <a href="#settings-filing">Filing</a>
         <a href="#settings-tags">Tags</a>
@@ -1170,6 +1257,16 @@ async function renderSettings() {
           ${settingCheck("plaid_delete_removed_pending", "Delete pending charges the bank withdraws", "Only while the row is still uncleared and unreconciled in Actual. A cleared row is never deleted; it is reported instead.", s.plaid_delete_removed_pending)}
           ${settingCheck("plaid_starting_balance", "Add an opening balance to a new account", "On the first import into an empty Actual account, so it matches the bank the way Actual's own linking does.", s.plaid_starting_balance)}
         </div></div></section>
+
+        <section class="panel settings-section" id="settings-phone"><header class="panel-head"><div><h3>Phone app</h3><p class="section-description">The Actual Clerk phone app forwards a card app's notifications, so a charge counts as spent the moment it is made rather than when the bank posts it. Anticipated charges are never written into Actual.</p></div></header><div class="panel-body">
+        ${settingToggle("anticipated_enabled", "Count charges the phone has seen", "Off, the phone is refused and nothing anticipated counts; the ledger is kept.", s.anticipated_enabled)}
+        <div class="form-grid">
+          ${settingInput("anticipated_device_token", "Device token", "", { type: "password", configured: s.anticipated_device_token_configured, full: true, note: "Any string you choose; enter the same one in the phone app. Clerk has no login of its own, and these are the only endpoints an outside device writes to, so leaving this blank means any device that can reach Clerk may forward notifications." })}
+          ${settingInput("anticipated_match_window_days", "Match window (days)", s.anticipated_match_window_days, { type: "number", min: 1, max: 60, note: "How long after the notification the bank's transaction may still be dated and be recognised as the same charge." })}
+          ${settingInput("anticipated_expire_days", "Stop counting after (days)", s.anticipated_expire_days, { type: "number", min: 1, max: 90, note: "An anticipation nothing has settled by then is evidently never going to post. Must be at least the match window." })}
+        </div>
+        <p class="muted" style="font-size:12px;margin-top:10px">Build the phone app with <code>scripts/build-android.sh</code>; the APK lands in <code>dist/android/</code>. Register sources on the Connections page or from the phone.</p>
+        </div></section>
 
         <section class="panel settings-section" id="settings-model"><header class="panel-head"><div><h3>Local model</h3><p class="section-description">An OpenAI-compatible endpoint, asked one question per unfamiliar merchant.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="model">Test model</button></header><div class="panel-body"><div class="form-grid">
           ${settingInput("openai_base_url", "Base URL", s.openai_base_url, { full: true, note: "Usually ends in /v1; Clerk appends /chat/completions." })}
@@ -1514,6 +1611,24 @@ document.addEventListener("click", async (event) => {
       await refreshPlaidDrawer(itemId);
     } catch (error) { toast("Could not update the mapping", error.message, "error"); }
   }
+  if (action === "anticipated-dismiss" || action === "anticipated-reopen") {
+    event.stopPropagation();
+    const verb = action === "anticipated-dismiss" ? "dismiss" : "reopen";
+    try {
+      await api(`/api/anticipated/charges/${encodeURIComponent(target.dataset.id)}/${verb}`, { method: "POST" });
+      toast(verb === "dismiss" ? "Charge dismissed" : "Charge counted again", verb === "dismiss" ? "It no longer counts as spent." : "It counts as spent until the bank posts it.");
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not update the charge", error.message, "error"); }
+  }
+  if (action === "anticipated-source-remove") {
+    event.stopPropagation();
+    if (!window.confirm(`Remove ${target.dataset.name} as a source? Its anticipated charges are dropped; nothing in Actual changes.`)) return;
+    try {
+      await api(`/api/anticipated/sources/${encodeURIComponent(target.dataset.id)}`, { method: "DELETE" });
+      toast("Source removed", "The phone will need to register it again to forward from it.");
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not remove the source", error.message, "error"); }
+  }
   if (action === "job-detail") showJob(target.dataset.id);
   if (action === "review-detail") showDecision(target.dataset.id);
   if (action === "account-detail") showAccount(target.dataset.id);
@@ -1641,16 +1756,16 @@ content.addEventListener("submit", async (event) => {
   const data = new FormData(form);
   const values = {};
   const locked = new Set(state.settings?.environment_overrides || []);
-  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days"]);
+  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "anticipated_match_window_days", "anticipated_expire_days"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "rule_promotion_enabled", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;
     values[key] = integers.has(key) ? Number.parseInt(value, 10) : decimals.has(key) ? Number.parseFloat(value) : value;
   }
   for (const key of checks) if (!locked.has(key)) values[key] = data.get(key) === "on";
-  for (const key of ["actual_password", "actual_encryption_password", "simplefin_access_url", "plaid_secret", "openai_api_key", "ntfy_token"]) {
+  for (const key of ["actual_password", "actual_encryption_password", "simplefin_access_url", "plaid_secret", "anticipated_device_token", "openai_api_key", "ntfy_token"]) {
     if (data.get(`clear_${key}`) === "on") values[key] = "";
     else if (!values[key]) delete values[key];
   }
@@ -1691,6 +1806,25 @@ content.addEventListener("change", async (event) => {
     toast("Could not change monitoring", error.message, "error");
   } finally {
     toggle.disabled = false;
+  }
+});
+
+content.addEventListener("change", async (event) => {
+  const control = event.target.closest('[data-action="anticipated-source-account"], [data-action="anticipated-source-toggle"]');
+  if (!control) return;
+  const body = control.dataset.action === "anticipated-source-toggle"
+    ? { enabled: control.checked }
+    : { actual_account_id: control.value };
+  control.disabled = true;
+  try {
+    await api(`/api/anticipated/sources/${encodeURIComponent(control.dataset.id)}`, { method: "PATCH", body: JSON.stringify(body) });
+    toast(body.enabled === undefined ? "Source moved" : body.enabled ? "Forwarding on" : "Forwarding paused", body.enabled === undefined ? "Open anticipated charges follow it to the new account." : "");
+    await renderRoute({ quiet: true });
+  } catch (error) {
+    toast("Could not update the source", error.message, "error");
+    await renderRoute({ quiet: true });
+  } finally {
+    control.disabled = false;
   }
 });
 

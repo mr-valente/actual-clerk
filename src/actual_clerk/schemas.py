@@ -271,3 +271,52 @@ class MigrateToSimpleFinRequest(BaseModel):
 
 class ServerTokenRequest(BaseModel):
     setup_token: str = Field(min_length=8, max_length=4000)
+
+
+# ------------------------------------------------------ anticipated charges
+
+
+class RegisterSourceRequest(BaseModel):
+    """The phone points one app's notifications at one Actual account."""
+
+    device_id: str = Field(min_length=1, max_length=100)
+    device_name: str = Field(default="", max_length=120)
+    package_name: str = Field(min_length=1, max_length=200)
+    app_label: str = Field(default="", max_length=120)
+    actual_account_id: str = Field(min_length=1, max_length=100)
+    sample_title: str = Field(default="", max_length=400)
+    sample_text: str = Field(default="", max_length=2000)
+
+    @field_validator("device_name", "app_label", "sample_title", "sample_text")
+    @classmethod
+    def collapse(cls, value: str) -> str:
+        return " ".join(value.split())
+
+
+class UpdateSourceRequest(BaseModel):
+    actual_account_id: str | None = Field(default=None, max_length=100)
+    enabled: bool | None = None
+
+
+class ForwardNotificationRequest(BaseModel):
+    """One notification as the phone saw it. Clerk does the reading."""
+
+    device_id: str = Field(min_length=1, max_length=100)
+    package_name: str = Field(min_length=1, max_length=200)
+    # The phone's own identity for the notification, so a redelivery after a
+    # retry or a reboot is the same charge. Blank lets Clerk derive one.
+    notification_key: str = Field(default="", max_length=300)
+    posted_at_ms: int = Field(default=0, ge=0)
+    title: str = Field(default="", max_length=400)
+    text: str = Field(default="", max_length=4000)
+
+    @field_validator("title", "text")
+    @classmethod
+    def collapse(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @model_validator(mode="after")
+    def something_to_read(self) -> ForwardNotificationRequest:
+        if not self.title and not self.text:
+            raise ValueError("a notification needs a title or a text")
+        return self
