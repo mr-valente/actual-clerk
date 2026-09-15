@@ -1098,6 +1098,55 @@ async def test_review_category_picker_is_grouped_and_filters_as_you_type(client)
     assert ".category-picker-option.selected" in styles
 
 
+async def test_review_keeps_an_unapplied_category_choice_across_redraws(client):
+    # The page is redrawn every poll. A choice that lived only in the DOM was
+    # replaced by the original suggestion a few seconds after it was made, and
+    # Apply then filed the suggestion.
+    source = (await client.get("/assets/app.js")).text
+    assert "reviewChoices: new Map()" in source
+    assert "state.reviewChoices.set(picker.dataset.id, target.dataset.categoryId)" in source
+    assert "const chosen = state.reviewChoices.get(key) || picker?.dataset.value" in source
+    assert "state.reviewChoices.get(group.key)" in source
+    # A poll that was already in flight when the picker opened must not redraw.
+    assert 'if (document.querySelector(".category-picker.open")) return;' in source
+    # An unchanged queue is not redrawn at all on a poll.
+    assert "if (poll && fingerprint === state.reviewFingerprint) return;" in source
+    assert 'await renderReview({ poll })' in source
+    assert 'await renderRoute({ quiet: true, poll: true })' in source
+    # Picking a category enables Apply and Always, not only whichever comes first.
+    assert "row.querySelectorAll('[data-action=\"review-accept-group\"]').forEach((button) => { button.disabled = false; })" in source
+
+
+async def test_intelligence_is_tabbed_with_deep_links(client):
+    source = (await client.get("/assets/app.js")).text
+    styles = (await client.get("/assets/styles.css")).text
+    for tab in ("proposals", "rules", "merchants", "aliases", "actual"):
+        assert f'["{tab}", ' in source
+    assert 'role="tablist" aria-label="Intelligence"' in source
+    assert 'data-action="intelligence-tab"' in source
+    assert "history.replaceState(null, \"\", `#intelligence-${target.dataset.tab}`)" in source
+    assert 'anchor.slice("intelligence-".length)' in source
+    # Filters within tabs, and forms that stay out of the way until asked for.
+    assert 'filterChips("rule-filter", state.ruleFilter' in source
+    assert 'filterChips("merchant-filter", state.merchantFilter' in source
+    assert 'filterChips("proposal-filter", state.proposalFilter' in source
+    assert 'data-action="rule-form-toggle"' in source
+    assert 'data-action="alias-form-toggle"' in source
+    assert "/api/intelligence?include_retired=true" in source
+    assert "Show retired" not in source
+    assert ".page-tabs" in styles
+    assert ".toolbar[hidden] { display: none; }" in styles
+
+
+async def test_overview_places_anticipated_charges_above_the_columns(client):
+    source = (await client.get("/assets/app.js")).text
+    styles = (await client.get("/assets/styles.css")).text
+    grid = source.index('<section class="grid overview-grid">')
+    assert source.index("${anticipatedOverviewPanel(view.anticipated || [])}") < grid
+    assert 'class="panel anticipated-panel"' in source
+    assert ".anticipated-panel { margin-bottom: 22px; }" in styles
+
+
 async def test_settings_offer_one_checkbox_for_all_monitored_account_balances(client):
     source = (await client.get("/assets/app.js")).text
     assert 'settingCheck("digest_show_balances", "Account balances"' in source

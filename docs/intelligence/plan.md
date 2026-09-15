@@ -239,7 +239,17 @@ transactions waiting for a decision; Intelligence holds everything Clerk
 *knows* and everything it *wants to know*. The Review badge counts
 transactions; an Intelligence badge counts open proposals.
 
-**Proposals** (top, only when non-empty). Each is one row with its evidence
+The sections below are tabs on one bar (Proposals · Rules · Merchants ·
+Aliases · From Actual), each carrying its count, so the page is as long as
+the list being read. The page opens on Proposals when any are waiting and on
+Rules otherwise; `#intelligence-<tab>` links straight to one, and a link to
+`#intelligence-actual` reads Actual's rule table on arrival. Each tab has its
+own filter chips (proposal kind; rule status, plus *needs a category* when any
+rule points at a category gone from the budget; merchants filed one way,
+several ways, or without a rule) and a filter box; the add-rule and add-alias
+forms stay folded until asked for.
+
+**Proposals** (the first tab, badged when non-empty). Each is one row with its evidence
 and two buttons. Kinds: *make a rule* (a merchant filed the same way
 `memory_propose_after` times, replacing today's "rules worth promoting"),
 *change a rule* (disputes), *retire a rule* (category gone, or never fires),
@@ -252,10 +262,14 @@ normalized live so the user sees the key it becomes), edit category, pause,
 retire. A retired rule keeps its row for a while so a mistake can be undone.
 
 **Merchants.** What Clerk has learned without being told: key, label,
-aliases, evidence per category with share and sightings, current resolution
-and which layer produced it. Actions: *make rule* (one click, pre-filled),
+evidence per category with share and sightings, current resolution and
+which layer produced it. Actions: *make rule* (one click, pre-filled),
 *posts as…* (alias), *forget*. This is where the user sees why a merchant is
 still going to the model.
+
+**Aliases.** One shop, several names: every alias and what it resolves to,
+where it came from (taught, settled, from Actual's payees, proposed), with
+*forget*, and a form to teach one.
 
 **From Actual.** The import panel (§5): what is in Actual now, what would
 move, what stays, replay results, and the three buttons *import*, *retire in

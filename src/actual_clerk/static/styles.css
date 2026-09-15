@@ -195,6 +195,9 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .metric-card.good .metric-icon { color: var(--green); }
 
 .overview-grid { grid-template-columns: minmax(0, 1.55fr) minmax(320px, .85fr); align-items: start; }
+/* Sits between the metrics and the two columns, full width: the rows carry
+   controls that need the room, and it is empty most days. */
+.anticipated-panel { margin-bottom: 22px; }
 .panel { border: 1px solid var(--line); border-radius: var(--radius); background: var(--paper); box-shadow: var(--shadow-sm); overflow: hidden; }
 .panel + .panel { margin-top: 18px; }
 .grid > .panel + .panel { margin-top: 0; }
@@ -202,7 +205,10 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .panel-head > div:first-child { min-width: 0; }
 .panel-head h2, .panel-head h3 { margin: 0; font-size: 14px; letter-spacing: -.01em; }
 .panel-head p { margin: 3px 0 0; color: var(--ink-faint); font-size: 10px; }
-.panel-head .panel-actions { margin-left: auto; display: flex; gap: 7px; }
+.panel-head .panel-actions { margin-left: auto; display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 7px; }
+/* A header button that breaks mid-label reads as two buttons; the row wraps
+   whole buttons instead. */
+.panel-head .panel-actions .button { white-space: nowrap; }
 .panel-body { padding: 20px; }
 .panel-body.flush { padding: 0; }
 .panel-link { margin-left: auto; color: var(--accent-2); font-size: 11px; font-weight: 750; text-decoration: none; }
@@ -288,6 +294,9 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .category-picker-trigger { width: 100%; min-height: 34px; padding: 7px 9px; display: flex; align-items: center; gap: 8px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--input); cursor: pointer; text-align: left; font-size: 10px; }
 .category-picker-trigger:hover { border-color: var(--ink-faint); }
 .category-picker-trigger:focus-visible, .category-picker.open .category-picker-trigger { border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(135,25,224,.12); outline: none; }
+/* A pick that differs from the suggestion is shown as the user's own word,
+   so a glance says which rows Apply will file somewhere other than proposed. */
+.review-row.changed .category-picker-trigger { border-color: var(--accent-2); color: var(--accent); background: var(--accent-soft); font-weight: 750; }
 .category-picker-trigger span { min-width: 0; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .category-picker-trigger > i { flex: none; color: var(--ink-faint); font-size: 13px; font-style: normal; }
 .category-picker-menu { position: absolute; top: calc(100% + 6px); left: 0; width: min(360px, calc(100vw - 42px)); max-height: 360px; padding: 8px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper-strong); box-shadow: var(--shadow-lg); overflow: hidden; }
@@ -320,7 +329,6 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .mark { width: 30px; height: 30px; border-radius: 50%; display: grid; place-items: center; color: var(--accent); background: var(--accent-soft); font-weight: 800; font-size: 12px; }
 .mark.memory { color: var(--blue); background: var(--blue-soft); }
 .mark.rule { color: var(--green); background: var(--green-soft); }
-.intel-grid { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
 .mark.model { color: var(--accent); background: var(--accent-soft); }
 .mark.unresolved { color: var(--amber); background: var(--amber-soft); }
 .mark.subscription { color: var(--accent); background: var(--accent-soft); }
@@ -373,6 +381,22 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 .filter-tabs button { min-height: 31px; padding: 0 11px; border: 0; border-radius: 7px; color: var(--ink-soft); background: transparent; cursor: pointer; font-size: 10px; font-weight: 750; }
 .filter-tabs button.active { color: var(--accent); background: var(--accent-soft); }
 .toolbar .spacer { margin-left: auto; }
+/* A form that is a toolbar until it is opened: the attribute must win over
+   the toolbar's own display. */
+.toolbar[hidden] { display: none; }
+.inline-form { background: var(--surface-subtle); }
+
+/* Page-level tabs: one list on screen at a time, the others a click away,
+   each carrying its count so the page still reads as a summary. */
+.page-tabs { margin: 0 0 18px; display: flex; gap: 2px; border-bottom: 1px solid var(--line); overflow-x: auto; scrollbar-width: none; }
+.page-tabs::-webkit-scrollbar { display: none; }
+.page-tabs button { min-height: 40px; padding: 0 13px; margin-bottom: -1px; display: inline-flex; align-items: center; gap: 7px; border: 0; border-bottom: 2px solid transparent; color: var(--ink-soft); background: transparent; cursor: pointer; font-size: 11.5px; font-weight: 750; white-space: nowrap; transition: color .15s ease, border-color .15s ease; }
+.page-tabs button:hover { color: var(--ink); }
+.page-tabs button:focus-visible { outline: 3px solid rgba(135,25,224,.25); outline-offset: -3px; border-radius: 6px; }
+.page-tabs button.active { color: var(--accent); border-bottom-color: var(--accent-2); }
+.page-tabs button b { min-width: 19px; height: 19px; padding: 0 6px; display: grid; place-items: center; border-radius: 20px; color: var(--ink-soft); background: var(--surface-muted); font-size: 9.5px; font-weight: 800; font-variant-numeric: tabular-nums; }
+.page-tabs button.active b { color: var(--accent); background: var(--accent-soft); }
+.page-tabs button b.attention { color: var(--amber-ink); background: var(--amber-soft); }
 .search-input { height: 34px; width: min(260px, 30vw); padding: 0 11px; border: 1px solid var(--line); border-radius: 8px; color: var(--ink); background: var(--input); outline: none; font-size: 11px; }
 .search-input:focus { border-color: var(--accent-2); box-shadow: 0 0 0 3px rgba(135,25,224,.12); }
 
@@ -572,7 +596,7 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   .page-intro { align-items: flex-start; flex-direction: column; }
   .page-intro .actions { margin-left: 0; }
   .toolbar { overflow-x: auto; }
-  .search-input { display: none; }
+  .search-input[type="search"] { display: none; }
   .review-panel .review-row { grid-template-columns: minmax(0, 1fr) auto !important; }
   .review-panel .review-row > .cell-select, .review-panel .review-row > .row-actions { display: flex; grid-column: 1 / -1; }
   .review-panel .review-row > .cell-select { margin-top: 5px; }
