@@ -11,6 +11,7 @@ from actual_clerk.domain.anticipated import (
     KIND_CHARGE,
     KIND_CREDIT,
     KIND_DECLINED,
+    KIND_NOTICE,
     KIND_UNKNOWN,
     AnticipatedCharge,
     CandidateTransaction,
@@ -51,6 +52,13 @@ TODAY = datetime.date(2026, 8, 21)
         ("Capital One", "Your statement is ready to view.", KIND_UNKNOWN, 0, ""),
         # The real thing, as seen on a Pixel on 2026-09-11.
         ("Venture Credit Card…4273", "Your purchase for $3.19 at Valve was approved.", KIND_CHARGE, -319, "Valve"),
+        # Also real (2026-09-18): the recurring-charge tracker remarking on a
+        # bill the bank posted a week earlier. An amount, but not a purchase.
+        (
+            "Your bill increased 12%",
+            "Geico charged you $152.40. That's $16.46 more than last month. Tap to manage this service.",
+            KIND_NOTICE, -15240, "Geico",
+        ),
     ],
 )
 def test_notifications_are_read_for_amount_direction_and_merchant(title, text, kind, cents, merchant):
@@ -60,10 +68,45 @@ def test_notifications_are_read_for_amount_direction_and_merchant(title, text, k
     assert parsed.merchant == merchant
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Your credit limit increased to $10,000.",
+        "Netflix charged you $15.49. This looks like a new subscription.",
+        "You've spent $1,234.56 this month, compared to $980.00 last month.",
+        "Your payment of $150.00 is due in 3 days.",
+        "Duplicate charge? STARBUCKS charged you twice for $5.25.",
+        "Your statement is ready: the balance is $412.10.",
+    ],
+)
+def test_a_notice_about_the_account_is_never_a_charge(text):
+    parsed = parse_notification("Capital One", text)
+    assert parsed.kind == KIND_NOTICE
+    assert parsed.counts is False
+
+
+def test_an_explicit_authorisation_is_a_charge_whatever_the_remark_after_it():
+    parsed = parse_notification(
+        "Venture Credit Card…4273",
+        "Your purchase for $15.49 at Netflix was approved. This is a recurring charge.",
+    )
+    assert parsed.kind == KIND_CHARGE
+    assert parsed.counts is True
+    assert parsed.merchant == "Netflix"
+    # A subscription in the shop's own name is not a remark about one.
+    assert parse_notification("", "Your purchase for $9.99 at NYT SUBSCRIPTION was approved.").kind == KIND_CHARGE
+
+
+def test_a_merchant_that_leads_the_sentence_is_read():
+    assert parse_notification("", "Geico charged you $152.40 today.").merchant == "Geico"
+    assert parse_notification("", "Netflix billed you $15.49.").merchant == "Netflix"
+
+
 def test_only_a_recognised_charge_counts():
     assert parse_notification("", "A charge of $5.00 at SHOP was approved.").counts is True
     assert parse_notification("", "A $5.00 charge at SHOP was declined.").counts is False
     assert parse_notification("", "A $5.00 credit from SHOP posted.").counts is False
+    assert parse_notification("", "SHOP charged you $5.00. That's more than last month.").counts is False
     assert parse_notification("", "Hello there").counts is False
 
 
@@ -271,7 +314,7 @@ def test_the_same_notification_twice_is_one_charge(database, settings):
     assert database.counts()["anticipated_open"] == 1
 
 
-def test_unreadable_and_declined_notifications_are_kept_but_never_open(database, settings):
+def test_unreadable_declined_and_notice_notifications_are_kept_but_never_open(database, settings):
     src = source(database)
     declined, _ = anticipated.record_notification(
         database, settings, source=src, posted_at_ms=1, title="", text="A $9.99 charge at ACME was declined.",
@@ -279,8 +322,15 @@ def test_unreadable_and_declined_notifications_are_kept_but_never_open(database,
     unknown, _ = anticipated.record_notification(
         database, settings, source=src, posted_at_ms=2, title="Capital One", text="Your statement is ready.",
     )
+    notice, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=3,
+        title="Your bill increased 12%",
+        text="Geico charged you $152.40. That's $16.46 more than last month. Tap to manage this service.",
+    )
     assert declined["status"] == "ignored" and declined["kind"] == "declined"
     assert unknown["status"] == "ignored" and unknown["kind"] == "unknown"
+    assert notice["status"] == "ignored" and notice["kind"] == "notice"
+    assert notice["merchant"] == "Geico" and notice["amount_cents"] == -15240
     assert database.list_anticipated_charges(status="open") == []
 
 

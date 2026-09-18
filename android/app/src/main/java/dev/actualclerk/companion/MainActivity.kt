@@ -497,6 +497,7 @@ private fun LogScreen(prefs: Prefs, onBack: () -> Unit) {
                     status == "expired" -> "Never posted"
                     status == "dismissed" -> "Dismissed"
                     kind == "declined" -> "Declined"
+                    kind == "notice" -> "Just a notice"
                     kind == "unknown" -> "No amount read"
                     else -> status
                 }

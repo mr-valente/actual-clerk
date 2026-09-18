@@ -26,12 +26,17 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
 
 1. **Reads it.** The amount is the first money figure in the text. The
    direction comes from the wording: *declined* is recorded but never counted;
-   *credit*, *refund*, *returned*, *payment received* and the like are credits,
-   recorded and shown but not counted as spending; anything else with an amount
-   is a charge. The merchant is the phrase after "at" (or "from"), trimmed of
-   the card, the time, and the outcome. The wording is the issuer's, so the
-   parser is generous about form and strict about substance: no amount, nothing
-   anticipated.
+   a *notice* about the account or about spending the bank already holds (a
+   bill that increased, a new recurring charge, a spending summary, a
+   statement, a payment due) is recorded but never counted either, since the
+   figure it quotes is not a new purchase; *credit*, *refund*, *returned*,
+   *payment received* and the like are credits, recorded and shown but not
+   counted as spending; anything else with an amount is a charge. An explicit
+   "purchase … approved" is always a charge, whatever remark follows it. The
+   merchant is the phrase after "at" (or "from"), or the name that leads a
+   "Geico charged you" sentence, trimmed of the card, the time, and the
+   outcome. The wording is the issuer's, so the parser is generous about form
+   and strict about substance: no amount, nothing anticipated.
 2. **Stores it once.** The phone sends a stable key per notification, so a
    retry or a reboot never produces a second charge. A card app that
    re-posts the same words under a new post time (a badge update, a group
@@ -174,8 +179,8 @@ Three tables in Clerk's SQLite: `notification_sources` (one app on one phone,
 pointed at an Actual account), `anticipated_charges` (one per notification,
 with the parsed amount, merchant, the raw title and text, the provisional
 category and where it came from, and how it was settled: `open`, `matched`,
-`expired`, `dismissed`, or `ignored` for a declined or unreadable
-notification), and `merchant_aliases`, which is shared with the rest of
+`expired`, `dismissed`, or `ignored` for a declined, unreadable, or purely
+informational notification), and `merchant_aliases`, which is shared with the rest of
 Clerk's intelligence: any key and the merchant key it resolves to, taught,
 learned when a charge settled, or read from the payee catalogue in Actual.
 Aliases are managed on the Intelligence page. Deleting a source deletes its charges. Moving a

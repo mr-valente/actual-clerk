@@ -26,6 +26,10 @@ from actual_clerk.domain.merchants import keys_related, normalize_merchant
 KIND_CHARGE = "charge"
 KIND_CREDIT = "credit"
 KIND_DECLINED = "declined"
+# A notification about the account, or about spending the bank already holds,
+# rather than a fresh authorisation. It names an amount, so it would read as
+# a purchase without being told apart.
+KIND_NOTICE = "notice"
 KIND_UNKNOWN = "unknown"
 
 # How many days *before* the notification a matching transaction may be dated.
@@ -37,6 +41,25 @@ _MONEY = re.compile(
     r"(?<![\w.])(?:\$|USD\s?)\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?(?!\d)",
 )
 _DECLINED = re.compile(r"\b(declined|denied|not approved|was blocked)\b")
+# The card's recurring-charge tracker, its spending summaries, and its account
+# housekeeping all quote a figure: "Your bill increased 12%. Geico charged you
+# $152.40. That's $16.46 more than last month." is about a charge the bank
+# posted weeks ago, not a new one. A change, a comparison, a subscription, a
+# statement, or a payment due is a notice.
+_NOTICE = re.compile(
+    r"\b(?:"
+    r"increased|decreased|went up|went down|"
+    r"(?:more|less|higher|lower) than|compared (?:to|with)|on average|"
+    r"(?:new|a|your|this) (?:recurring|subscription)|recurring charge|free trial|"
+    r"(?:your|this) bill|charged (?:you )?twice|duplicate charge|tap to manage|"
+    r"statement (?:is|was)|payment\b.{0,40}?\bdue\b|minimum payment|credit limit|"
+    r"spending (?:summary|update|insight)|you(?:['’]ve| have) spent"
+    r")\b"
+)
+# An explicit authorisation is a purchase whatever the text goes on to say:
+# "Your purchase for $15.49 at Netflix was approved. This is a recurring
+# charge." is the purchase, with a remark attached.
+_AUTHORISED = re.compile(r"\b(?:purchase|transaction|charge)\b.{0,80}?\bapproved\b")
 # "Credit card" names the instrument, not the direction: the Capital One
 # title is "Venture Credit Card…4273" on an ordinary purchase.
 _CREDIT = re.compile(
@@ -58,6 +81,8 @@ _NOT_A_TIME = r"(?!\d{1,2}(?::\d{2})?\s*(?:am|pm)\b)"
 _MERCHANT_PATTERNS = (
     re.compile(r"\bat\s+" + _NOT_A_TIME + r"(.+?)" + _MERCHANT_END, re.IGNORECASE),
     re.compile(r"\bfrom\s+(.+?)" + _MERCHANT_END, re.IGNORECASE),
+    # "Geico charged you $152.40": the merchant leads the sentence.
+    re.compile(r"(?:^|[.!?]\s+)([^.!?]+?)\s+(?:charged|billed)\s+you\b", re.IGNORECASE),
 )
 _TIME_LIKE = re.compile(r"^\d{1,2}(?::\d{2})?\s*(?:am|pm)?\.?$", re.IGNORECASE)
 _TRAILING_NOISE = re.compile(r"[\s\-–—:.,;!]+$")
@@ -110,7 +135,8 @@ def parse_notification(title: str, text: str) -> ParsedNotification:
 
     The wording is the issuer's, so this is deliberately generous about form
     and strict about substance: without an amount nothing is anticipated, and
-    a declined authorisation is recorded but never counted.
+    a declined authorisation or a notice about the account is recorded but
+    never counted.
     """
 
     combined = " ".join(part for part in (title, text) if part).strip()
@@ -123,6 +149,8 @@ def parse_notification(title: str, text: str) -> ParsedNotification:
     cents = _cents(money)
     if _DECLINED.search(lowered):
         return ParsedNotification(KIND_DECLINED, -cents, merchant, key)
+    if _NOTICE.search(lowered) and not _AUTHORISED.search(lowered):
+        return ParsedNotification(KIND_NOTICE, -cents, merchant, key)
     if _CREDIT.search(lowered):
         return ParsedNotification(KIND_CREDIT, cents, merchant, key)
     return ParsedNotification(KIND_CHARGE, -cents, merchant, key)

@@ -77,6 +77,7 @@ class ForwardWorker(context: Context, params: WorkerParameters) : Worker(context
             status == "open" -> "$amount · a credit, recorded but not counted"
             status == "matched" -> "$amount · already in Actual"
             kind == "declined" -> "$amount · declined, not counted"
+            kind == "notice" -> "$amount · a notice about the account, not a purchase"
             kind == "unknown" -> "No amount could be read from this notification"
             else -> "$amount · $status"
         }

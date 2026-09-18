@@ -1000,8 +1000,10 @@ const CHARGE_STATUS = {
   ignored: ["muted", "Not counted"],
 };
 
+const IGNORED_LABEL = { declined: "Declined", unknown: "No amount read", notice: "Just a notice" };
+
 function chargeLabel(item) {
-  if (item.status === "ignored") return item.kind === "declined" ? "Declined" : item.kind === "unknown" ? "No amount read" : "Not counted";
+  if (item.status === "ignored") return IGNORED_LABEL[item.kind] || "Not counted";
   return (CHARGE_STATUS[item.status] || ["muted", titleCase(item.status)])[1];
 }
 
