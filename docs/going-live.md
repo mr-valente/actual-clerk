@@ -166,9 +166,10 @@ notifications carry the settings the live database already had.
 
 ## Part 2: when the Plaid Trial account arrives
 
-Stage 5 of the Plaid plan was always a runbook to be written against the
-real account. The mechanics were all verified in the lab
-(`docs/plaid-migration/stage-2.md` to `stage-4.md`); this is the order.
+The full runbook, written against the live stack when the Trial
+credentials arrived, is `docs/plaid-migration/stage-5.md`. The mechanics
+were all verified in the lab (`docs/plaid-migration/stage-2.md` to
+`stage-4.md`); this is the short order.
 
 1. **Credentials.** Settings → Plaid: client id, the *production* secret,
    environment `production`. *Test connection* mints a link token and proves

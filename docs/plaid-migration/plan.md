@@ -214,7 +214,8 @@ path documented alongside.
 ## 5. Progress
 
 Stages 1 to 4 are implemented on `feature/plaid`; each has its own note in
-this folder. Stage 5 is a runbook, written when the Trial account exists.
+this folder. Stage 5 is the runbook in `stage-5.md`, written 2026-09-23 once
+the Trial credentials existed, against live Clerk 1.0.2.
 
 ## 6. Open questions to settle as we go
 

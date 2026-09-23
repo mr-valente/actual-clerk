@@ -11,6 +11,7 @@ from SimpleFIN to Plaid while keeping the road back open.
 | [stage-2.md](stage-2.md) | Plaid client, Link, Items, account mapping, and Plaid in the health check |
 | [stage-3.md](stage-3.md) | The sync engine: refresh, cursor stream, adoption, import, opening balances |
 | [stage-4.md](stage-4.md) | Migration tooling in both directions, previews, backfill, server token management |
+| [stage-5.md](stage-5.md) | The production cutover runbook: dashboard setup, linking real banks, moving accounts one at a time, retiring SimpleFIN |
 
 Stages are implemented one at a time on the `feature/plaid` branch; each ends
 with a checkpoint before the next begins.
