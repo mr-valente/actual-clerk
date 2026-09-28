@@ -317,9 +317,15 @@ def build_digest(
                 f"{plural(proposal_count, 'question')} about your rules under Intelligence"
             )
         uncategorized = int(report.get("uncategorized_count", 0))
-        if uncategorized:
+        phone = int(report.get("anticipated_uncategorized_count", 0))
+        if uncategorized or phone:
+            parts = []
+            if uncategorized:
+                parts.append(plural(uncategorized, "transaction"))
+            if phone:
+                parts.append(plural(phone, "phone charge"))
             waiting.append(
-                f"{plural(uncategorized, 'transaction')} still uncategorized this month "
+                f"{' and '.join(parts)} still uncategorized this month "
                 f"({format_money(report.get('uncategorized_cents', 0), currency)})"
             )
         body.listing("👀 Waiting for you", waiting)

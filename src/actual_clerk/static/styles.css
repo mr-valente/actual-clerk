@@ -274,7 +274,8 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
 /* Every column is a fixed track or a bounded fraction, and the action column
    is a fixed width: a row whose last column sizes to its buttons shifts every
    other column whenever one row happens to carry an extra button. */
-.review-row { grid-template-columns: minmax(150px, 1.4fr) 104px minmax(150px, 1fr) 82px 210px; }
+.review-row { grid-template-columns: minmax(150px, 1.4fr) 104px minmax(150px, 1fr) 82px 270px; }
+.review-row .row-actions { flex-wrap: nowrap; }
 
 /* A header that shares the row's own grid, so the labels sit over the values
    they name rather than near them. */
@@ -286,7 +287,21 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   letter-spacing: .02em; text-transform: none; }
 .cell-select { min-width: 0; }
 .cell-select .select-inline { width: 100%; }
-.review-panel { overflow: visible; }
+.review-panel, .panel.has-pickers { overflow: visible; }
+.rule-row .row-meta .category-picker { min-width: 170px; margin-bottom: 4px; }
+.inline-form .category-picker { min-width: 180px; }
+.confidence.none { color: var(--ink-faint); }
+a.status-chip { text-decoration: none; }
+a.status-chip:hover { text-decoration: underline; }
+.row-title strong .status-chip { margin-left: 6px; vertical-align: 1px; }
+.menu { position: relative; }
+.menu > summary { list-style: none; cursor: pointer; }
+.menu > summary::-webkit-details-marker { display: none; }
+.menu-body { position: absolute; right: 0; top: calc(100% + 6px); z-index: 14; width: 280px; padding: 6px; border: 1px solid var(--line); border-radius: 11px; background: var(--paper-strong); box-shadow: var(--shadow-lg); }
+.menu-body button { width: 100%; padding: 9px 10px; display: block; border: 0; border-radius: 7px; color: var(--ink); background: transparent; cursor: pointer; text-align: left; font-size: 11px; font-weight: 700; }
+.menu-body button:hover:not(:disabled) { background: var(--hover); }
+.menu-body button:disabled { color: var(--ink-faint); cursor: default; }
+.menu-body small { display: block; margin-top: 2px; color: var(--ink-faint); font-size: 10px; font-weight: 500; }
 .review-panel .panel-head { border-radius: var(--radius) var(--radius) 0 0; }
 .category-picker { position: relative; min-width: 0; }
 .cell-select .category-picker { width: 100%; }
@@ -564,7 +579,7 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   .health-row { grid-template-columns: 30px minmax(140px, 1fr) 120px 152px; }
   .health-row > *:nth-child(3) { display: none; }
   /* Drop the confidence column first: it is the least load-bearing. */
-  .review-row { grid-template-columns: minmax(140px, 1.2fr) 96px minmax(130px, 1fr) 200px; }
+  .review-row { grid-template-columns: minmax(140px, 1.2fr) 96px minmax(130px, 1fr) 260px; }
   .review-row > *:nth-child(4) { display: none; }
   .settings-layout { grid-template-columns: 160px minmax(0, 1fr); }
 }
@@ -600,7 +615,7 @@ main { padding: 34px clamp(24px, 4vw, 58px) 70px; max-width: 1540px; margin: 0 a
   .review-panel .review-row { grid-template-columns: minmax(0, 1fr) auto !important; }
   .review-panel .review-row > .cell-select, .review-panel .review-row > .row-actions { display: flex; grid-column: 1 / -1; }
   .review-panel .review-row > .cell-select { margin-top: 5px; }
-  .review-panel .review-row > .row-actions { justify-content: flex-start; }
+  .review-panel .review-row > .row-actions { justify-content: flex-start; flex-wrap: wrap; }
   .category-picker-menu { position: fixed; inset: auto 15px 18px; width: auto; max-height: min(70vh, 520px); }
   .category-picker-options { max-height: calc(min(70vh, 520px) - 62px); }
   .settings-layout { display: block; }

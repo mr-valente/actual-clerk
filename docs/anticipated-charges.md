@@ -45,18 +45,31 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
    the same app within ten minutes is one notification. Two genuinely
    separate purchases with identical wording inside those ten minutes are
    the price, and the phone already pays it.
-3. **Categorizes it, provisionally.** The merchant key goes through the same
-   resolver the filing cascade uses, short of the model: a **rule** you have
-   declared first, then your own filed history plus the decisions Clerk has
-   applied, with the same confidence and observation thresholds. A
-   notification's merchant is looked up through its **alias** first (the
-   bank's name for the shop is what the history was filed under), then under
-   its own key. A category can also be set by hand on the Connections page
-   with *Always file as…*; that is the user's word, so it declares a rule for
-   the merchant and, when known, its alias, and is never overwritten by
-   memory. The next notification is categorized on sight and the bank's row
-   files itself when it lands. Clearing it retires that rule.
-4. **Counts it.** An open charge with a category is charged to that category
+3. **Categorizes it, the way a bank row is.** The merchant key goes
+   through the same cascade the filing run uses. Rules and history are
+   applied the moment the charge is stored: a **rule** you have declared
+   first, then your own filed history plus the decisions Clerk has applied,
+   with the same confidence and observation thresholds. A notification's
+   merchant is looked up through its **alias** first (the bank's name for the
+   shop is what the history was filed under), then under its own key. A
+   charge they cannot place is handed to a `phone` job, off the phone's
+   clock, which asks the local model and puts the charge in **Intelligence →
+   Review** with the model's suggestion, next to bank rows from the same
+   merchant. An ntfy message says it is waiting (Settings → Notifications →
+   *Alert when something needs a category*; with *Clerk's address* set,
+   tapping it opens the Review tab). Until you answer, the charge counts as
+   uncategorized: the model never moves money by itself.
+
+   In Review, **Apply** files this charge and the bank row it settles into,
+   and is remembered as evidence; **Always** also declares a rule for the
+   merchant and, when known, its alias; **Skip** leaves it uncategorized and
+   stops asking. None of these writes to Actual.
+4. **Settles into one decision.** When the bank's row arrives, whatever was
+   decided about the charge is handed to that row: an answer is carried and
+   the next filing run writes it to Actual (never over a category already
+   set there); a question still waiting becomes the same question about the
+   bank row; a skip stays a skip. So each purchase is decided once.
+5. **Counts it.** An open charge with a category is charged to that category
    exactly as a posted transaction would be: a bill that is already budgeted
    draws on its own budget (and its carry-over) rather than on free money,
    and only what exceeds the budget becomes overspend. A charge without a
@@ -65,7 +78,7 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
    Free money itself is untouched, so it still equals Actual's Projected
    Savings. The Overview, the morning report, and the phone all show the
    figure.
-5. **Settles it.** Every time the overview is rebuilt (after a sync, a filing
+6. **Settles it.** Every time the overview is rebuilt (after a sync, a filing
    run, a connection check, the morning report, or a manual refresh), each open
    charge is compared with the transactions Actual holds: same account, exactly
    the same amount, dated from one day before the notification up to the match
@@ -165,10 +178,10 @@ itself once access is granted.
 - **Not a bank feed.** Anticipated charges never create, modify, or delete a
   transaction in Actual. They exist so the budget is honest between the card
   and the bank.
-- **Not the categoriser of record.** The provisional category decides which
-  budget line the anticipation draws on today and seeds memory for the real
-  row; the real row is still filed by the ordinary cascade when it arrives,
-  and Actual holds the result. The model is never asked about a notification.
+- **Not the categoriser of record.** The charge's category decides which
+  budget line the anticipation draws on today; Actual only ever holds the
+  bank's row, filed by the ordinary cascade or with the answer you gave
+  about the charge.
 - **Not a balance.** Connection health compares bank balances with Actual's
   cleared balance exactly as before; anticipated charges do not enter that
   comparison.
@@ -208,6 +221,5 @@ Web UI:
 | `DELETE` | `/api/anticipated/sources/{id}` | Remove a source and its charges |
 | `POST` | `/api/anticipated/charges/{id}/dismiss` | Stop counting a charge now |
 | `POST` | `/api/anticipated/charges/{id}/reopen` | Count it again after a wrong match |
-| `POST` | `/api/anticipated/charges/{id}/category` | Always file this merchant here: declares a rule (blank clears it and retires the rule) |
 | `POST` | `/api/anticipated/charges/{id}/alias` | Teach the payee the bank posts this merchant as |
 | `DELETE` | `/api/anticipated/aliases/{alias_key}` | Forget an alias |

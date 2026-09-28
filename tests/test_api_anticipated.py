@@ -292,21 +292,53 @@ def seed_categories(database):
     database.set_snapshot(OVERVIEW_SNAPSHOT, snapshot)
 
 
-async def test_a_category_can_be_taught_and_cleared(client):
+async def test_an_unplaced_charge_is_queued_for_the_model_and_answered_in_review(client, gateway):
     seed_overview(client.database)
     seed_categories(client.database)
     await register(client)
     charge = (await client.post("/api/anticipated/device/notifications", json=notification("Your purchase for $3.19 at Valve was approved."))).json()["charge"]
     assert charge["category_id"] == ""
-    taught = await client.post(f"/api/anticipated/charges/{charge['id']}/category", json={"category_id": "cat-games"})
-    assert taught.status_code == 200
-    assert taught.json()["charge"]["category_name"] == "Games"
-    assert taught.json()["charge"]["category_source"] == "taught"
-    assert (await client.post(f"/api/anticipated/charges/{charge['id']}/category", json={"category_id": "nope"})).status_code == 404
-    cleared = await client.post(f"/api/anticipated/charges/{charge['id']}/category", json={"category_id": ""})
-    assert cleared.json()["charge"]["category_id"] == ""
-    body = (await client.get("/api/anticipated")).json()
-    assert [c["id"] for c in body["categories"]] == ["cat-games"]
+    # The model is asked off the phone's clock.
+    assert [job["kind"] for job in client.database.list_jobs(status="queued")] == ["phone"]
+    client.database.add_decision({
+        "transaction_id": f"phone:{charge['id']}", "anticipated_id": charge["id"], "payee_name": "Valve",
+        "merchant_key": "valve", "amount_cents": -319, "source": "model", "status": "needs_review",
+        "category_id": "cat-games", "category_name": "Games", "confidence": 0.8, "rationale": {},
+    })
+    client.database.upsert_alias("valve", "steam", source="taught")
+    [review] = (await client.get("/api/reviews")).json()
+    assert review["phone"]["merchant"] == "Valve"
+    assert review["group_key"] == "steam"
+    listed = (await client.get("/api/anticipated")).json()["open"][0]
+    assert listed["review"]["suggestion"] == "Games"
+
+    answered = await client.post(f"/api/reviews/{review['id']}/resolve", json={"action": "accept"})
+    assert answered.json()["status"] == "applied"
+    assert answered.json()["rule"] is None
+    assert gateway.updates == [], "nothing reaches Actual before the bank's row does"
+    current = client.database.get_anticipated_charge(charge["id"])
+    assert (current["category_id"], current["category_source"]) == ("cat-games", "approved")
+    assert client.database.active_rules() == []
+    assert (await client.get("/api/reviews")).json() == []
+
+
+async def test_always_on_a_phone_charge_declares_the_rule(client, gateway):
+    seed_overview(client.database)
+    seed_categories(client.database)
+    await register(client)
+    charge = (await client.post("/api/anticipated/device/notifications", json=notification("Your purchase for $3.19 at Valve was approved."))).json()["charge"]
+    decision_id = client.database.add_decision({
+        "transaction_id": f"phone:{charge['id']}", "anticipated_id": charge["id"], "merchant_key": "valve",
+        "source": "unresolved", "status": "needs_review", "rationale": {},
+    })
+    response = await client.post(
+        "/api/reviews/resolve",
+        json={"ids": [decision_id], "action": "recategorize", "category_id": "cat-games", "always": True},
+    )
+    assert response.json() == {"status": "applied", "resolved": 1, "skipped": 0, "rules": 1}
+    assert [rule["merchant_key"] for rule in client.database.active_rules()] == ["valve"]
+    assert client.database.get_anticipated_charge(charge["id"])["category_source"] == "taught"
+    assert gateway.updates == []
 
 
 async def test_an_alias_can_be_taught_and_forgotten(client):

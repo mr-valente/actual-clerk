@@ -275,9 +275,7 @@ class Categorizer:
         exclude_transaction_ids: set[str] | None = None,
         only_transaction_ids: set[str] | None = None,
     ) -> CategorizationResult:
-        result = CategorizationResult()
         settings = self.settings
-        self._model_failures = 0
         targets = select_targets(
             snapshot,
             today=today,
@@ -287,6 +285,29 @@ class Categorizer:
             exclude_transaction_ids=exclude_transaction_ids,
             only_transaction_ids=only_transaction_ids,
         )
+        return await self.classify(
+            snapshot,
+            targets,
+            today=today,
+            stored_memory=stored_memory,
+            rules=rules,
+            aliases=aliases,
+        )
+
+    async def classify(
+        self,
+        snapshot: dict[str, Any],
+        targets: Sequence[dict[str, Any]],
+        *,
+        today: datetime.date,
+        stored_memory: Sequence[dict[str, Any]] = (),
+        rules: RuleBook | None = None,
+        aliases: Mapping[str, str] | None = None,
+    ) -> CategorizationResult:
+        """Run the cascade over the given items: rows from Actual, or phone charges."""
+        result = CategorizationResult()
+        settings = self.settings
+        self._model_failures = 0
         if not targets:
             return result
 
@@ -322,7 +343,7 @@ class Categorizer:
                     self._build_proposal(
                         item,
                         resolution=resolution,
-                                stats=stats.get(merchant_key),
+                        stats=stats.get(merchant_key),
                     )
                 )
 

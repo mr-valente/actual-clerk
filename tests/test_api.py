@@ -372,9 +372,15 @@ async def test_dismissing_a_review_writes_nothing(client, gateway):
     client.database.add_decision(decision())
     [review] = (await client.get("/api/reviews")).json()
     response = await client.post(f"/api/reviews/{review['id']}/resolve", json={"action": "dismiss"})
-    assert response.json() == {"status": "dismissed"}
+    assert response.json() == {"status": "skipped"}
     assert gateway.updates == []
     assert (await client.get("/api/reviews")).json() == []
+    # Skip is sticky, listed apart, and can be undone.
+    [skipped] = (await client.get("/api/reviews?status=skipped")).json()
+    assert skipped["id"] == review["id"]
+    restored = await client.post(f"/api/reviews/{review['id']}/resolve", json={"action": "restore"})
+    assert restored.json() == {"status": "restored"}
+    assert [item["id"] for item in (await client.get("/api/reviews")).json()] == [review["id"]]
 
 
 async def test_a_review_resolves_only_once(client, gateway):
@@ -1104,23 +1110,24 @@ async def test_review_keeps_an_unapplied_category_choice_across_redraws(client):
     # Apply then filed the suggestion.
     source = (await client.get("/assets/app.js")).text
     assert "reviewChoices: new Map()" in source
-    assert "state.reviewChoices.set(picker.dataset.id, target.dataset.categoryId)" in source
+    assert "state.reviewChoices.set(picker.dataset.id, categoryId)" in source
     assert "const chosen = state.reviewChoices.get(key) || picker?.dataset.value" in source
     assert "state.reviewChoices.get(group.key)" in source
     # A poll that was already in flight when the picker opened must not redraw.
     assert 'if (document.querySelector(".category-picker.open")) return;' in source
     # An unchanged queue is not redrawn at all on a poll.
-    assert "if (poll && fingerprint === state.reviewFingerprint) return;" in source
-    assert 'await renderReview({ poll })' in source
+    assert "if (poll && fingerprint === state.intelligenceFingerprint) return;" in source
+    assert "reviewFingerprint()" in source
+    assert 'await renderIntelligence({ poll })' in source
     assert 'await renderRoute({ quiet: true, poll: true })' in source
     # Picking a category enables Apply and Always, not only whichever comes first.
-    assert "row.querySelectorAll('[data-action=\"review-accept-group\"]').forEach((button) => { button.disabled = false; })" in source
+    assert "row?.querySelectorAll('[data-action=\"review-accept-group\"]').forEach((button) => { button.disabled = false; })" in source
 
 
 async def test_intelligence_is_tabbed_with_deep_links(client):
     source = (await client.get("/assets/app.js")).text
     styles = (await client.get("/assets/styles.css")).text
-    for tab in ("proposals", "rules", "merchants", "aliases", "actual"):
+    for tab in ("review", "proposals", "rules", "merchants", "aliases", "actual"):
         assert f'["{tab}", ' in source
     assert 'role="tablist" aria-label="Intelligence"' in source
     assert 'data-action="intelligence-tab"' in source
@@ -1198,9 +1205,34 @@ async def test_bulk_dismiss_resolves_without_touching_actual(client, gateway):
     response = await client.post(
         "/api/reviews/resolve", json={"ids": ids, "action": "dismiss"}
     )
-    assert response.json() == {"status": "dismissed", "resolved": 4}
+    assert response.json() == {"status": "skipped", "resolved": 4}
     assert gateway.updates == []
-    assert client.database.get_decision(ids[0])["status"] == "dismissed"
+    assert client.database.get_decision(ids[0])["status"] == "skipped"
+    back = await client.post("/api/reviews/resolve", json={"ids": ids[:2], "action": "restore"})
+    assert back.json() == {"status": "restored", "resolved": 2}
+
+
+async def test_a_recent_filing_can_be_moved_and_is_learned_as_a_correction(client, gateway):
+    client.database.set_snapshot(OVERVIEW_SNAPSHOT, {"categories": [
+        {"id": "cat-coffee", "name": "Coffee", "group_name": "Food"},
+        {"id": "cat-dining", "name": "Dining", "group_name": "Food"},
+    ]})
+    rule = client.database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee", category_name="Coffee")
+    decision_id = client.database.add_decision(decision(
+        status="applied", source="rule", rationale={"rule": {"id": rule["id"]}},
+    ))
+    [recent] = (await client.get("/api/reviews/recent")).json()
+    assert recent["id"] == decision_id
+    response = await client.post(f"/api/decisions/{decision_id}/change", json={"category_id": "cat-dining"})
+    assert response.json()["status"] == "changed"
+    assert gateway.updates == [{"transaction_id": "txn-1", "category_id": "cat-dining"}]
+    assert gateway.overwrite_flags == [True]
+    stored = client.database.get_decision(decision_id)
+    assert (stored["observed"], stored["observed_category_id"]) == ("corrected", "cat-dining")
+    assert client.database.memory_for("blue bottle")[0]["corrections"] == 1
+    assert client.database.get_rule(rule["id"])["disputed_count"] == 1
+    missing = await client.post(f"/api/decisions/{decision_id}/change", json={"category_id": "cat-nope"})
+    assert missing.status_code == 404
 
 
 async def test_bulk_recategorize_applies_one_category_to_all(client, gateway):

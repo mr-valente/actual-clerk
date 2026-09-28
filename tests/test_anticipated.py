@@ -543,28 +543,41 @@ def test_settling_learns_the_alias_and_the_next_notification_matches_by_merchant
     assert database.alias_map() == {"valve": "steam"}
 
 
-def test_teaching_a_category_declares_a_rule_for_the_merchant_and_its_alias(database, settings):
+def test_always_declares_a_rule_for_the_merchant_and_its_alias(database, settings):
     src = source(database)
     row, _ = anticipated.record_notification(
         database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $3.19 at Valve was approved.",
     )
     database.add_proposal(kind="rule", merchant_key="valve", payload={})
-    rule = anticipated.teach_category(database, row, category_id="cat-games", category_name="Games")
+    rule = anticipated.apply_answer(database, row, category_id="cat-games", category_name="Games", always=True, correction=True)
     assert rule["merchant_key"] == "valve" and rule["category_id"] == "cat-games"
     assert database.get_anticipated_charge(row["id"])["category_source"] == "taught"
     assert [m["category_id"] for m in database.memory_for("valve")] == ["cat-games"]
     assert database.memory_for("valve")[0]["corrections"] == 1
     assert database.list_proposals() == []
-    # Memory does not overwrite what was taught.
+    # Memory does not overwrite what the person said.
     anticipated.reconcile(database, steam_history(), settings, today=TODAY)
     assert database.get_anticipated_charge(row["id"])["category_id"] == "cat-games"
     # Teaching the alias afterwards carries the rule to the bank's key too.
     anticipated.teach_alias(database, database.get_anticipated_charge(row["id"]), payee="Steam")
     assert {r["merchant_key"]: r["category_id"] for r in database.active_rules()} == {"valve": "cat-games", "steam": "cat-games"}
     assert [m["category_id"] for m in database.memory_for("steam")] == ["cat-games"]
-    # Clearing the category retires the notification key's rule.
-    anticipated.teach_category(database, database.get_anticipated_charge(row["id"]), category_id="", category_name="")
-    assert [r["merchant_key"] for r in database.active_rules()] == ["steam"]
+
+
+def test_apply_files_this_charge_without_a_rule(database, settings):
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    assert anticipated.apply_answer(database, row, category_id="cat-games", category_name="Games") is None
+    current = database.get_anticipated_charge(row["id"])
+    assert (current["category_id"], current["category_source"]) == ("cat-games", "approved")
+    assert database.active_rules() == []
+    # An approval is evidence, like an approved bank row.
+    assert database.memory_for("valve")[0]["hits"] == 1
+    assert database.memory_for("valve")[0]["corrections"] == 0
+    anticipated.reconcile(database, steam_history(), settings, today=TODAY)
+    assert database.get_anticipated_charge(row["id"])["category_id"] == "cat-games"
 
 
 def test_a_taught_category_reaches_the_bank_s_key_when_the_charge_settles(database, settings):
@@ -573,7 +586,7 @@ def test_a_taught_category_reaches_the_bank_s_key_when_the_charge_settles(databa
         database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 20, tzinfo=datetime.UTC).timestamp() * 1000),
         title="", text="Your purchase for $3.19 at Valve was approved.",
     )
-    anticipated.teach_category(database, row, category_id="cat-games", category_name="Games")
+    anticipated.apply_answer(database, row, category_id="cat-games", category_name="Games", always=True)
     snap = snapshot(
         accounts=[account("Card", account_id="acct-card")],
         transactions=[transaction(datetime.date(2026, 8, 21), -319, payee="Steam", account_id="acct-card", transaction_id="t-steam")],
@@ -582,6 +595,120 @@ def test_a_taught_category_reaches_the_bank_s_key_when_the_charge_settles(databa
     assert database.alias_map() == {"valve": "steam"}
     assert [m["category_id"] for m in database.memory_for("steam")] == ["cat-games"]
     assert {r["merchant_key"] for r in database.active_rules()} == {"valve", "steam"}
+
+
+# ------------------------------------------------- one decision per purchase
+
+
+def valve_charge(database, settings, *, day=20):
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, day, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    return row
+
+
+def phone_review(database, row, *, status="needs_review", category_id="cat-games", category_name="Games"):
+    return database.add_decision({
+        "transaction_id": anticipated.phone_transaction_id(row["id"]),
+        "anticipated_id": row["id"],
+        "payee_name": row["merchant"],
+        "merchant_key": row["merchant_key"],
+        "amount_cents": row["amount_cents"],
+        "source": "model",
+        "status": status,
+        "category_id": category_id,
+        "category_name": category_name,
+        "confidence": 0.8,
+        "rationale": {"reason": "It sells games."},
+    })
+
+
+def steam_row_snapshot(transaction_id="t-steam"):
+    return snapshot(
+        accounts=[account("Card", account_id="acct-card")],
+        transactions=[transaction(datetime.date(2026, 8, 21), -319, payee="Steam", account_id="acct-card", transaction_id=transaction_id)],
+    )
+
+
+def test_a_waiting_phone_question_becomes_the_bank_row_s_question(database, settings):
+    row = valve_charge(database, settings)
+    decision_id = phone_review(database, row)
+    anticipated.reconcile(database, steam_row_snapshot(), settings, today=TODAY)
+    assert database.get_decision(decision_id)["status"] == "superseded"
+    bank = database.latest_decision_for("t-steam")
+    assert (bank["status"], bank["category_id"], bank["source"]) == ("needs_review", "cat-games", "model")
+    assert bank["rationale"]["from_phone"] == row["id"]
+    assert bank["anticipated_id"] == ""
+    assert database.open_review_transaction_ids() == {"t-steam"}
+
+
+def test_an_answered_phone_charge_files_its_bank_row_the_same_way(database, settings):
+    row = valve_charge(database, settings)
+    decision_id = phone_review(database, row)
+    database.resolve_decision(decision_id, "applied")
+    anticipated.apply_answer(database, row, category_id="cat-games", category_name="Games")
+    summary = anticipated.reconcile(database, steam_row_snapshot(), settings, today=TODAY)
+    assert summary["carried"] == 1
+    carried = database.latest_decision_for("t-steam")
+    assert (carried["status"], carried["category_id"], carried["source"]) == ("approved", "cat-games", "person")
+    assert carried["rationale"]["phone_key"] == "valve"
+    # The filing run leaves it alone and writes it itself.
+    assert "t-steam" in database.pending_transaction_ids()
+    assert [item["id"] for item in database.approved_decisions()] == [carried["id"]]
+    assert database.get_decision(decision_id)["rationale"]["settled_transaction_id"] == "t-steam"
+
+
+def test_a_skipped_phone_charge_stays_skipped_as_a_bank_row(database, settings):
+    row = valve_charge(database, settings)
+    phone_review(database, row, status="skipped")
+    anticipated.reconcile(database, steam_row_snapshot(), settings, today=TODAY)
+    assert database.latest_decision_for("t-steam")["status"] == "skipped"
+    assert "t-steam" in database.pending_transaction_ids()
+
+
+def test_a_bank_row_clerk_already_filed_keeps_its_own_decision(database, settings):
+    row = valve_charge(database, settings)
+    phone_review(database, row)
+    database.add_decision({"transaction_id": "t-steam", "source": "rule", "status": "applied", "category_id": "cat-coffee"})
+    anticipated.reconcile(database, steam_row_snapshot(), settings, today=TODAY)
+    assert database.latest_decision_for("t-steam")["category_id"] == "cat-coffee"
+    assert database.open_phone_decisions() == []
+
+
+def test_a_review_closes_when_the_charge_stops_counting_or_is_categorized(database, settings):
+    first = valve_charge(database, settings, day=20)
+    second = valve_charge(database, settings, day=19)
+    first_review = phone_review(database, first)
+    second_review = phone_review(database, second)
+    database.resolve_anticipated_charge(first["id"], anticipated.DISMISSED)
+    database.upsert_rule(merchant_key="valve", category_id="cat-dining", category_name="Dining")
+    anticipated.reconcile(database, snapshot(accounts=[account("Card", account_id="acct-card")]), settings, today=TODAY)
+    assert database.get_decision(first_review)["status"] == "superseded"
+    assert database.get_decision(second_review)["status"] == "superseded"
+    assert database.get_decision(second_review)["rationale"]["closed_because"] == "filed by rule"
+
+
+def test_phone_decisions_are_never_read_as_rows_in_actual(database, settings):
+    row = valve_charge(database, settings)
+    decision_id = phone_review(database, row)
+    assert database.open_review_transaction_ids() == set()
+    assert database.pending_transaction_ids() == set()
+    database.resolve_decision(decision_id, "applied")
+    assert database.decisions_to_observe(since_date="2000-01-01") == []
+    assert database.counts()["applied_today"] == 0
+
+
+def test_skip_is_sticky_and_can_be_undone(database):
+    decision_id = database.add_decision({"transaction_id": "t-1", "source": "model", "status": "needs_review"})
+    assert database.resolve_decision(decision_id, "skipped")
+    assert database.pending_transaction_ids() == {"t-1"}
+    assert database.open_review_transaction_ids() == set()
+    assert database.counts()["skipped"] == 1
+    assert database.restore_decision(decision_id)
+    assert database.get_decision(decision_id)["status"] == "needs_review"
+    assert not database.restore_decision(decision_id)
 
 
 def test_older_ledgers_gain_the_category_columns(tmp_path):

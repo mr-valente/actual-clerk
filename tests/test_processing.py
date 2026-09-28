@@ -114,8 +114,8 @@ def delivers(monkeypatch):
     return sent
 
 
-async def run_job(manager, kind, params=None):
-    job, _ = await manager.enqueue(kind, params=params)
+async def run_job(manager, kind, params=None, trigger="manual"):
+    job, _ = await manager.enqueue(kind, params=params, trigger=trigger)
     claimed = manager.database.claim_job("test-worker", 600)
     await manager._run_job(claimed)
     return manager.database.get_job(job["id"], include_events=True)
@@ -281,7 +281,7 @@ async def test_a_transaction_categorized_in_actual_first_is_not_overwritten(
 
     job = await run_job(manager, "categorize")
     [recorded] = manager.database.list_decisions()
-    assert recorded["status"] == "skipped"
+    assert recorded["status"] == "write_skipped"
     assert recorded["rationale"]["skipped_reason"] == "already_categorized"
     assert job["result"]["written"] == 0
     # Nothing was written, so nothing was learned.
@@ -1001,3 +1001,140 @@ async def test_the_plaid_engine_is_skipped_when_plaid_sync_is_off(manager, setti
     job = await run_job(manager, "sync")
     assert job["status"] == "completed"
     assert "plaid" not in job["result"]
+
+
+# ------------------------------------------------------------ phone charges
+
+
+def phone_source(database):
+    return database.upsert_notification_source({
+        "device_id": "phone-1", "device_name": "Pixel", "package_name": "com.konylabs.capitalone",
+        "app_label": "Capital One", "actual_account_id": "acct-checking", "account_name": "Checking",
+    })
+
+
+def phone_charge(database, settings_manager, text="Your purchase for $12.00 at Valve was approved."):
+    from actual_clerk import anticipated
+
+    row, _ = anticipated.record_notification(
+        database, settings_manager.get(), source=phone_source(database),
+        # The job reads today's date, and a charge older than the expiry stops counting.
+        posted_at_ms=int(datetime.datetime.now(datetime.UTC).timestamp() * 1000),
+        title="Capital One", text=text,
+    )
+    return row
+
+
+@pytest.fixture
+def model(monkeypatch):
+    from actual_clerk.categorize import Categorizer
+
+    from .factories import FakeModel
+
+    fake = FakeModel([{"category_number": 1, "confidence": 0.8, "reason": "A shop.", "suggested_new_category": ""}])
+    monkeypatch.setattr(processing, "Categorizer", lambda settings: Categorizer(settings, model_client=fake))
+    return fake
+
+
+async def test_the_phone_job_asks_the_model_and_waits_on_the_person(
+    manager, database, settings_manager, delivers, model
+):
+    settings_manager.update({
+        "notifications_enabled": True, "ntfy_topic": "clerk", "clerk_public_url": "https://clerk.example/",
+    })
+    row = phone_charge(database, settings_manager)
+    job = await run_job(manager, "phone", trigger="phone")
+    assert job["status"] == "completed"
+    assert job["result"]["reviews"] == 1
+    [decision] = database.list_decisions(status="needs_review")
+    assert decision["anticipated_id"] == row["id"]
+    assert decision["transaction_id"] == f"phone:{row['id']}"
+    assert (decision["source"], decision["category_name"]) == ("model", "Coffee")
+    assert decision["rationale"]["phone"]["text"].startswith("Your purchase")
+    # Until the person answers, the charge counts as uncategorized.
+    assert database.get_anticipated_charge(row["id"])["category_id"] == ""
+    [alert] = delivers
+    assert alert["title"] == "Needs a category: Valve"
+    assert "Clerk suggests Coffee (80% sure)" in alert["message"]
+    assert alert["click"] == "https://clerk.example/#intelligence-review"
+    # Asked once: a second run neither asks nor alerts again.
+    await run_job(manager, "phone", trigger="phone")
+    assert len(model.calls) == 1 and len(delivers) == 1
+
+
+async def test_review_alerts_can_be_switched_off(manager, database, settings_manager, delivers, model):
+    settings_manager.update({"notifications_enabled": True, "ntfy_topic": "clerk", "review_alerts_enabled": False})
+    phone_charge(database, settings_manager)
+    await run_job(manager, "phone", trigger="phone")
+    assert database.list_decisions(status="needs_review")
+    assert delivers == []
+
+
+async def test_a_rule_made_since_files_the_charge_instead_of_asking(manager, database, settings_manager, model):
+    row = phone_charge(database, settings_manager)
+    database.upsert_rule(merchant_key="valve", category_id="cat-dining", category_name="Dining")
+    await run_job(manager, "phone", trigger="phone")
+    assert database.list_decisions(status="needs_review") == []
+    assert database.get_anticipated_charge(row["id"])["category_source"] == "rule"
+    assert model.calls == []
+
+
+async def test_filing_writes_a_carried_phone_answer_onto_the_bank_row(manager, database, settings_manager):
+    settings_manager.update({"ai_enabled": False})
+    carried = database.add_decision({
+        "transaction_id": "txn-new", "merchant_key": "blue bottle coffee", "source": "person", "status": "approved",
+        "category_id": "cat-dining", "category_name": "Dining", "confidence": 1.0, "rationale": {"phone_key": "blue bottle"},
+    })
+    job = await run_job(manager, "categorize")
+    assert job["result"]["carried"] == 1
+    assert manager.gateway.updates == [{"transaction_id": "txn-new", "category_id": "cat-dining", "add_tags": ["clerk"]}]
+    assert database.get_decision(carried)["status"] == "applied"
+    # Not filed a second time by memory, and learned under the bank's name.
+    assert [d["id"] for d in database.list_decisions() if d["transaction_id"] == "txn-new"] == [carried]
+    assert database.memory_for("blue bottle coffee")[0]["category_id"] == "cat-dining"
+
+
+async def test_a_carried_answer_yields_to_a_category_set_in_actual(manager, database, settings_manager):
+    settings_manager.update({"ai_enabled": False})
+    manager.gateway.applied_ids = []
+    manager.gateway.skipped = [{"id": "txn-new", "reason": "already_categorized"}]
+    carried = database.add_decision({
+        "transaction_id": "txn-new", "merchant_key": "blue bottle coffee", "source": "person", "status": "approved",
+        "category_id": "cat-dining", "category_name": "Dining",
+    })
+    await run_job(manager, "categorize")
+    assert database.get_decision(carried)["status"] == "resolved_external"
+
+
+async def test_a_skipped_row_is_not_asked_about_again(manager, database, settings_manager):
+    settings_manager.update({"ai_enabled": False})
+    skipped = database.add_decision({"transaction_id": "txn-new", "source": "memory", "status": "skipped"})
+    job = await run_job(manager, "categorize")
+    assert manager.gateway.updates == []
+    assert job["result"]["considered"] == 0
+    assert [d["id"] for d in database.list_decisions()] == [skipped]
+
+
+async def test_a_scheduled_run_alerts_once_for_the_rows_it_could_not_place(
+    manager, database, settings_manager, delivers
+):
+    settings_manager.update({"ai_enabled": False, "notifications_enabled": True, "ntfy_topic": "clerk"})
+    manager.gateway.snap = budget_snapshot([
+        transaction(TODAY, -4399, payee="Kam Man Supermarket", transaction_id="txn-km"),
+        transaction(TODAY, -1200, payee="Kam Man Supermarket", transaction_id="txn-km-2"),
+    ])
+    await run_job(manager, "categorize", trigger="sync")
+    [alert] = delivers
+    assert alert["title"] == "2 transactions need a category"
+    assert alert["message"] == "Kam Man Supermarket ×2: $55.99"
+    # Rows already waiting are not announced again.
+    await run_job(manager, "categorize", trigger="sync")
+    assert len(delivers) == 1
+
+
+async def test_a_manual_run_does_not_alert(manager, database, settings_manager, delivers):
+    settings_manager.update({"ai_enabled": False, "notifications_enabled": True, "ntfy_topic": "clerk"})
+    manager.gateway.snap = budget_snapshot([transaction(TODAY, -4399, payee="Kam Man Supermarket", transaction_id="txn-km")])
+    await run_job(manager, "categorize")
+    assert database.list_decisions(status="needs_review")
+    assert delivers == []

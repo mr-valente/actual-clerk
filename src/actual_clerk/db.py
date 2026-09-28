@@ -9,6 +9,12 @@ from collections.abc import Mapping, Sequence
 from typing import Any
 
 ACTIVE_STATUSES = ("queued", "running", "retry_wait")
+
+# Decisions still waiting on something. `needs_review` waits on the person;
+# `skipped` is a person's "leave it, stop asking", kept so the filing run does
+# not ask again; `approved` is a person's answer about a phone charge, carried
+# onto the bank's row and waiting for the filing run to write it to Actual.
+OPEN_DECISION_STATUSES = ("needs_review", "skipped", "approved")
 TERMINAL_STATUSES = ("completed", "failed", "needs_review", "cancelled")
 
 SCHEMA = """
@@ -88,7 +94,11 @@ CREATE TABLE IF NOT EXISTS decisions (
     observed TEXT NOT NULL DEFAULT '',
     observed_at REAL,
     observed_category_id TEXT NOT NULL DEFAULT '',
-    observed_category_name TEXT NOT NULL DEFAULT ''
+    observed_category_name TEXT NOT NULL DEFAULT '',
+    -- Set when the decision is about a phone charge rather than a row in
+    -- Actual; its transaction_id is then `phone:<charge id>` and nothing it
+    -- says is written to Actual until the bank's own row arrives.
+    anticipated_id TEXT NOT NULL DEFAULT ''
 );
 CREATE UNIQUE INDEX IF NOT EXISTS uq_decision_open_transaction
 ON decisions(transaction_id) WHERE status = 'needs_review';
@@ -517,10 +527,15 @@ class Database:
             "observed_at": "REAL",
             "observed_category_id": "TEXT NOT NULL DEFAULT ''",
             "observed_category_name": "TEXT NOT NULL DEFAULT ''",
+            "anticipated_id": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in additions.items():
             if columns and column not in columns:
                 connection.execute(f"ALTER TABLE decisions ADD COLUMN {column} {definition}")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS ix_decisions_anticipated "
+            "ON decisions(anticipated_id) WHERE anticipated_id != ''"
+        )
 
     # ------------------------------------------------------------------ settings
 
@@ -824,18 +839,19 @@ class Database:
         now = time.time()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
-            # Only one review may be open per transaction; a newer proposal
+            # Only one decision may be waiting per transaction; a newer one
             # supersedes an older one rather than piling up.
+            placeholders = ",".join("?" for _ in OPEN_DECISION_STATUSES)
             connection.execute(
                 "UPDATE decisions SET status='superseded', resolved_at=? "
-                "WHERE transaction_id=? AND status='needs_review'",
-                (now, decision["transaction_id"]),
+                f"WHERE transaction_id=? AND status IN ({placeholders})",
+                (now, decision["transaction_id"], *OPEN_DECISION_STATUSES),
             )
             connection.execute(
                 "INSERT INTO decisions(id,job_id,transaction_id,account_id,account_name,payee_name,"
                 "merchant_key,transaction_date,amount_cents,source,status,category_id,category_name,"
-                "proposed_category,confidence,tags_json,rationale_json,created_at,resolved_at) "
-                "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                "proposed_category,confidence,tags_json,rationale_json,created_at,resolved_at,"
+                "anticipated_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     decision_id,
                     decision.get("job_id"),
@@ -855,20 +871,34 @@ class Database:
                     _json(decision.get("tags", [])),
                     _json(decision.get("rationale", {})),
                     now,
-                    now if decision.get("status") != "needs_review" else None,
+                    None if decision.get("status") in OPEN_DECISION_STATUSES else now,
+                    decision.get("anticipated_id", ""),
                 ),
             )
             connection.commit()
         return decision_id
 
     def list_decisions(
-        self, *, status: str | None = None, limit: int = 100
+        self,
+        *,
+        status: str | None = None,
+        limit: int = 100,
+        since: float | None = None,
+        phone: bool | None = None,
     ) -> list[dict[str, Any]]:
-        sql = "SELECT * FROM decisions"
+        clauses: list[str] = []
         values: list[Any] = []
         if status:
-            sql += " WHERE status=?"
+            clauses.append("status=?")
             values.append(status)
+        if since is not None:
+            clauses.append("created_at>=?")
+            values.append(since)
+        if phone is not None:
+            clauses.append("anticipated_id!=''" if phone else "anticipated_id=''")
+        sql = "SELECT * FROM decisions"
+        if clauses:
+            sql += " WHERE " + " AND ".join(clauses)
         sql += " ORDER BY created_at DESC LIMIT ?"
         values.append(limit)
         with self.connect() as connection:
@@ -888,6 +918,7 @@ class Database:
         *,
         category_id: str | None = None,
         category_name: str | None = None,
+        from_statuses: Sequence[str] = ("needs_review",),
     ) -> dict[str, Any] | None:
         """Atomically close an open review so two clicks cannot both apply it.
 
@@ -898,8 +929,10 @@ class Database:
         """
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            placeholders = ",".join("?" for _ in from_statuses)
             row = connection.execute(
-                "SELECT * FROM decisions WHERE id=? AND status='needs_review'", (decision_id,)
+                f"SELECT * FROM decisions WHERE id=? AND status IN ({placeholders})",
+                (decision_id, *from_statuses),
             ).fetchone()
             if not row:
                 connection.rollback()
@@ -935,11 +968,122 @@ class Database:
         return bool(cursor.rowcount)
 
     def open_review_transaction_ids(self) -> set[str]:
+        """Rows in Actual waiting on the person (phone charges are not rows in Actual)."""
         with self.connect() as connection:
             rows = connection.execute(
-                "SELECT transaction_id FROM decisions WHERE status='needs_review'"
+                "SELECT transaction_id FROM decisions WHERE status='needs_review' "
+                "AND anticipated_id=''"
             ).fetchall()
         return {row["transaction_id"] for row in rows}
+
+    def pending_transaction_ids(self) -> set[str]:
+        """Rows in Actual the filing run must leave alone: waiting, skipped, or carried."""
+        placeholders = ",".join("?" for _ in OPEN_DECISION_STATUSES)
+        with self.connect() as connection:
+            rows = connection.execute(
+                f"SELECT transaction_id FROM decisions WHERE status IN ({placeholders}) "
+                "AND anticipated_id=''",
+                OPEN_DECISION_STATUSES,
+            ).fetchall()
+        return {row["transaction_id"] for row in rows}
+
+    def latest_decision_for(self, transaction_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM decisions WHERE transaction_id=? AND status!='superseded' "
+                "ORDER BY created_at DESC LIMIT 1",
+                (transaction_id,),
+            ).fetchone()
+        return self._decision_row(row) if row else None
+
+    def phone_decision(self, charge_id: str) -> dict[str, Any] | None:
+        """The live decision about one phone charge: open, skipped, or applied."""
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM decisions WHERE anticipated_id=? "
+                "AND status IN ('needs_review','skipped','applied') "
+                "ORDER BY created_at DESC LIMIT 1",
+                (charge_id,),
+            ).fetchone()
+        return self._decision_row(row) if row else None
+
+    def open_phone_decisions(self) -> list[dict[str, Any]]:
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM decisions WHERE anticipated_id!='' "
+                "AND status IN ('needs_review','skipped') ORDER BY created_at DESC"
+            ).fetchall()
+        return [self._decision_row(row) for row in rows]
+
+    def close_decision(self, decision_id: str, status: str, *, reason: str = "") -> bool:
+        """Retire a waiting decision that events have overtaken, with the reason why."""
+        placeholders = ",".join("?" for _ in OPEN_DECISION_STATUSES)
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                f"SELECT rationale_json FROM decisions WHERE id=? AND status IN ({placeholders})",
+                (decision_id, *OPEN_DECISION_STATUSES),
+            ).fetchone()
+            if not row:
+                connection.rollback()
+                return False
+            rationale = json.loads(row["rationale_json"])
+            if reason:
+                rationale["closed_because"] = reason
+            connection.execute(
+                "UPDATE decisions SET status=?, resolved_at=?, rationale_json=? WHERE id=?",
+                (status, time.time(), _json(rationale), decision_id),
+            )
+            connection.commit()
+        return True
+
+    def note_decision(self, decision_id: str, **fields: Any) -> None:
+        """Add facts to a decision's rationale after the fact (where a charge settled)."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT rationale_json FROM decisions WHERE id=?", (decision_id,)
+            ).fetchone()
+            if row:
+                rationale = {**json.loads(row["rationale_json"]), **fields}
+                connection.execute(
+                    "UPDATE decisions SET rationale_json=? WHERE id=?",
+                    (_json(rationale), decision_id),
+                )
+            connection.commit()
+
+    def restore_decision(self, decision_id: str) -> bool:
+        """Bring a skipped decision back into the queue, unless its row already has one."""
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            row = connection.execute(
+                "SELECT transaction_id FROM decisions WHERE id=? AND status='skipped'",
+                (decision_id,),
+            ).fetchone()
+            if not row:
+                connection.rollback()
+                return False
+            open_already = connection.execute(
+                "SELECT 1 FROM decisions WHERE transaction_id=? AND status='needs_review'",
+                (row["transaction_id"],),
+            ).fetchone()
+            if open_already:
+                connection.rollback()
+                return False
+            connection.execute(
+                "UPDATE decisions SET status='needs_review', resolved_at=NULL WHERE id=?",
+                (decision_id,),
+            )
+            connection.commit()
+        return True
+
+    def approved_decisions(self) -> list[dict[str, Any]]:
+        """Phone answers carried onto bank rows, not yet written to Actual."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT * FROM decisions WHERE status='approved' ORDER BY created_at"
+            ).fetchall()
+        return [self._decision_row(row) for row in rows]
 
     def resolve_open_reviews(self, resolutions: dict[str, str]) -> list[dict[str, str]]:
         """Close reviews whose transactions were settled directly in Actual.
@@ -954,9 +1098,11 @@ class Database:
         now = time.time()
         with self.connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
+            placeholders = ",".join("?" for _ in OPEN_DECISION_STATUSES)
             rows = connection.execute(
                 "SELECT id,transaction_id,rationale_json FROM decisions "
-                "WHERE status='needs_review'"
+                f"WHERE status IN ({placeholders}) AND anticipated_id=''",
+                OPEN_DECISION_STATUSES,
             ).fetchall()
             for row in rows:
                 transaction_id = row["transaction_id"]
@@ -967,8 +1113,8 @@ class Database:
                 rationale["external_resolution"] = reason
                 cursor = connection.execute(
                     "UPDATE decisions SET status='resolved_external',resolved_at=?,rationale_json=? "
-                    "WHERE id=? AND status='needs_review'",
-                    (now, _json(rationale), row["id"]),
+                    f"WHERE id=? AND status IN ({placeholders})",
+                    (now, _json(rationale), row["id"], *OPEN_DECISION_STATUSES),
                 )
                 if cursor.rowcount:
                     resolved.append(
@@ -987,6 +1133,7 @@ class Database:
             rows = connection.execute(
                 "SELECT * FROM decisions WHERE status='applied' AND category_id IS NOT NULL "
                 "AND category_id!='' AND transaction_date>=? AND observed IN ('','standing') "
+                "AND anticipated_id='' "
                 "ORDER BY created_at DESC LIMIT ?",
                 (since_date, limit),
             ).fetchall()
@@ -2385,8 +2532,12 @@ class Database:
             needs_review = connection.execute(
                 "SELECT COUNT(*) FROM decisions WHERE status='needs_review'"
             ).fetchone()[0]
+            skipped = connection.execute(
+                "SELECT COUNT(*) FROM decisions WHERE status='skipped'"
+            ).fetchone()[0]
             applied_today = connection.execute(
-                "SELECT COUNT(*) FROM decisions WHERE status='applied' AND created_at >= ?",
+                "SELECT COUNT(*) FROM decisions WHERE status='applied' AND anticipated_id='' "
+                "AND created_at >= ?",
                 (time.time() - 86_400,),
             ).fetchone()[0]
             proposals = connection.execute(
@@ -2405,6 +2556,7 @@ class Database:
             "active_jobs": sum(jobs.get(status, 0) for status in ACTIVE_STATUSES),
             "failed_jobs": jobs.get("failed", 0),
             "needs_review": needs_review,
+            "skipped": skipped,
             "applied_today": applied_today,
             "proposals": proposals,
             "rules": rules,

@@ -31,13 +31,24 @@ from actual_clerk.domain.merchants import normalize_merchant
 
 log = logging.getLogger(__name__)
 
-# Where a provisional category came from. A taught one is the user's word and
-# is never overwritten by memory; a rule is the user's word too, read from the
-# rule book; a memory one is re-derived on every pass so it follows the
-# evidence.
+# Where a provisional category came from. An approved one is the user's answer
+# for this one charge (Apply in Review); a taught one is the user's answer made
+# into a rule (Always, or the old "Always file as..."). Neither is overwritten
+# by memory. A rule is the user's word too, read from the rule book; a memory
+# one is re-derived on every pass so it follows the evidence.
 SOURCE_MEMORY = "memory"
 SOURCE_TAUGHT = "taught"
+SOURCE_APPROVED = "approved"
 # SOURCE_RULE is shared with the resolver.
+USER_SOURCES = (SOURCE_TAUGHT, SOURCE_APPROVED)
+
+# The decision source for a bank row filed with the user's answer about the
+# phone charge it settled: the person decided, before the bank had a row.
+SOURCE_PERSON = "person"
+
+# A phone charge's review is a decision whose transaction id says so; the
+# filing run and the observation channel only ever read ids from Actual.
+PHONE_PREFIX = "phone:"
 
 # Statuses an anticipation can be in. Only `open` charges count in the budget.
 OPEN = "open"
@@ -52,6 +63,31 @@ IGNORED = "ignored"
 # The same words from the same app inside this window are one notification,
 # whatever key they arrive under. Mirrors the phone's own repeat filter.
 REPEAT_WINDOW_SECONDS = 10 * 60
+
+
+def phone_transaction_id(charge_id: str) -> str:
+    return f"{PHONE_PREFIX}{charge_id}"
+
+
+def phone_item(row: dict[str, Any], *, account_name: str = "") -> dict[str, Any]:
+    """An open charge in the shape the categorizer reads a transaction in."""
+
+    try:
+        noticed = datetime.date.fromisoformat(str(row.get("noticed_date") or ""))
+    except ValueError:
+        noticed = datetime.datetime.fromtimestamp(float(row["noticed_at"]), datetime.UTC).date()
+    merchant = str(row.get("merchant") or "")
+    return {
+        "id": phone_transaction_id(str(row["id"])),
+        "merchant_key": str(row.get("merchant_key") or ""),
+        "merchant_label": merchant,
+        "payee_name": merchant or str(row.get("title") or ""),
+        "imported_description": merchant,
+        "account_id": str(row.get("actual_account_id") or ""),
+        "account_name": account_name,
+        "date": noticed,
+        "amount_cents": int(row.get("amount_cents", 0)),
+    }
 
 
 def notification_key(package_name: str, posted_at_ms: int, title: str, text: str) -> str:
@@ -121,7 +157,8 @@ def reconcile(
     open_rows = database.list_anticipated_charges(status=OPEN, limit=1000)
     summary: dict[str, Any] = {"open": [], "matched": 0, "expired": 0, "categorized": 0}
     if not open_rows or not settings.anticipated_enabled:
-        summary["open"] = [public_charge(row) for row in open_rows] if settings.anticipated_enabled else []
+        close_overtaken_reviews(database)
+        summary["open"] = public_charges(database, open_rows) if settings.anticipated_enabled else []
         return summary
 
     aliases = database.alias_map()
@@ -150,6 +187,7 @@ def reconcile(
     )
     by_id = {row["id"]: row for row in open_rows}
     by_transaction = {candidate.id: candidate for candidate in candidates}
+    items = {str(item.get("id") or ""): item for item in snapshot.get("transactions") or []}
     for match in matches:
         if database.resolve_anticipated_charge(
             match.charge_id,
@@ -163,6 +201,10 @@ def reconcile(
             _learn_from_settlement(
                 database, by_id[match.charge_id], by_transaction[match.transaction_id], aliases
             )
+            if _carry_decision(
+                database, by_id[match.charge_id], items.get(match.transaction_id) or {}
+            ):
+                summary["carried"] = summary.get("carried", 0) + 1
     settled = {match.charge_id for match in matches}
     for charge_id in expired_charges(
         [charge for charge in charges if charge.id not in settled],
@@ -179,9 +221,10 @@ def reconcile(
         )
     remaining = database.list_anticipated_charges(status=OPEN, limit=1000)
     summary["categorized"] = classify(database, snapshot, settings, remaining, today=today)
-    summary["open"] = [
-        public_charge(row) for row in database.list_anticipated_charges(status=OPEN, limit=1000)
-    ]
+    close_overtaken_reviews(database)
+    summary["open"] = public_charges(
+        database, database.list_anticipated_charges(status=OPEN, limit=1000)
+    )
     return summary
 
 
@@ -200,10 +243,10 @@ def classify(
     applied decisions under the same thresholds. A notification's merchant is
     looked up through its alias first (the bank's name for the shop is what
     the history was filed under), then under its own key. A taught category
-    is left alone. Returns how many rows changed.
+    or approved category is left alone. Returns how many rows changed.
     """
 
-    candidates = [row for row in rows if row.get("category_source") != SOURCE_TAUGHT]
+    candidates = [row for row in rows if row.get("category_source") not in USER_SOURCES]
     if not candidates:
         return 0
     aliases = database.alias_map()
@@ -277,36 +320,38 @@ def classify(
     return changed
 
 
-def teach_category(
+def apply_answer(
     database: Database,
     row: dict[str, Any],
     *,
     category_id: str,
     category_name: str,
+    always: bool = False,
+    correction: bool = False,
 ) -> dict[str, Any] | None:
-    """The user names the category: that is a rule for the merchant and its alias.
+    """The user answers a phone charge's review: this is where it goes.
 
-    Teaching is the user's word, so it is declared as a rule under the
-    notification's key and, when the bank's name for the shop is known, under
-    that key too -- so the real row files itself when it lands and the next
-    notification is categorized on sight. It is also recorded as a
-    correction in memory, so the evidence agrees with the rule. Clearing the
-    category retires the rule the notification's key carries.
+    The charge counts against that category from now on, and the answer is
+    evidence in memory the way an approved bank row is. With `always` it is
+    also declared as a rule under the notification's key and, when the bank's
+    name for the shop is known, under that key too -- so the real row files
+    itself when it lands and the next notification is categorized on sight.
+    Without it, only this charge (and the bank row it settles into) is filed.
+    Returns the rule declared, if any.
     """
 
     database.set_anticipated_category(
         row["id"],
         category_id=category_id,
         category_name=category_name,
-        source=SOURCE_TAUGHT if category_id else "",
-        confidence=1.0 if category_id else 0.0,
+        source=SOURCE_TAUGHT if always else SOURCE_APPROVED,
+        confidence=1.0,
     )
     key = str(row.get("merchant_key") or "")
     if not key:
         return None
-    if not category_id:
-        for rule in database.rules_for_merchant(key):
-            database.update_rule(rule["id"], status="retired")
+    database.record_memory(key, category_id, category_name, correction=correction)
+    if not always:
         return None
     label = str(row.get("merchant") or "")
     rule = database.upsert_rule(
@@ -314,7 +359,6 @@ def teach_category(
         merchant_label=label, source="user",
     )
     database.close_proposals_for(key, kind="rule")
-    database.record_memory(key, category_id, category_name, correction=True)
     target = database.alias_map().get(key)
     if target:
         database.upsert_rule(
@@ -322,8 +366,99 @@ def teach_category(
             merchant_label=label, source="user",
         )
         database.close_proposals_for(target, kind="rule")
-        database.record_memory(target, category_id, category_name, correction=True)
     return rule
+
+
+def close_overtaken_reviews(database: Database) -> int:
+    """Retire phone reviews that no longer need the person.
+
+    A charge that expired, was dismissed, or stopped existing has nothing
+    left to file; a charge a rule or reliable history has since categorized
+    (the user made a rule on another row, say) no longer needs asking about.
+    A settled charge's review was already handed to the bank's row.
+    """
+
+    closed = 0
+    for decision in database.open_phone_decisions():
+        charge = database.get_anticipated_charge(decision["anticipated_id"])
+        reason = ""
+        if charge is None:
+            reason = "the charge is gone"
+        elif charge["status"] != OPEN:
+            reason = f"the charge was {charge['status']}"
+        elif decision["status"] == "needs_review" and charge.get("category_id"):
+            reason = f"filed by {charge.get('category_source') or 'Clerk'}"
+        if reason and database.close_decision(decision["id"], "superseded", reason=reason):
+            closed += 1
+    return closed
+
+
+def _carry_decision(database: Database, row: dict[str, Any], item: dict[str, Any]) -> bool:
+    """Hand a settled charge's decision to the bank's row: one decision per purchase.
+
+    An answer the user gave is carried as an approved decision the next
+    filing run writes to Actual; a question still waiting, or one the user
+    skipped, becomes the same question (or the same skip) about the bank's
+    row. A bank row Clerk has already decided about keeps its own decision.
+    Returns whether an answer was carried, so the caller can file it soon.
+    """
+
+    decision = database.phone_decision(str(row["id"]))
+    transaction_id = str(item.get("id") or "")
+    if decision is None or not transaction_id:
+        return False
+    database.note_decision(
+        decision["id"],
+        settled_transaction_id=transaction_id,
+        settled_payee=str(item.get("payee_name") or ""),
+    )
+    bank = database.latest_decision_for(transaction_id)
+    date = item.get("date")
+    base = {
+        "transaction_id": transaction_id,
+        "account_id": str(item.get("account_id") or ""),
+        "account_name": str(item.get("account_name") or ""),
+        "payee_name": str(item.get("payee_name") or row.get("merchant") or ""),
+        "merchant_key": str(item.get("merchant_key") or ""),
+        "transaction_date": date.isoformat() if hasattr(date, "isoformat") else str(date or ""),
+        "amount_cents": int(item.get("amount_cents", row.get("amount_cents", 0))),
+    }
+    if decision["status"] == "applied":
+        if bank is not None and bank["status"] in ("applied", "approved"):
+            return False
+        database.add_decision(
+            {
+                **base,
+                "source": SOURCE_PERSON,
+                "status": "approved",
+                "category_id": decision["category_id"],
+                "category_name": decision["category_name"],
+                "confidence": 1.0,
+                "rationale": {
+                    "reason": "You categorized this charge when your phone saw it.",
+                    "from_phone": row["id"],
+                    "phone_decision": decision["id"],
+                    "phone_key": str(row.get("merchant_key") or ""),
+                },
+            }
+        )
+        return True
+    database.close_decision(decision["id"], "superseded", reason="the bank posted it")
+    if bank is not None and bank["status"] in ("applied", "approved", "needs_review", "skipped"):
+        return False
+    database.add_decision(
+        {
+            **base,
+            "source": decision["source"],
+            "status": decision["status"],
+            "category_id": decision["category_id"],
+            "category_name": decision["category_name"],
+            "proposed_category": decision.get("proposed_category") or "",
+            "confidence": decision["confidence"],
+            "rationale": {**decision["rationale"], "from_phone": row["id"]},
+        }
+    )
+    return False
 
 
 def teach_alias(database: Database, row: dict[str, Any], *, payee: str) -> dict[str, Any] | None:
@@ -396,6 +531,29 @@ def _learn_from_settlement(
         _carry_rule(
             database, charge_key, posted_key, {**row, "matched_payee": transaction.payee_name}
         )
+
+
+def public_charges(database: Database, rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Charges with the state of their review, so the web can say what each one waits on."""
+
+    waiting = {
+        decision["anticipated_id"]: decision for decision in database.open_phone_decisions()
+    }
+    items = []
+    for row in rows:
+        item = public_charge(row)
+        decision = waiting.get(str(row.get("id") or ""))
+        item["review"] = (
+            {
+                "id": decision["id"],
+                "status": decision["status"],
+                "suggestion": decision.get("category_name") or "",
+            }
+            if decision
+            else None
+        )
+        items.append(item)
+    return items
 
 
 def public_charge(row: dict[str, Any]) -> dict[str, Any]:

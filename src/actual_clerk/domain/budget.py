@@ -114,6 +114,9 @@ class BudgetReport:
     anticipated_cents: int
     anticipated_count: int
     anticipated_committed_cents: int
+    # Open phone charges nothing has categorized yet; their money is already
+    # inside uncategorized_cents, so the count explains that figure.
+    anticipated_uncategorized_count: int
     spent_cents: int
     remaining_cents: int
     remaining_percent: float
@@ -345,10 +348,13 @@ def build_budget_report(
     anticipated_open = [item for item in anticipated if not item.off_budget and item.spend_cents > 0]
     anticipated_cents = sum(item.spend_cents for item in anticipated_open)
     anticipated_committed = 0
+    anticipated_uncategorized = 0
     for item in anticipated_open:
         category_id = item.category_id if item.category_id in by_id else ""
         if category_id and category_id in income_ids:
             category_id = ""
+        if not category_id:
+            anticipated_uncategorized += 1
         if category_id in committed_ids:
             committed_spent[category_id] = committed_spent.get(category_id, 0) + item.spend_cents
             anticipated_committed += item.spend_cents
@@ -517,6 +523,7 @@ def build_budget_report(
         anticipated_cents=anticipated_cents,
         anticipated_count=len(anticipated_open),
         anticipated_committed_cents=anticipated_committed,
+        anticipated_uncategorized_count=anticipated_uncategorized,
         spent_cents=spent_cents,
         remaining_cents=remaining_cents,
         remaining_percent=remaining_percent,

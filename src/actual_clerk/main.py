@@ -29,6 +29,7 @@ from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
 from actual_clerk.config import TIMEZONE_CHOSEN_KEY, SettingsManager, data_directory
 from actual_clerk.db import Database
 from actual_clerk.diagnostics import build_report
+from actual_clerk.domain.intelligence import canonical_key
 from actual_clerk.domain.merchants import merchant_label, normalize_merchant
 from actual_clerk.plaid_links import describe, public_item, read_items
 from actual_clerk.plaid_sync import PlaidSyncEngine
@@ -36,6 +37,7 @@ from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingErr
 from actual_clerk.schemas import (
     ActualRulesRequest,
     BulkResolveRequest,
+    ChangeFilingRequest,
     ClaimSetupTokenRequest,
     CreateAliasRequest,
     CreateCategoryRequest,
@@ -56,7 +58,6 @@ from actual_clerk.schemas import (
     ServerTokenRequest,
     SettingsPatch,
     TeachAliasRequest,
-    TeachCategoryRequest,
     UpdateLinkRequest,
     UpdateRuleRequest,
     UpdateSourceRequest,
@@ -410,11 +411,56 @@ async def set_monitoring(
 
 
 @app.get("/api/reviews")
-async def reviews(request: Request) -> list[dict[str, Any]]:
+async def reviews(
+    request: Request, review_status: str = Query(default="needs_review", alias="status")
+) -> list[dict[str, Any]]:
+    """What waits on the person (or, with status=skipped, what they set aside).
+
+    Bank rows and phone charges share one queue. Each carries the key it is
+    grouped under -- the merchant as aliases resolve it -- so a phone's name
+    for a shop and the bank's name for it are one decision.
+    """
+    if review_status not in ("needs_review", "skipped"):
+        raise HTTPException(status_code=422, detail="status must be needs_review or skipped")
+    database = _database(request)
+    aliases = database.alias_map()
+    return [
+        _review_record(database, item, aliases)
+        for item in database.list_decisions(status=review_status, limit=500)
+    ]
+
+
+@app.get("/api/reviews/recent")
+async def recent_filings(
+    request: Request, days: int = Query(default=14, ge=1, le=90)
+) -> list[dict[str, Any]]:
+    """Rows Clerk filed lately, so a wrong one can be moved without opening Actual."""
+    since = datetime.now(UTC).timestamp() - days * 86_400
     return [
         _serialize_record(item)
-        for item in _database(request).list_decisions(status="needs_review", limit=250)
+        for item in _database(request).list_decisions(
+            status="applied", since=since, phone=False, limit=150
+        )
     ]
+
+
+def _review_record(
+    database: Database, item: dict[str, Any], aliases: dict[str, str]
+) -> dict[str, Any]:
+    record = _serialize_record(item)
+    key = str(item.get("merchant_key") or "")
+    record["group_key"] = canonical_key(key, aliases) if key else ""
+    charge_id = str(item.get("anticipated_id") or "")
+    if charge_id:
+        charge = database.get_anticipated_charge(charge_id) or {}
+        record["phone"] = {
+            "merchant": charge.get("merchant") or item.get("payee_name") or "",
+            "title": charge.get("title") or "",
+            "text": charge.get("text") or "",
+            "status": charge.get("status") or "",
+            "noticed_at": anticipated.public_charge(charge)["noticed_at"] if charge else None,
+        }
+    return record
 
 
 @app.get("/api/decisions")
@@ -501,31 +547,40 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
 
     A backlog is cleared a merchant at a time, not a transaction at a time, so
     the categories go to Actual in a single batch and every decision is claimed
-    before that batch is sent -- a failed write hands them all back.
+    before that batch is sent -- a failed write hands them all back. Phone
+    charges in the same group are answered in Clerk: nothing reaches Actual
+    until the bank's own row arrives, and then that row is filed the same way.
     """
     database = _database(request)
     settings = _settings_manager(request).get()
 
     if payload.action == "dismiss":
-        dismissed = [
+        skipped = [
             decision_id
             for decision_id in payload.ids
-            if database.resolve_decision(decision_id, "dismissed")
+            if database.resolve_decision(decision_id, "skipped")
         ]
-        return {"status": "dismissed", "resolved": len(dismissed)}
+        return {"status": "skipped", "resolved": len(skipped)}
+    if payload.action == "restore":
+        restored = [
+            decision_id for decision_id in payload.ids if database.restore_decision(decision_id)
+        ]
+        return {"status": "restored", "resolved": len(restored)}
 
+    recategorized = payload.action == "recategorize"
     updates: list[dict[str, Any]] = []
     claimed: list[tuple[str, dict[str, Any], str]] = []
+    phone: list[tuple[dict[str, Any], str]] = []
     for decision_id in payload.ids:
         pending = database.get_decision(decision_id)
         if not pending or pending["status"] != "needs_review":
             continue
-        category_id = (
-            payload.category_id if payload.action == "recategorize" else pending["category_id"]
-        )
+        category_id = payload.category_id if recategorized else pending["category_id"]
         if not category_id:
             continue
-        recategorized = payload.action == "recategorize"
+        if pending.get("anticipated_id"):
+            phone.append((pending, category_id))
+            continue
         if not database.resolve_decision(
             decision_id,
             "applied",
@@ -549,8 +604,27 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
             }
         )
 
+    declared: set[str] = set()
+    phone_answered = 0
+    for pending, category_id in phone:
+        rule = _answer_phone(
+            database, pending, category_id, recategorized=recategorized, always=payload.always
+        )
+        if rule is not False:
+            phone_answered += 1
+            if rule:
+                declared.add(rule["merchant_key"])
+    if phone_answered:
+        with contextlib.suppress(Exception):
+            await _jobs(request).refresh_now()
+
     if not updates:
-        return {"status": "skipped", "resolved": 0}
+        return {
+            "status": "applied" if phone_answered else "skipped",
+            "resolved": phone_answered,
+            "skipped": 0,
+            "rules": len(declared),
+        }
 
     try:
         result = await _gateway(request).apply_updates(updates, overwrite=True)
@@ -560,7 +634,6 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
         raise
 
     applied = set(result["applied"])
-    declared: set[str] = set()
     for _decision_id, pending, category_id in claimed:
         if pending["transaction_id"] not in applied:
             continue
@@ -569,7 +642,7 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
             pending["merchant_key"],
             category_id,
             category_name,
-            correction=payload.action == "recategorize",
+            correction=recategorized,
         )
         if payload.always and pending["merchant_key"] and pending["merchant_key"] not in declared:
             declared.add(pending["merchant_key"])
@@ -582,10 +655,37 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
             )
     return {
         "status": "applied",
-        "resolved": len(applied),
+        "resolved": len(applied) + phone_answered,
         "skipped": len(result["skipped"]),
         "rules": len(declared),
     }
+
+
+def _answer_phone(
+    database: Database,
+    pending: dict[str, Any],
+    category_id: str,
+    *,
+    recategorized: bool,
+    always: bool,
+) -> dict[str, Any] | None | bool:
+    """Apply a review answer to a phone charge. False when it was already answered."""
+    category_name = _category_name(database, category_id) or pending["category_name"]
+    if not database.resolve_decision(
+        pending["id"], "applied", category_id=category_id, category_name=category_name
+    ):
+        return False
+    charge = database.get_anticipated_charge(pending["anticipated_id"])
+    if charge is None:
+        return None
+    return anticipated.apply_answer(
+        database,
+        charge,
+        category_id=category_id,
+        category_name=category_name,
+        always=always,
+        correction=recategorized,
+    )
 
 
 @app.post("/api/reviews/{decision_id}/resolve")
@@ -597,13 +697,17 @@ async def resolve_review(
     pending = database.get_decision(decision_id)
     if not pending:
         raise HTTPException(status_code=404, detail="Review not found")
+    if payload.action == "restore":
+        if not database.restore_decision(decision_id):
+            raise HTTPException(status_code=409, detail="Only a skipped review can come back")
+        return {"status": "restored"}
     if pending["status"] != "needs_review":
         raise HTTPException(status_code=409, detail="This review has already been resolved")
 
     if payload.action == "dismiss":
-        if not database.resolve_decision(decision_id, "dismissed"):
+        if not database.resolve_decision(decision_id, "skipped"):
             raise HTTPException(status_code=409, detail="This review has already been resolved")
-        return {"status": "dismissed"}
+        return {"status": "skipped"}
 
     category_id = payload.category_id if payload.action == "recategorize" else pending["category_id"]
     if not category_id:
@@ -613,6 +717,25 @@ async def resolve_review(
     category_name = pending["category_name"]
     if payload.action == "recategorize":
         category_name = _category_name(database, category_id) or category_name
+
+    if pending.get("anticipated_id"):
+        rule = _answer_phone(
+            database,
+            pending,
+            category_id,
+            recategorized=payload.action == "recategorize",
+            always=payload.always,
+        )
+        if rule is False:
+            raise HTTPException(status_code=409, detail="This review has already been resolved")
+        with contextlib.suppress(Exception):
+            await _jobs(request).refresh_now()
+        return {
+            "status": "applied",
+            "category_id": category_id,
+            "category_name": _category_name(database, category_id) or category_name,
+            "rule": _serialize_record(rule) if rule else None,
+        }
 
     # Claim first: a second click must not produce a second write. The chosen
     # category is written on the decision too, so the ledger says what went
@@ -673,6 +796,34 @@ async def resolve_review(
         "category_name": category_name,
         "rule": _serialize_record(rule) if rule else None,
     }
+
+
+@app.post("/api/decisions/{decision_id}/change")
+async def change_filing(
+    decision_id: str, payload: ChangeFilingRequest, request: Request
+) -> dict[str, Any]:
+    """Move a row Clerk filed to another category, and learn from it."""
+    database = _database(request)
+    decision = database.get_decision(decision_id)
+    if not decision or decision["status"] != "applied" or decision.get("anticipated_id"):
+        raise HTTPException(status_code=404, detail="No filing to change")
+    category_name = _category_name(database, payload.category_id)
+    if not category_name:
+        raise HTTPException(status_code=404, detail="That category is not in the last snapshot")
+    current = decision.get("observed_category_id") or decision.get("category_id")
+    if current == payload.category_id:
+        return {"status": "unchanged"}
+    result = await _gateway(request).apply_updates(
+        [{"transaction_id": decision["transaction_id"], "category_id": payload.category_id}],
+        overwrite=True,
+    )
+    if not result["applied"]:
+        reason = next((item["reason"] for item in result["skipped"]), "not updated")
+        raise HTTPException(status_code=409, detail=f"Actual did not take the change: {reason}")
+    _jobs(request).note_correction(decision, payload.category_id, category_name)
+    with contextlib.suppress(Exception):
+        await _jobs(request).refresh_now()
+    return {"status": "changed", "category_id": payload.category_id, "category_name": category_name}
 
 
 def _category_name(database: Database, category_id: str) -> str:
@@ -1578,6 +1729,18 @@ def _log_refresh_outcome(task: asyncio.Task[Any]) -> None:
         log.warning("Budget re-read after an anticipated charge failed: %s", error)
 
 
+async def _queue_phone_review(request: Request, charge: dict[str, Any]) -> None:
+    """Hand a charge rules and history could not place to the model, off the phone's clock."""
+    if (
+        charge.get("status") != anticipated.OPEN
+        or charge.get("kind") != "charge"
+        or charge.get("category_id")
+    ):
+        return
+    with contextlib.suppress(Exception):
+        await _jobs(request).enqueue("phone", trigger="phone")
+
+
 def _require_device(request: Request) -> None:
     settings = _settings_manager(request).get()
     if not settings.anticipated_enabled:
@@ -1676,7 +1839,9 @@ async def anticipated_register_source(
         if created and row["status"] == anticipated.OPEN:
             with contextlib.suppress(Exception):
                 await _jobs(request).refresh_now()
-        charge = anticipated.public_charge(database.get_anticipated_charge(row["id"]) or row)
+        current = database.get_anticipated_charge(row["id"]) or row
+        await _queue_phone_review(request, current)
+        charge = anticipated.public_charge(current)
     return {"source": _serialize_source(source), "charge": charge}
 
 
@@ -1744,6 +1909,7 @@ async def anticipated_forward(payload: ForwardNotificationRequest, request: Requ
             refresh_error = f"{type(exc).__name__}: {exc}"
             log.warning("Anticipated charge stored but the budget could not be re-read: %s", exc)
     current = database.get_anticipated_charge(row["id"]) or row
+    await _queue_phone_review(request, current)
     return {
         "accepted": True,
         "created": created,
@@ -1783,10 +1949,9 @@ async def anticipated_overview(request: Request) -> dict[str, Any]:
         "match_window_days": settings.anticipated_match_window_days,
         "expire_days": settings.anticipated_expire_days,
         "sources": [_serialize_source(s) for s in database.list_notification_sources()],
-        "open": [
-            anticipated.public_charge(c)
-            for c in database.list_anticipated_charges(status=anticipated.OPEN, limit=200)
-        ],
+        "open": anticipated.public_charges(
+            database, database.list_anticipated_charges(status=anticipated.OPEN, limit=200)
+        ),
         "recent": [
             anticipated.public_charge(c)
             for c in database.list_anticipated_charges(limit=60)
@@ -1808,29 +1973,6 @@ def _anticipated_charge_or_404(request: Request, charge_id: str) -> dict[str, An
     if not row:
         raise HTTPException(status_code=404, detail="Anticipated charge not found")
     return row
-
-
-@app.post("/api/anticipated/charges/{charge_id}/category")
-async def anticipated_teach_category(
-    charge_id: str, payload: TeachCategoryRequest, request: Request
-) -> dict[str, Any]:
-    """Name where this charge belongs; Clerk remembers it for the merchant."""
-    database = _database(request)
-    row = _anticipated_charge_or_404(request, charge_id)
-    name = ""
-    if payload.category_id:
-        name = _category_name(database, payload.category_id)
-        if not name:
-            raise HTTPException(status_code=404, detail="That category is not in the last snapshot")
-    rule = anticipated.teach_category(
-        database, row, category_id=payload.category_id, category_name=name
-    )
-    with contextlib.suppress(Exception):
-        await _jobs(request).refresh_now()
-    return {
-        "charge": anticipated.public_charge(database.get_anticipated_charge(charge_id) or row),
-        "rule": _serialize_record(rule) if rule else None,
-    }
 
 
 @app.post("/api/anticipated/charges/{charge_id}/alias")

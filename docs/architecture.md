@@ -228,7 +228,7 @@ the bank feed remains the record. See
 
 ## UI information architecture
 
-Five focused views: overview, review, intelligence, connections, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Review groups transactions awaiting a decision by merchant, so one choice settles every transaction from that merchant; *Always* settles it and declares a rule. Intelligence holds everything Clerk knows and everything it wants to know: the rules, the proposals waiting for an answer, and how much it has learned. Connections shows per-account health and the full transition history. Activity separates filing decisions from the longer run history with explicit tabs and opens on decisions by default.
+Four focused views: overview, intelligence, connections, and activity, plus settings. The overview leads with the budget hero card and surfaces anything degraded above it. Intelligence holds everything Clerk knows and everything it wants to know. Its Review tab groups what awaits a decision by merchant, through aliases, so one choice settles every bank row and phone charge from that merchant; *Always* settles it and declares a rule, *Skip* sets it aside for good (listed under Skipped), and Recently filed lets a wrong filing be moved from Clerk. The other tabs hold the proposals waiting for an answer, the rules, and what Clerk has learned. Connections shows per-account health and the full transition history. Activity separates filing decisions from the longer run history with explicit tabs and opens on decisions by default.
 
 The build-free web client serves its HTML with revalidation and references its
 JavaScript, CSS, and favicon with one SHA-256 fingerprint derived from every

@@ -6,6 +6,8 @@ const claimDialog = document.querySelector("#claim-dialog");
 const claimForm = document.querySelector("#claim-form");
 const categoryDialog = document.querySelector("#category-dialog");
 const categoryForm = document.querySelector("#category-form");
+const aliasDialog = document.querySelector("#alias-dialog");
+const aliasForm = document.querySelector("#alias-dialog-form");
 
 const state = {
   route: "overview",
@@ -17,6 +19,11 @@ const state = {
   // made -- and then applied.
   reviewChoices: new Map(),
   reviewFingerprint: "",
+  // Which list the Review tab shows: what waits on you, what you set aside,
+  // or what Clerk filed lately (to move a wrong one).
+  reviewView: "waiting",
+  skipped: [],
+  recent: [],
   intelligence: null,
   intelligenceFingerprint: "",
   intelligenceTab: "",
@@ -46,7 +53,6 @@ const state = {
 
 const pageMeta = {
   overview: ["Budget", "Overview"],
-  review: ["Needs a decision", "Review"],
   intelligence: ["What Clerk knows", "Intelligence"],
   accounts: ["Bank sync", "Connections"],
   activity: ["History", "Activity"],
@@ -291,7 +297,7 @@ function budgetHero() {
       ${report.committed_carried_cents ? `<div><span>Set aside from earlier months</span><strong class="money positive">${money(report.committed_carried_cents)}</strong></div>` : ""}
       ${returned ? `<div><span>Refunded from earlier months</span><strong class="money positive">${money(returned)}</strong></div>` : ""}
       ${report.anticipated_cents ? `<div><span>Anticipated, not yet posted</span><strong class="money">${money(report.anticipated_cents)} · ${report.anticipated_count}</strong></div>` : ""}
-      <div><span>Uncategorized</span><strong class="money">${money(report.uncategorized_cents)}${report.uncategorized_count ? ` · ${report.uncategorized_count}` : ""}</strong></div>
+      <div><span>Uncategorized</span><strong class="money">${money(report.uncategorized_cents)}${(report.uncategorized_count || 0) + (report.anticipated_uncategorized_count || 0) ? ` · ${(report.uncategorized_count || 0) + (report.anticipated_uncategorized_count || 0)}` : ""}</strong></div>
     </div>
   </section>`;
 }
@@ -323,8 +329,8 @@ function healthRow(item, { actions = true, toggle = false } = {}) {
 function jobRow(job, { actions = true } = {}) {
   const retryable = ["failed", "cancelled"].includes(job.status);
   return `<article class="data-row job-row clickable" data-action="job-detail" data-id="${escapeHtml(job.id)}">
-    <span class="mark">${{ sync: "⇄", categorize: "◇", health: "♡", digest: "✉" }[job.kind] || "•"}</span>
-    <div class="row-title"><strong>${escapeHtml(titleCase(job.kind))}</strong><small>${escapeHtml(titleCase(job.trigger))} · ${relativeTime(job.created_at)}</small>${job.status === "running" ? `<div class="progress-track indeterminate" role="progressbar" aria-label="Running"><i></i></div>` : ""}</div>
+    <span class="mark">${{ sync: "⇄", categorize: "◇", phone: "📱", health: "♡", digest: "✉" }[job.kind] || "•"}</span>
+    <div class="row-title"><strong>${escapeHtml(job.kind === "phone" ? "Phone charge" : titleCase(job.kind))}</strong><small>${escapeHtml(titleCase(job.trigger))} · ${relativeTime(job.created_at)}</small>${job.status === "running" ? `<div class="progress-track indeterminate" role="progressbar" aria-label="Running"><i></i></div>` : ""}</div>
     <div class="row-meta">${escapeHtml(jobSummary(job))}</div>
     <div>${statusChip(job.status)}</div>
     ${actions ? `<div class="row-actions">${retryable ? `<button class="button ghost small" data-action="retry-job" data-id="${escapeHtml(job.id)}">Retry</button>` : ""}${["queued", "retry_wait"].includes(job.status) ? `<button class="button ghost small" data-action="cancel-job" data-id="${escapeHtml(job.id)}">Cancel</button>` : ""}</div>` : "<div></div>"}
@@ -337,20 +343,30 @@ function jobSummary(job) {
   if (job.kind === "sync") return `${result.transactions ?? 0} transaction(s) read${result.imported ? `, ${result.imported} imported` : ""}${result.reviews_resolved ? ` · ${result.reviews_resolved} review(s) resolved` : ""}`;
   if (job.kind === "categorize") {
     const scope = result.review_retry ? "review retry · " : result.full_history ? "older history · " : "";
-    const base = `${scope}${result.applied ?? 0} applied · ${result.needs_review ?? 0} to review · ${result.model_calls ?? 0} model call(s)${result.reviews_resolved ? ` · ${result.reviews_resolved} resolved in Actual` : ""}`;
+    const base = `${scope}${result.applied ?? 0} applied · ${result.needs_review ?? 0} to review · ${result.model_calls ?? 0} model call(s)${result.reviews_resolved ? ` · ${result.reviews_resolved} resolved in Actual` : ""}${result.carried ? ` · ${result.carried} filed from a phone answer` : ""}${result.phone?.reviews ? ` · ${result.phone.reviews} phone charge(s) to review` : ""}`;
     return result.model_abandoned ? `${base} · model unreachable` : base;
   }
+  if (job.kind === "phone") return result.skipped || `${result.reviews ?? 0} to review · ${result.filed ?? 0} categorized · ${result.model_calls ?? 0} model call(s)`;
   if (job.kind === "health") return `${result.linked ?? 0} linked · ${result.degraded ?? 0} degraded`;
   if (job.kind === "digest") return result.title || result.reason || "—";
   return titleCase(job.phase || "");
 }
 
+const DECISION_STATUS_LABEL = {
+  needs_review: "Waiting on you",
+  skipped: "Skipped",
+  approved: "Filing soon",
+  write_skipped: "Not written",
+  resolved_external: "Settled in Actual",
+  dismissed: "Skipped (old)",
+};
+
 function decisionRow(item) {
   return `<article class="data-row decision-row clickable" data-action="review-detail" data-id="${escapeHtml(item.id)}">
-    <span class="mark ${escapeHtml(item.source)}">${{ rule: "⚡", memory: "↺", model: "✦", unresolved: "?" }[item.source] || "•"}</span>
-    <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${shortDate(item.transaction_date)} · <span class="money">${money(item.amount_cents)}</span> · ${escapeHtml(item.account_name)}</small></div>
-    <div class="row-meta"><strong>${escapeHtml(item.category_name || item.proposed_category || "—")}</strong><br /><span>${escapeHtml(titleCase(item.source))} · ${percent(item.confidence)}</span></div>
-    <div>${item.observed === "corrected" || item.observed === "cleared" ? statusChip("warning", "Changed in Actual") : statusChip(item.status)}</div>
+    <span class="mark ${escapeHtml(item.source)}">${item.anticipated_id ? "📱" : { rule: "⚡", memory: "↺", model: "✦", unresolved: "?", person: "✓" }[item.source] || "•"}</span>
+    <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${item.anticipated_id ? "Phone charge · " : ""}${shortDate(item.transaction_date)} · <span class="money">${money(item.amount_cents)}</span>${item.account_name ? ` · ${escapeHtml(item.account_name)}` : ""}</small></div>
+    <div class="row-meta"><strong>${escapeHtml(item.category_name || item.proposed_category || "—")}</strong><br /><span>${escapeHtml(sourceLabel(item.source))} · ${percent(item.confidence)}</span></div>
+    <div>${item.observed === "corrected" || item.observed === "cleared" ? statusChip("warning", "Changed") : statusChip(item.status, DECISION_STATUS_LABEL[item.status])}</div>
     <div class="row-meta">${relativeTime(item.created_at)}</div>
   </article>`;
 }
@@ -364,8 +380,7 @@ function updateChrome() {
   document.querySelectorAll("[data-route]").forEach((item) => item.classList.toggle("active", item.dataset.route === state.route));
   if (!state.data) return;
   const counts = state.data.counts || {};
-  setBadge("nav-review-count", counts.needs_review || 0);
-  setBadge("nav-intelligence-count", counts.proposals || 0);
+  setBadge("nav-intelligence-count", (counts.needs_review || 0) + (counts.proposals || 0));
   setBadge("nav-health-count", counts.degraded_accounts || 0);
   const pill = document.querySelector("#automation-pill");
   pill.classList.toggle("off", !state.data.sync_enabled);
@@ -393,7 +408,6 @@ async function renderRoute({ quiet = false, poll = false } = {}) {
       try { state.health = await api("/api/health"); } catch { /* keep the last answer */ }
     }
     if (state.route === "overview") await renderOverview();
-    if (state.route === "review") await renderReview({ poll });
     if (state.route === "intelligence") await renderIntelligence({ poll });
     if (state.route === "accounts") await renderAccounts();
     if (state.route === "activity") await renderActivity();
@@ -415,6 +429,10 @@ async function renderOverview() {
   const report = budget();
 
   const degraded = health.filter(isDegraded);
+  // Phone charges nobody has categorized are inside the uncategorized money,
+  // so they are counted beside the rows from Actual.
+  const phoneUncategorized = report.anticipated_uncategorized_count || 0;
+  const uncategorized = (report.uncategorized_count || 0) + phoneUncategorized;
   const staleAccounts = (fresh.accounts || []).filter((item) => item.stale);
   // Everything else on this page is only as true as the last read, so the one
   // thing worth reporting about Clerk itself is when that read happened.
@@ -438,8 +456,8 @@ async function renderOverview() {
     <section class="grid metrics">
       <article class="metric-card"><span class="metric-icon">▤</span><span class="metric-label">Committed (budgeted)</span><div class="metric-value">${money(report.committed_cents || 0, { compact: true })}</div><span class="metric-note">${money(report.committed_spent_cents || 0)} of it spent so far</span></article>
       <article class="metric-card"><span class="metric-icon">◇</span><span class="metric-label">Discretionary spent</span><div class="metric-value">${money(report.discretionary_spent_cents || 0, { compact: true })}</div><span class="metric-note">against ${money(report.available_cents ?? report.free_cents ?? 0)} available</span></article>
-      <article class="metric-card ${report.uncategorized_count ? "warning" : "good"}"><span class="metric-icon">✎</span><span class="metric-label">Uncategorized this month</span><div class="metric-value">${report.uncategorized_count || 0}</div><span class="metric-note">${money(report.uncategorized_cents || 0)} unaccounted for</span></article>
-      <article class="metric-card ${staleSnapshot ? "warning" : ""}"><span class="metric-icon">◈</span><span class="metric-label">Filed by Clerk today</span><div class="metric-value">${counts.applied_today || 0}</div><span class="metric-note">${counts.needs_review ? `${counts.needs_review} waiting · ` : ""}read from Actual ${escapeHtml(lastRead)}</span></article>
+      <article class="metric-card ${uncategorized ? "warning" : "good"}"><span class="metric-icon">✎</span><span class="metric-label">Uncategorized this month</span><div class="metric-value">${uncategorized}</div><span class="metric-note">${money(report.uncategorized_cents || 0)} unaccounted for${phoneUncategorized ? ` · ${phoneUncategorized} from your phone` : ""}</span></article>
+      <article class="metric-card ${staleSnapshot ? "warning" : ""}"><span class="metric-icon">◈</span><span class="metric-label">Filed by Clerk today</span><div class="metric-value">${counts.applied_today || 0}</div><span class="metric-note">${counts.needs_review ? `<a href="#intelligence-review">${counts.needs_review} waiting on you</a> · ` : ""}read from Actual ${escapeHtml(lastRead)}</span></article>
     </section>
 
     ${anticipatedOverviewPanel(view.anticipated || [])}
@@ -462,17 +480,23 @@ async function renderOverview() {
     </section>`;
 }
 
+// Who decided, in words a person uses.
+const SOURCE_LABEL = { rule: "Rule", memory: "History", model: "Model", unresolved: "No suggestion", person: "You" };
+function sourceLabel(source) { return SOURCE_LABEL[source] || titleCase(source || ""); }
+
 // A backlog is made of merchants, not transactions: the same coffee shop can
 // account for forty rows and one decision. Grouping is what makes a long
-// queue finishable, so the queue is grouped before it is drawn.
+// queue finishable, so the queue is grouped before it is drawn. The server
+// names the group through aliases, so the phone's "Valve" and the bank's
+// "Steam" are one decision.
 function groupReviews(reviews) {
   const groups = new Map();
   for (const item of reviews) {
-    const key = item.merchant_key || item.payee_name || item.id;
+    const key = item.group_key || item.merchant_key || item.payee_name || item.id;
     if (!groups.has(key)) {
       groups.set(key, {
         key,
-        label: item.payee_name || item.merchant_key || "Transaction",
+        label: "",
         items: [],
         total_cents: 0,
         suggestion_id: item.category_id || "",
@@ -480,12 +504,19 @@ function groupReviews(reviews) {
         proposed: item.proposed_category || "",
         confidence: item.confidence ?? 0,
         source: item.source,
+        phone: 0,
       });
     }
     const group = groups.get(key);
     group.items.push(item);
     group.total_cents += Number(item.amount_cents) || 0;
     group.confidence = Math.min(group.confidence, item.confidence ?? 0);
+    if (item.anticipated_id) group.phone += 1;
+    // The bank's name reads better than a notification's shouting descriptor.
+    if (!group.label || (!item.anticipated_id && group.labelFromPhone)) {
+      group.label = item.payee_name || item.merchant_key || "Transaction";
+      group.labelFromPhone = Boolean(item.anticipated_id);
+    }
     if (!group.suggestion_id && item.category_id) {
       group.suggestion_id = item.category_id;
       group.suggestion_name = item.category_name || "";
@@ -505,17 +536,17 @@ function reviewSelection(group) {
   return { suggested, selected: chosen || suggested };
 }
 
-function categoryPicker(group) {
-  const categories = overview().categories || [];
-  const { suggested, selected } = reviewSelection(group);
-  const suggestedId = suggested?.id || "";
-  const selectedId = selected?.id || "";
+// One searchable, grouped category control for every place a category is
+// chosen. `role` says what a pick means; the click handler acts on it.
+function categoryPicker({ role, id, selectedId = "", suggestedId = "", categories = overview().categories || [], placeholder = "Choose a category…", extra = "" }) {
   const grouped = new Map();
   for (const category of categories) {
+    if (category.is_income && category.id !== selectedId) continue;
     const name = category.group_name || "Other";
     if (!grouped.has(name)) grouped.set(name, []);
     grouped.get(name).push(category);
   }
+  const selected = categories.find((category) => category.id === selectedId) || null;
   const options = [...grouped.entries()].map(([groupName, items]) => `
     <section class="category-picker-group" data-category-group>
       <p>${escapeHtml(groupName)}</p>
@@ -523,8 +554,8 @@ function categoryPicker(group) {
     </section>`).join("");
   const label = selected
     ? `${selected.group_name ? `${selected.group_name} · ` : ""}${selected.name}`
-    : "Choose a category…";
-  return `<div class="category-picker" data-role="review-category" data-id="${escapeHtml(group.key)}" data-value="${escapeHtml(selectedId)}" data-suggestion-id="${escapeHtml(suggestedId)}">
+    : placeholder;
+  return `<div class="category-picker" data-role="${escapeHtml(role)}" data-id="${escapeHtml(id)}" data-value="${escapeHtml(selectedId)}" data-suggestion-id="${escapeHtml(suggestedId)}" ${extra}>
     <button type="button" class="category-picker-trigger" data-action="category-picker-toggle" aria-haspopup="listbox" aria-expanded="false">
       <span data-role="category-picker-label">${escapeHtml(label)}</span><i aria-hidden="true">⌄</i>
     </button>
@@ -536,79 +567,113 @@ function categoryPicker(group) {
   </div>`;
 }
 
-function reviewGroupRow(group) {
+function reviewGroupRow(group, { skipped = false } = {}) {
   const ids = group.items.map((item) => item.id).join(",");
-  const dates = group.items.map((item) => item.transaction_date).sort();
-  const span = dates.length > 1 ? `${shortDate(dates[0])} – ${shortDate(dates[dates.length - 1])}` : shortDate(dates[0]);
+  const dates = group.items.map((item) => item.transaction_date).filter(Boolean).sort();
+  const span = dates.length > 1 ? `${shortDate(dates[0])} – ${shortDate(dates[dates.length - 1])}` : dates.length ? shortDate(dates[0]) : "";
   const accounts = [...new Set(group.items.map((item) => item.account_name).filter(Boolean))];
   const { suggested, selected } = reviewSelection(group);
   const suggestedId = suggested?.id || "";
   const changed = Boolean(selected) && selected.id !== suggestedId;
+  const bank = group.items.length - group.phone;
+  const counted = [
+    bank ? `${bank} transaction${bank === 1 ? "" : "s"}` : "",
+    group.phone ? `${group.phone} phone charge${group.phone === 1 ? "" : "s"}` : "",
+  ].filter(Boolean).join(" + ");
+  const phoneNote = group.phone ? `<span class="status-chip stale" title="Seen by your phone; counts as uncategorized until you choose. Nothing is written to Actual until the bank posts it, and then that row is filed the same way.">📱 Phone</span>` : "";
+  const confidence = group.suggestion_id
+    ? `<span class="confidence ${group.confidence < 0.5 ? "low" : ""}">${percent(group.confidence)}</span><small>${escapeHtml(sourceLabel(group.source).toLowerCase())}</small>`
+    : `<span class="confidence none">—</span><small>no suggestion</small>`;
+  const actions = skipped
+    ? `<button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(group.items[0].id)}">Why</button>
+      <button class="button secondary small" data-action="review-restore-group" data-ids="${escapeHtml(ids)}">Ask me again</button>`
+    : `${!group.suggestion_id && group.proposed ? `<button class="button secondary small" data-action="create-category" data-name="${escapeHtml(group.proposed)}" title="The model found no existing category for this merchant">+ ${escapeHtml(group.proposed)}</button>` : ""}
+      <button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(group.items[0].id)}">Why</button>
+      <button class="button ghost small" data-action="review-dismiss-group" data-ids="${escapeHtml(ids)}" title="Leave it uncategorized and stop asking; it moves to Skipped">Skip</button>
+      <button class="button secondary small" data-action="review-accept-group" data-always="1" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}" data-suggestion-id="${escapeHtml(suggestedId)}" title="Apply this category and make it a rule, so this merchant is always filed here without asking" ${selected && group.key && !group.key.startsWith(" ") ? "" : "disabled"}>Always</button>
+      <button class="button primary small" data-action="review-accept-group" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}" data-suggestion-id="${escapeHtml(suggestedId)}" title="File just these, without a rule" ${selected ? "" : "disabled"}>Apply${group.items.length > 1 ? ` ${group.items.length}` : ""}</button>`;
   return `<article class="data-row review-row ${changed ? "changed" : ""}">
     <div class="row-title">
-      <strong>${escapeHtml(group.label)}</strong>
-      <small>${group.items.length} transaction${group.items.length === 1 ? "" : "s"} · ${span}${accounts.length ? ` · ${escapeHtml(accounts.slice(0, 2).join(", "))}` : ""}</small>
+      <strong>${escapeHtml(group.label)} ${phoneNote}</strong>
+      <small>${[counted, span, accounts.length ? escapeHtml(accounts.slice(0, 2).join(", ")) : ""].filter(Boolean).join(" · ")}</small>
     </div>
     <div class="row-amount money">${money(group.total_cents)}</div>
-    <div class="cell-select">${categoryPicker(group)}</div>
-    <div class="cell-confidence"><span class="confidence ${group.confidence < 0.5 ? "low" : ""}">${percent(group.confidence)}</span><small>confidence</small></div>
-    <div class="row-actions">
-      ${!group.suggestion_id && group.proposed ? `<button class="button secondary small" data-action="create-category" data-name="${escapeHtml(group.proposed)}" title="The model found no existing category for this merchant">+ ${escapeHtml(group.proposed)}</button>` : ""}
-      <button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(group.items[0].id)}">Why</button>
-      <button class="button ghost small" data-action="review-dismiss-group" data-ids="${escapeHtml(ids)}">Skip</button>
-      <button class="button secondary small" data-action="review-accept-group" data-always="1" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}" data-suggestion-id="${escapeHtml(suggestedId)}" title="Apply this category and make it a rule, so this merchant is always filed here without asking" ${selected && group.key && !group.key.startsWith(" ") ? "" : "disabled"}>Always</button>
-      <button class="button primary small" data-action="review-accept-group" data-ids="${escapeHtml(ids)}" data-key="${escapeHtml(group.key)}" data-suggestion-id="${escapeHtml(suggestedId)}" ${selected ? "" : "disabled"}>Apply${group.items.length > 1 ? ` ${group.items.length}` : ""}</button>
-    </div>
+    <div class="cell-select">${skipped ? `<small class="muted">${escapeHtml(group.suggestion_name ? `Suggested ${group.suggestion_name}` : "No suggestion")}</small>` : categoryPicker({ role: "review-category", id: group.key, selectedId: selected?.id || "", suggestedId })}</div>
+    <div class="cell-confidence">${confidence}</div>
+    <div class="row-actions">${actions}</div>
   </article>`;
 }
 
-async function renderReview({ poll = false } = {}) {
-  const reviews = await api("/api/reviews");
-  if (state.route !== "review") return;
-  // The poll checks for an open picker before it asks the server, but the
-  // picker can open while the answer is in flight; redrawing then would pull
-  // the menu out from under the pointer.
-  if (document.querySelector(".category-picker.open")) return;
+function recentRow(item) {
+  const current = item.observed === "corrected" ? item.observed_category_id : item.category_id;
+  const how = { rule: "by a rule", memory: "from history", model: "on the model's suggestion, approved by you", person: "as you chose for the phone charge", unresolved: "by you" }[item.source] || "";
+  return `<article class="data-row review-row">
+    <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${[shortDate(item.transaction_date), escapeHtml(item.account_name || ""), `filed ${escapeHtml(how)} ${relativeTime(item.created_at)}`].filter(Boolean).join(" · ")}</small></div>
+    <div class="row-amount money">${money(item.amount_cents)}</div>
+    <div class="cell-select">${categoryPicker({ role: "recent-category", id: item.id, selectedId: current || "", placeholder: item.category_name || "Missing category" })}</div>
+    <div class="cell-confidence">${item.observed === "corrected" ? `<span class="status-chip warning">Moved</span>` : ""}</div>
+    <div class="row-actions"><button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(item.id)}">Why</button></div>
+  </article>`;
+}
+
+async function loadReviews() {
+  const requests = [api("/api/reviews")];
+  if (state.reviewView === "skipped") requests.push(api("/api/reviews?status=skipped"));
+  if (state.reviewView === "recent") requests.push(api("/api/reviews/recent"));
+  const [reviews, extra] = await Promise.all(requests);
   state.reviews = reviews;
+  if (state.reviewView === "skipped") state.skipped = extra;
+  if (state.reviewView === "recent") state.recent = extra;
   const groups = groupReviews(state.reviews);
   for (const key of [...state.reviewChoices.keys()]) {
     if (!groups.some((group) => group.key === key)) state.reviewChoices.delete(key);
   }
-  const fingerprint = JSON.stringify([
+}
+
+function reviewFingerprint() {
+  return JSON.stringify([
+    state.reviewView,
     state.reviews.map((item) => [item.id, item.category_id, item.confidence]),
-    (overview().categories || []).map((category) => [category.id, category.name, category.group_name]),
+    state.skipped.map((item) => item.id),
+    state.recent.map((item) => [item.id, item.observed, item.observed_category_id]),
   ]);
-  if (poll && fingerprint === state.reviewFingerprint) return;
-  state.reviewFingerprint = fingerprint;
+}
+
+function reviewPanel() {
+  const groups = groupReviews(state.reviews);
   const allIds = state.reviews.map((item) => item.id).join(",");
   const withSuggestion = groups.filter((group) => group.suggestion_id).length;
-  content.innerHTML = `
-    <section class="page-intro"><div><h2>Review</h2><p>Clerk follows your rules and reliable merchant history on its own; every first-time merchant requires your approval. <strong>Apply</strong> files these transactions and teaches Clerk; <strong>Always</strong> also makes a rule, so the merchant is never asked about again. Retry waiting items after changing the model; catch up older history only to search beyond the normal recent window.</p></div><div class="actions"><button class="button ghost" data-action="catch-up">Catch up older history</button><button class="button primary" data-action="retry-reviews" ${state.reviews.length ? "" : "disabled"}>Retry review queue${state.reviews.length ? ` (${state.reviews.length})` : ""}</button></div></section>
-    <article class="panel review-panel">
-      <header class="panel-head">
-        <div><h2>Waiting on you</h2><p>${state.reviews.length} transaction${state.reviews.length === 1 ? "" : "s"} across ${groups.length} merchant${groups.length === 1 ? "" : "s"}${withSuggestion ? ` · ${withSuggestion} with a suggestion ready` : ""}</p></div>
-        ${state.reviews.length ? `<div class="actions"><button class="button ghost small" data-action="review-dismiss-all" data-ids="${escapeHtml(allIds)}">Skip all ${state.reviews.length}</button></div>` : ""}
-      </header>
-      ${groups.length ? `<div class="row-head review-row">
-        <span>Merchant</span><span class="align-right">Total</span><span>Category</span><span>Confidence</span><span></span>
-      </div>` : ""}
-      <div class="status-list">${groups.length ? groups.map(reviewGroupRow).join("") : emptyState("✓", "Nothing is waiting", "Known merchants with reliable history can be filed automatically. Every first-time merchant appears here for approval.")}</div>
-    </article>`;
+  const skippedCount = state.reviewView === "skipped" ? state.skipped.length : (state.data?.counts?.skipped || 0);
+  const chips = [["waiting", "Waiting", state.reviews.length], ["skipped", "Skipped", skippedCount], ["recent", "Recently filed"]];
+  const menu = `<details class="menu"><summary class="button ghost small" aria-label="More review actions">⋯</summary><div class="menu-body">
+      <button type="button" data-action="retry-reviews" ${state.reviews.length ? "" : "disabled"}>Ask the model again about ${state.reviews.length || "no"} waiting item${state.reviews.length === 1 ? "" : "s"}<small>After changing the model or its settings.</small></button>
+      <button type="button" data-action="catch-up">Look through older history<small>Uncategorized rows beyond the normal ${escapeHtml(String(state.settings?.categorize_lookback_days || 45))}-day window.</small></button>
+    </div></details>`;
+  let body = "";
+  let head = "";
+  if (state.reviewView === "skipped") {
+    const skipped = groupReviews(state.skipped);
+    head = `<div><h2>Skipped</h2><p>Left uncategorized at your word; Clerk does not ask about these again. A skipped item leaves this list once it is categorized in Actual.</p></div>`;
+    body = skipped.length ? skipped.map((group) => reviewGroupRow(group, { skipped: true })).join("") : emptyState("✓", "Nothing skipped", "Skip moves an item here instead of asking about it on every run.");
+  } else if (state.reviewView === "recent") {
+    head = `<div><h2>Recently filed</h2><p>What Clerk filed in the last two weeks. Moving one writes the new category to Actual and teaches Clerk, exactly as a correction made in Actual would.</p></div>`;
+    body = state.recent.length ? state.recent.map(recentRow).join("") : emptyState("◈", "Nothing filed lately", "Rows Clerk files by rule, history, or your approval appear here for two weeks.");
+  } else {
+    head = `<div><h2>Waiting on you</h2><p>${state.reviews.length ? `${state.reviews.length} item${state.reviews.length === 1 ? "" : "s"} across ${groups.length} merchant${groups.length === 1 ? "" : "s"}${withSuggestion ? ` · ${withSuggestion} with a suggestion ready` : ""}. <strong>Apply</strong> files them; <strong>Always</strong> also makes a rule.` : "Clerk files known merchants by itself and asks here about the rest, including charges your phone has seen."}</p></div>
+      ${state.reviews.length ? `<div class="panel-actions"><button class="button ghost small" data-action="review-dismiss-all" data-ids="${escapeHtml(allIds)}">Skip all ${state.reviews.length}</button></div>` : ""}`;
+    body = groups.length
+      ? `<div class="row-head review-row"><span>Merchant</span><span class="align-right">Total</span><span>Category</span><span>Suggestion</span><span></span></div>${groups.map((group) => reviewGroupRow(group)).join("")}`
+      : emptyState("✓", "Nothing is waiting", "Known merchants are filed automatically. A first-time merchant, from the bank or your phone, appears here with the model's suggestion.");
+  }
+  return `<article class="panel review-panel">
+    <header class="panel-head">${head}</header>
+    <div class="toolbar">${filterChips("review-view", state.reviewView, chips)}<div class="spacer actions">${menu}</div></div>
+    <div class="status-list">${body}</div>
+  </article>`;
 }
 
 
 // --------------------------------------------------------------- intelligence
-
-function categoryOptions(categories, selectedId = "", { blank = "" } = {}) {
-  const groups = new Map();
-  for (const category of categories) {
-    const group = category.group_name || "";
-    if (!groups.has(group)) groups.set(group, []);
-    groups.get(group).push(category);
-  }
-  const options = [...groups.entries()].map(([group, items]) => `<optgroup label="${escapeHtml(group)}">${items.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === selectedId ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</optgroup>`).join("");
-  return `${blank ? `<option value="" ${selectedId ? "" : "selected"}>${escapeHtml(blank)}</option>` : ""}${options}`;
-}
 
 function proposalRow(item, categories) {
   const body = item.payload || {};
@@ -616,7 +681,7 @@ function proposalRow(item, categories) {
   const known = categories.some((category) => category.id === body.category_id);
   const descriptors = (evidence.descriptors || []).filter((d) => d && d !== body.merchant_label).slice(0, 2);
   const merchant = body.merchant_label || body.merchant_key || item.merchant_key;
-  const picker = (selectedId, blank) => `<select class="select-inline" data-role="proposal-category" data-id="${escapeHtml(item.id)}" aria-label="Category">${categoryOptions(categories, selectedId, { blank })}</select>`;
+  const picker = (selectedId, blank) => categoryPicker({ role: "proposal-category", id: item.id, selectedId, categories, placeholder: blank || "Choose a category…" });
   let title = merchant;
   let detail = escapeHtml(evidence.reason || "");
   let control = "";
@@ -674,7 +739,7 @@ function ruleRow(item, categories, accounts) {
     <div class="row-title"><strong>${escapeHtml(item.merchant_label || item.merchant_key)}</strong><small>matches “${escapeHtml(item.merchant_key)}”${item.match === "family" ? " and its store variants" : ""} · ${escapeHtml(scope)} · ${escapeHtml(source)}</small></div>
     <div class="row-meta">${item.status === "retired"
       ? `<strong>${escapeHtml(item.category_name || "—")}</strong>`
-      : `<select class="select-inline" data-action="rule-category" data-id="${escapeHtml(item.id)}" title="The category this rule files into">${known ? "" : `<option value="${escapeHtml(item.category_id)}" selected>${escapeHtml(item.category_name || "Missing category")} (gone)</option>`}${categoryOptions(categories, item.category_id)}</select>`}<br /><span>${item.applied_count ? `filed ${item.applied_count} · last ${relativeTime(item.last_applied_at)}` : "not used yet"}${item.disputed_count ? ` · ${item.disputed_count} disputed` : ""}</span></div>
+      : categoryPicker({ role: "rule-category", id: item.id, selectedId: known ? item.category_id : "", categories, placeholder: `${item.category_name || "Missing category"} (gone)` })}<span>${item.applied_count ? `filed ${item.applied_count} · last ${relativeTime(item.last_applied_at)}` : "not used yet"}${item.disputed_count ? ` · ${item.disputed_count} disputed` : ""}</span></div>
     <div class="health-state">${statusChip(status[0], status[1])}</div>
     <div class="row-actions">${actions}</div>
   </article>`;
@@ -691,12 +756,16 @@ function filterRuleRows() {
 // filters, so the page is as long as the list being read rather than the sum
 // of all of them.
 const INTELLIGENCE_TABS = [
+  ["review", "Review"],
   ["proposals", "Proposals"],
   ["rules", "Rules"],
   ["merchants", "Merchants"],
   ["aliases", "Aliases"],
   ["actual", "From Actual"],
 ];
+// Reached from a link rather than the tab bar: the move from Actual's rule
+// table is done once, then only occasionally looked at.
+const QUIET_TABS = new Set(["actual"]);
 const PROPOSAL_KINDS = [
   ["rule", "New rules"],
   ["rule_change", "Changes"],
@@ -711,9 +780,10 @@ function filterChips(action, current, chips) {
 }
 
 function intelligenceTabs(counts) {
-  return `<div class="page-tabs" role="tablist" aria-label="Intelligence">${INTELLIGENCE_TABS.map(([id, label]) => {
+  const tabs = INTELLIGENCE_TABS.filter(([id]) => !QUIET_TABS.has(id) || id === state.intelligenceTab);
+  return `<div class="page-tabs" role="tablist" aria-label="Intelligence">${tabs.map(([id, label]) => {
     const count = counts[id];
-    const badge = count === undefined || count === "" ? "" : `<b class="${id === "proposals" && count ? "attention" : ""}">${escapeHtml(String(count))}</b>`;
+    const badge = count === undefined || count === "" ? "" : `<b class="${(id === "proposals" || id === "review") && count ? "attention" : ""}">${escapeHtml(String(count))}</b>`;
     return `<button type="button" role="tab" aria-selected="${id === state.intelligenceTab}" class="${id === state.intelligenceTab ? "active" : ""}" data-action="intelligence-tab" data-tab="${id}">${label}${badge}</button>`;
   }).join("")}</div>`;
 }
@@ -729,10 +799,14 @@ function intelligenceFormBusy() {
 }
 
 async function renderIntelligence({ poll = false } = {}) {
-  const page = await api("/api/intelligence?include_retired=true");
+  const [page] = await Promise.all([api("/api/intelligence?include_retired=true"), loadReviews()]);
   if (state.route !== "intelligence") return;
   if (poll && intelligenceFormBusy()) return;
-  const fingerprint = JSON.stringify([page.proposals, page.rules, page.merchants, page.aliases, page.categories, page.accounts]);
+  // The poll checks for an open picker before it asks the server, but the
+  // picker can open while the answer is in flight; redrawing then would pull
+  // the menu out from under the pointer.
+  if (document.querySelector(".category-picker.open")) return;
+  const fingerprint = JSON.stringify([page.proposals, page.rules, page.merchants, page.aliases, page.categories, page.accounts, reviewFingerprint()]);
   state.intelligence = page;
   if (poll && fingerprint === state.intelligenceFingerprint) return;
   state.intelligenceFingerprint = fingerprint;
@@ -746,8 +820,9 @@ function drawIntelligence() {
   const proposals = page.proposals || [];
   const rules = page.rules || [];
   const live = rules.filter((rule) => rule.status !== "retired");
-  if (!INTELLIGENCE_TABS.some(([id]) => id === state.intelligenceTab)) state.intelligenceTab = proposals.length ? "proposals" : "rules";
+  if (!INTELLIGENCE_TABS.some(([id]) => id === state.intelligenceTab)) state.intelligenceTab = state.reviews.length || !proposals.length ? "review" : "proposals";
   const counts = {
+    review: state.reviews.length,
     proposals: proposals.length,
     rules: live.length,
     merchants: (page.merchants || []).length,
@@ -756,9 +831,9 @@ function drawIntelligence() {
   };
   const activeElement = document.activeElement;
   const restoreFocus = INTELLIGENCE_SEARCHES.includes(activeElement?.id) ? activeElement.id : "";
-  const panels = { proposals: proposalsPanel, rules: rulesPanel, merchants: merchantsPanel, aliases: aliasesPanel, actual: actualPanel };
+  const panels = { review: reviewPanel, proposals: proposalsPanel, rules: rulesPanel, merchants: merchantsPanel, aliases: aliasesPanel, actual: actualPanel };
   content.innerHTML = `
-    <section class="page-intro"><div><h2>Intelligence</h2><p>Everything Clerk knows about what your transactions mean, and everything it wants to know. A <strong>rule</strong> is your word: it files a merchant before any evidence or model is consulted. Clerk proposes rules from what it has filed consistently, and never makes one on its own.</p></div><div class="actions"><a class="button ghost" href="#review">Review queue</a></div></section>
+    <section class="page-intro"><div><h2>Intelligence</h2><p>How Clerk files your transactions, and what it needs from you. <strong>Review</strong> is what it could not place on its own; a <strong>rule</strong> is your word and files a merchant before anything else is consulted. Clerk proposes rules from what it has filed consistently, and never makes one by itself.</p></div></section>
     ${intelligenceTabs(counts)}
     <div role="tabpanel">${panels[state.intelligenceTab](page)}</div>`;
   if (state.ruleSearch) filterRuleRows();
@@ -777,7 +852,7 @@ function proposalsPanel(page) {
   const kinds = PROPOSAL_KINDS.map(([kind, label]) => [kind, label, proposals.filter((item) => item.kind === kind).length]).filter((chip) => chip[2]);
   if (!kinds.some(([kind]) => kind === state.proposalFilter)) state.proposalFilter = "all";
   const shown = proposals.filter((item) => state.proposalFilter === "all" || item.kind === state.proposalFilter);
-  return `<article class="panel">
+  return `<article class="panel has-pickers">
     <header class="panel-head"><div><h2>Proposals</h2><p>What Clerk wants to know: merchants filed the same way often enough to deserve a rule, rules your corrections in Actual disagree with, rules whose category has left the budget, and names the model believes belong to one shop.</p></div>
       <div class="panel-actions">
         <button class="button ghost small" data-action="propose-from-history" title="Ask for a rule wherever your history has filed a merchant one way, every time, often enough">Propose from history</button>
@@ -804,18 +879,19 @@ function rulesPanel(page) {
   const chips = [["active", "Active", buckets.active.length], ["paused", "Paused", buckets.paused.length], ["retired", "Retired", buckets.retired.length]];
   if (buckets.orphaned.length) chips.push(["orphaned", "Needs a category", buckets.orphaned.length]);
   const empty = {
-    active: ["No rules yet", "Use Always on a review, Make it a rule on a decision, or add one here. Rules Clerk proposes appear under Proposals once a merchant has been filed the same way a few times."],
+    active: ["No rules yet", "Use Always in Review, Make it a rule on a merchant, or add one here. Rules Clerk proposes appear under Proposals once a merchant has been filed the same way a few times."],
     paused: ["Nothing paused", "Pause keeps a rule without applying it."],
     retired: ["Nothing retired", "Retired rules stay here so they can be reinstated."],
     orphaned: ["Every rule has its category", ""],
   }[state.ruleFilter];
-  return `<article class="panel">
-    <header class="panel-head"><div><h2>Rules</h2><p>A merchant is matched on the key its statement name becomes, so one rule covers every store number and processor prefix. Rules apply even when known merchants are set to propose-only.</p></div>
+  return `<article class="panel has-pickers">
+    <header class="panel-head"><div><h2>Rules</h2><p>A merchant is matched on the key its statement name becomes, so one rule covers every store number and processor prefix. Rules apply even when known merchants are set to propose-only. Rules still kept in Actual's own table are <a href="#intelligence-actual" data-action="intelligence-tab" data-tab="actual">listed under From Actual</a>.</p></div>
       <div class="panel-actions"><button class="button ${state.ruleFormOpen ? "ghost" : "secondary"} small" data-action="rule-form-toggle" aria-expanded="${state.ruleFormOpen}" aria-controls="rule-form">${state.ruleFormOpen ? "Close" : "+ Add rule"}</button></div></header>
     <form class="toolbar inline-form" id="rule-form" autocomplete="off" ${state.ruleFormOpen ? "" : "hidden"}>
       <input class="search-input" name="merchant" type="text" placeholder="Merchant, as the statement shows it" required maxlength="200" aria-label="Merchant" />
       <span class="muted" id="rule-key-preview" style="font-size:10px;min-width:120px"></span>
-      <select class="select-inline" name="category_id" required aria-label="Category">${categoryOptions(categories, "", { blank: "Category…" })}</select>
+      <input type="hidden" name="category_id" value="" />
+      ${categoryPicker({ role: "rule-form-category", id: "new-rule", categories, placeholder: "Category…" })}
       <select class="select-inline" name="account_id" aria-label="Account scope"><option value="">Any account</option>${accounts.map((account) => `<option value="${escapeHtml(account.id)}">${escapeHtml(account.name)} only</option>`).join("")}</select>
       <label class="muted" style="font-size:10px;display:flex;gap:6px;align-items:center" title="Also match keys that add a store or city to this one, e.g. “starbucks seattle” for “starbucks”"><input type="checkbox" name="family" /> store variants</label>
       <button class="button primary small" type="submit">Add rule</button>
@@ -879,7 +955,7 @@ function merchantsPanel(page) {
   if (!buckets[state.merchantFilter]) state.merchantFilter = "all";
   const shown = buckets[state.merchantFilter];
   const empty = {
-    all: ["Nothing learned yet", "Clerk records a merchant here when it applies a category or you approve one in Review."],
+    all: ["Nothing learned yet", "Clerk records a merchant here when it applies a category or you approve one under Review."],
     consistent: ["No merchant filed one way", ""],
     split: ["No merchant filed several ways", "Every merchant Clerk knows has gone to one category."],
     unruled: ["Every merchant has a rule", ""],
@@ -1008,26 +1084,24 @@ function chargeLabel(item) {
 }
 
 function categoryChip(item) {
-  if (!item.category_id) return `<span class="status-chip muted" title="No category yet: counted as discretionary until one is known">Uncategorized</span>`;
-  const how = item.category_source === "taught" ? "taught" : item.category_source === "rule" ? "by a rule you set" : `from memory · ${percent(item.category_confidence || 0)}`;
+  if (!item.category_id) {
+    if (item.review?.status === "needs_review") {
+      return `<a class="status-chip warning" href="#intelligence-review" title="Waiting in Review${item.review.suggestion ? `; Clerk suggests ${escapeHtml(item.review.suggestion)}` : ""}. Counts as uncategorized until you choose.">${item.review.suggestion ? `Suggested: ${escapeHtml(item.review.suggestion)}` : "Needs a category"}</a>`;
+    }
+    if (item.review?.status === "skipped") return `<span class="status-chip muted" title="You skipped it; it counts as uncategorized">Skipped</span>`;
+    return `<span class="status-chip muted" title="No category yet: counted as discretionary until one is known">Uncategorized</span>`;
+  }
+  const how = { taught: "you chose it, and made it a rule", approved: "you chose it", rule: "by a rule you set" }[item.category_source] || `from history · ${percent(item.category_confidence || 0)}`;
   return `<span class="status-chip ok" title="${escapeHtml(how)}">${escapeHtml(item.category_name || item.category_id)}</span>`;
 }
 
-function teachControls(item, categories, aliases) {
-  if (item.status !== "open" || !categories.length) return "";
-  const groups = new Map();
-  for (const category of categories) {
-    const group = category.group_name || "";
-    if (!groups.has(group)) groups.set(group, []);
-    groups.get(group).push(category);
-  }
-  const options = [...groups.entries()].map(([group, items]) => `<optgroup label="${escapeHtml(group)}">${items.map((c) => `<option value="${escapeHtml(c.id)}" ${c.id === item.category_id ? "selected" : ""}>${escapeHtml(c.name)}</option>`).join("")}</optgroup>`).join("");
+function aliasControl(item, aliases) {
+  if (item.status !== "open") return "";
   const alias = aliases.find((a) => a.alias_key === item.merchant_key);
-  return `<select class="select-inline" data-action="anticipated-teach-category" data-id="${escapeHtml(item.id)}" title="Always file this merchant here: a rule is made for it, for the bank's row when it lands, and for the next notification"><option value="" ${item.category_id ? "" : "selected"}>Always file as…</option>${options}</select>
-    <button class="button ghost small" data-action="anticipated-teach-alias" data-id="${escapeHtml(item.id)}" data-merchant="${escapeHtml(item.merchant || "")}" title="${alias ? `Posts as ${escapeHtml(alias.merchant_label || alias.merchant_key)}` : "Name the payee the bank posts this merchant as"}">${alias ? `Posts as ${escapeHtml((alias.merchant_label || alias.merchant_key).slice(0, 18))}` : "Posts as…"}</button>`;
+  return `<button class="button ghost small" data-action="anticipated-teach-alias" data-id="${escapeHtml(item.id)}" data-merchant="${escapeHtml(item.merchant || "")}" title="${alias ? `Posts as ${escapeHtml(alias.merchant_label || alias.merchant_key)}` : "Name the payee the bank posts this merchant as"}">${alias ? `Posts as ${escapeHtml((alias.merchant_label || alias.merchant_key).slice(0, 18))}` : "Posts as…"}</button>`;
 }
 
-function anticipatedChargeRow(item, { sources = [], categories = [], aliases = [] } = {}) {
+function anticipatedChargeRow(item, { sources = [], aliases = null } = {}) {
   const [status] = CHARGE_STATUS[item.status] || ["muted"];
   const source = sources.find((s) => s.id === item.source_id);
   const where = item.account_name || source?.account_name || "";
@@ -1038,6 +1112,9 @@ function anticipatedChargeRow(item, { sources = [], categories = [], aliases = [
       : item.status === "expired"
         ? "Nothing matching arrived, so it stopped counting"
         : item.status === "dismissed" ? "Dismissed by hand" : escapeHtml((item.text || "").slice(0, 110));
+  const review = item.status === "open" && item.review?.status === "needs_review"
+    ? `<a class="button secondary small" href="#intelligence-review">Categorize</a>`
+    : "";
   const actions = item.status === "open"
     ? `<button class="button ghost small" data-action="anticipated-dismiss" data-id="${escapeHtml(item.id)}" title="Stop counting this charge now">Dismiss</button>`
     : item.status === "matched" || item.status === "dismissed" || item.status === "expired"
@@ -1048,7 +1125,7 @@ function anticipatedChargeRow(item, { sources = [], categories = [], aliases = [
     <div class="row-title"><strong>${escapeHtml(item.merchant || item.title || "Charge")}</strong><small>${escapeHtml([[source?.app_label, where].filter(Boolean).join(" → "), `seen ${relativeTime(item.noticed_at)}`].filter(Boolean).join(" · "))}<br />${outcome}</small></div>
     <span class="row-amount money ${item.amount_cents < 0 ? "" : "positive"}">${money(item.amount_cents, { sign: true })}</span>
     <div class="health-state">${item.kind === "charge" ? categoryChip(item) : ""}${statusChip(status, chargeLabel(item))}</div>
-    <div class="row-actions">${teachControls(item, categories, aliases)}${actions}</div>
+    <div class="row-actions">${review}${aliases ? aliasControl(item, aliases) : ""}${actions}</div>
   </article>`;
 }
 
@@ -1058,7 +1135,7 @@ function anticipatedOverviewPanel(open) {
   const total = counted.reduce((sum, item) => sum - item.amount_cents, 0);
   return `<article class="panel anticipated-panel">
     <header class="panel-head"><div><h2>Anticipated charges</h2><p>${counted.length} charge${counted.length === 1 ? "" : "s"} your phone has seen, ${money(total)} counted as spent until the bank posts ${counted.length === 1 ? "it" : "them"}. Nothing here is written into Actual.</p></div><a href="#accounts" class="panel-link">Phone sources</a></header>
-    <div class="status-list">${open.map((item) => anticipatedChargeRow(item, { categories: overview().categories || [] })).join("")}</div>
+    <div class="status-list">${open.map((item) => anticipatedChargeRow(item)).join("")}</div>
   </article>`;
 }
 
@@ -1080,7 +1157,6 @@ function phonePanel(phone) {
   const open = phone.open || [];
   const recent = (phone.recent || []).slice(0, 8);
   const accounts = phone.accounts || [];
-  const categories = phone.categories || [];
   const aliases = phone.aliases || [];
   const intro = phone.enabled
     ? `Card-app notifications forwarded by the Actual Clerk phone app become anticipated charges: counted as spent the moment your card is charged, never written into Actual, and settled when the bank's own row arrives (within ${phone.match_window_days} days) or dropped after ${phone.expire_days}.${phone.token_configured ? "" : " No device token is set, so any device that can reach Clerk may forward notifications; set one under Settings → Phone app."}`
@@ -1090,7 +1166,7 @@ function phonePanel(phone) {
     <div class="status-list">${sources.length
       ? sources.map((source) => sourceRow(source, accounts)).join("")
       : emptyState("📱", "No phone sources yet", "Install the Actual Clerk phone app, point it at this server, and use Register a source to pick the card app's notification.")}</div>
-    ${open.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Waiting for the bank</h3><p>Counted as spent now, against the provisional category when one is known (from your history, or taught here) and against free money otherwise. Each settles against the matching transaction when it is imported.</p></div></header><div class="status-list">${open.map((item) => anticipatedChargeRow(item, { sources, categories, aliases })).join("")}</div>` : ""}
+    ${open.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Waiting for the bank</h3><p>Counted as spent now: against its category when a rule, your history, or your answer in Review gives one, and as uncategorized otherwise. Each settles against the matching transaction when it is imported, and that row is filed the same way.</p></div></header><div class="status-list">${open.map((item) => anticipatedChargeRow(item, { sources, aliases })).join("")}</div>` : ""}
     ${recent.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Recently settled</h3><p>What the last notifications became.</p></div></header><div class="status-list">${recent.map((item) => anticipatedChargeRow(item, { sources })).join("")}</div>` : ""}
     ${aliases.length ? `<p class="muted" style="margin:12px 20px;font-size:11px">${aliases.length} merchant alias${aliases.length === 1 ? "" : "es"} known · <a href="#intelligence">manage them under Intelligence</a></p>` : ""}
   </article>`;
@@ -1266,12 +1342,18 @@ async function showDecision(id) {
     const memory = rationale.memory;
     const evidence = rationale.evidence || [];
     const actualUrl = (state.data?.actual_url || "").replace(/\/$/, "");
-    openDrawer(`${drawerHeader(escapeHtml(item.account_name || "Transaction"), item.payee_name || item.merchant_key || "Transaction")}<div class="drawer-body">
+    const phone = rationale.phone || null;
+    const phoneSection = item.anticipated_id
+      ? `<section class="detail-section"><h3>Seen by your phone</h3><div class="change-list"><div class="change"><i>📱</i><div><strong>${escapeHtml(phone?.title || "Notification")}</strong><small>“${escapeHtml(phone?.text || "")}”</small><br /><small>Nothing is written to Actual yet. It counts ${item.status === "applied" ? `against ${escapeHtml(item.category_name)}` : "as uncategorized"} until the bank posts it; then that row is filed the same way.${rationale.settled_payee ? ` It posted as ${escapeHtml(rationale.settled_payee)}.` : ""}</small></div></div></div></section>`
+      : rationale.from_phone
+        ? `<section class="detail-section"><h3>From your phone</h3><div class="change-list"><div class="change"><i>📱</i><div><strong>${item.source === "person" ? "You categorized this when your phone saw the charge" : "Your phone saw this charge first"}</strong><small>${item.source === "person" ? "Clerk filed the bank's row the same way when it arrived." : "The question was carried over from the phone charge when the bank posted it."}</small></div></div></div></section>`
+        : "";
+    openDrawer(`${drawerHeader(escapeHtml(item.anticipated_id ? "Phone charge" : item.account_name || "Transaction"), item.payee_name || item.merchant_key || "Transaction")}<div class="drawer-body">
       <section class="detail-section"><div class="detail-grid">
         <div class="detail-stat"><span>Amount</span><strong class="money">${money(item.amount_cents)}</strong></div>
         <div class="detail-stat"><span>Date</span><strong>${escapeHtml(item.transaction_date)}</strong></div>
-        <div class="detail-stat"><span>Outcome</span><strong>${escapeHtml(titleCase(item.status))}</strong></div>
-        <div class="detail-stat"><span>Decided by</span><strong>${escapeHtml(titleCase(item.source))}</strong></div>
+        <div class="detail-stat"><span>Outcome</span><strong>${escapeHtml(DECISION_STATUS_LABEL[item.status] || titleCase(item.status))}</strong></div>
+        <div class="detail-stat"><span>Decided by</span><strong>${escapeHtml(sourceLabel(item.source))}</strong></div>
         <div class="detail-stat"><span>Confidence</span><strong>${percent(item.confidence)}</strong></div>
         ${rationale.approval_required
           ? `<div class="detail-stat"><span>Approval required</span><strong>Yes</strong></div>`
@@ -1281,12 +1363,14 @@ async function showDecision(id) {
         <div class="change"><i>${item.category_id ? "✓" : "?"}</i><div><strong>${escapeHtml(item.category_name || item.proposed_category || "No category proposed")}</strong><small>${escapeHtml(rationale.reason || (memory ? "Chosen from this budget's own filing history." : "No explanation was recorded."))}</small></div></div>
         ${(item.tags || []).map((tag) => `<div class="change"><i>#</i><div><strong>#${escapeHtml(tag)}</strong><small>Written into the transaction notes in Actual.</small></div></div>`).join("")}
       </div></section>
+      ${phoneSection}
       <div class="resolution-actions detail-section">
-        ${actualUrl ? `<a class="button ghost" href="${escapeHtml(actualUrl)}" target="_blank" rel="noreferrer">Open Actual ↗</a>` : ""}
+        ${actualUrl && !item.anticipated_id ? `<a class="button ghost" href="${escapeHtml(actualUrl)}" target="_blank" rel="noreferrer">Open Actual ↗</a>` : ""}
         ${item.merchant_key ? `<button class="button ghost" data-action="forget-merchant" data-key="${escapeHtml(item.merchant_key)}">Forget this merchant</button>` : ""}
-        ${item.merchant_key && item.category_id && item.status !== "needs_review" && item.source !== "rule" ? `<button class="button secondary" data-action="rule-make" data-key="${escapeHtml(item.merchant_key)}" data-label="${escapeHtml(item.payee_name || "")}" data-category-id="${escapeHtml(item.category_id)}" title="Always file this merchant as ${escapeHtml(item.category_name)}">Make it a rule</button>` : ""}
+        ${item.merchant_key && item.category_id && ["applied", "approved"].includes(item.status) && item.source !== "rule" ? `<button class="button secondary" data-action="rule-make" data-key="${escapeHtml(item.merchant_key)}" data-label="${escapeHtml(item.payee_name || "")}" data-category-id="${escapeHtml(item.category_id)}" title="Always file this merchant as ${escapeHtml(item.category_name)}">Make it a rule</button>` : ""}
         ${item.status === "needs_review" && item.merchant_key && item.category_id ? `<button class="button secondary" data-action="review-accept" data-always="1" data-id="${escapeHtml(item.id)}" title="Apply the proposal and make it a rule">Apply and always</button>` : ""}
-        ${item.status === "needs_review" ? `<button class="button primary" data-action="review-accept" data-id="${escapeHtml(item.id)}">Apply proposal</button>` : ""}
+        ${item.status === "needs_review" && item.category_id ? `<button class="button primary" data-action="review-accept" data-id="${escapeHtml(item.id)}">Apply suggestion</button>` : ""}
+        ${item.status === "skipped" ? `<button class="button secondary" data-action="review-restore" data-id="${escapeHtml(item.id)}">Ask me again</button>` : ""}
       </div>
       ${item.observed && item.observed !== "standing" ? `<section class="detail-section"><h3>Seen in Actual afterwards</h3><div class="change-list"><div class="change"><i>${item.observed === "corrected" ? "✎" : "×"}</i><div><strong>${item.observed === "corrected" ? `Moved by hand to ${escapeHtml(item.observed_category_name || item.observed_category_id)}` : item.observed === "cleared" ? "Category cleared by hand" : "The transaction is gone or became a transfer"}</strong><small>Noticed ${escapeHtml(relativeTime(item.observed_at))}.${item.observed === "corrected" ? " Counted as a correction in memory" + (item.source === "rule" ? ", and as a dispute against the rule." : ".") : ""}</small></div></div></div></section>` : ""}
       ${rationale.rule ? `<section class="detail-section"><h3>Rule</h3><div class="change-list"><div class="change"><i>⚡</i><div><strong>Filed by a rule you set${rationale.rule.account_id ? " for this account" : ""}</strong><small>Matches “${escapeHtml(rationale.matched_key || rationale.rule.merchant_key)}”${rationale.rule.match === "family" ? " and its store variants" : ""}${rationale.alias ? `, reached through the alias “${escapeHtml(rationale.alias)}”` : ""}. <a href="#intelligence">Manage rules</a></small></div></div></div></section>` : ""}
@@ -1791,13 +1875,15 @@ async function renderSettings() {
           </div>
         </div></section>
 
-        <section class="panel settings-section" id="settings-notifications"><header class="panel-head"><div><h3>Notifications</h3><p class="section-description">ntfy delivers the morning digest and connection alerts.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="notifications">Send test</button></header><div class="panel-body">
+        <section class="panel settings-section" id="settings-notifications"><header class="panel-head"><div><h3>Notifications</h3><p class="section-description">ntfy delivers the morning digest, connection alerts, and a note when something needs a category.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="notifications">Send test</button></header><div class="panel-body">
           ${settingToggle("notifications_enabled", "Enable ntfy notifications", "Without this, Clerk still builds the digest and shows it on the overview.", s.notifications_enabled)}
           ${settingToggle("health_alerts_enabled", "Alert when a bank connection changes", "One message when a connection breaks and one when it recovers, never a repeat every hour.", s.health_alerts_enabled)}
+          ${settingToggle("review_alerts_enabled", "Alert when something needs a category", "Each phone charge Clerk cannot place, as it arrives, and one message per scheduled filing run for bank rows. Nothing for runs you start yourself.", s.review_alerts_enabled)}
           <div class="form-grid">
             ${settingInput("ntfy_url", "ntfy server URL", s.ntfy_url, { full: true, note: "Use https://ntfy.sh unless you run your own." })}
             ${settingInput("ntfy_topic", "Topic", s.ntfy_topic, { full: true, note: "Pick something hard to guess: anyone who knows the topic can read it." })}
             ${settingInput("ntfy_token", "Access token (optional)", "", { type: "password", configured: s.ntfy_token_configured, full: true })}
+            ${settingInput("clerk_public_url", "Clerk's address (optional)", s.clerk_public_url, { full: true, note: "Where your phone reaches this page, e.g. https://clerk.example.com. Alerts then open the Review tab when tapped." })}
           </div>
         </div></section>
 
@@ -1840,10 +1926,11 @@ async function resolveReviewGroup(idList, action, categoryId, always = false) {
   try {
     const body = { ids, action, always, ...(categoryId ? { category_id: categoryId } : {}) };
     const result = await api("/api/reviews/resolve", { method: "POST", body: JSON.stringify(body) });
-    if (action === "dismiss") toast("Skipped", `${result.resolved} transaction(s) will not be asked about again.`);
-    else if (!result.resolved) toast("Nothing to change", "Those transactions were already resolved or removed in Actual.");
-    else if (result.rules) toast("Applied, and now a rule", `${result.resolved} transaction(s) categorized. This merchant is filed here from now on; the rule lives under Intelligence.`);
-    else toast("Applied in Actual", `${result.resolved} transaction(s) categorized, and Clerk will remember this merchant.`);
+    if (action === "dismiss") toast("Skipped", `${result.resolved} item(s) left uncategorized. Clerk stops asking; they wait under Skipped.`);
+    else if (action === "restore") toast("Back in Review", `${result.resolved} item(s) are waiting on you again.`);
+    else if (!result.resolved) toast("Nothing to change", "Those items were already resolved or removed in Actual.");
+    else if (result.rules) toast("Applied, and now a rule", `${result.resolved} item(s) categorized. This merchant is filed here from now on; the rule is under Rules.`);
+    else toast("Applied", `${result.resolved} item(s) categorized, and Clerk will remember this merchant.`);
     closeDrawer();
     await renderRoute({ quiet: true });
     return true;
@@ -1854,13 +1941,48 @@ async function resolveReview(id, action, categoryId, always = false) {
   try {
     const body = { action, always, ...(categoryId ? { category_id: categoryId } : {}) };
     const result = await api(`/api/reviews/${id}/resolve`, { method: "POST", body: JSON.stringify(body) });
-    if (result.status === "skipped") toast("Nothing to change", "The transaction was removed in Actual.");
-    else if (action === "dismiss") toast("Skipped", "Clerk will not ask about this transaction again.");
-    else if (result.rule) toast("Applied, and now a rule", `${result.category_name || "Category"} saved. This merchant is filed here from now on; the rule lives under Intelligence.`);
-    else toast("Applied in Actual", `${result.category_name || "Category"} saved, and Clerk will remember it.`);
+    if (result.status === "skipped" && action !== "dismiss") toast("Nothing to change", "The transaction was removed in Actual.");
+    else if (action === "dismiss") toast("Skipped", "Left uncategorized; it waits under Skipped.");
+    else if (action === "restore") toast("Back in Review", "It is waiting on you again.");
+    else if (result.rule) toast("Applied, and now a rule", `${result.category_name || "Category"} saved. This merchant is filed here from now on; the rule is under Rules.`);
+    else toast("Applied", `${result.category_name || "Category"} saved, and Clerk will remember it.`);
     closeDrawer();
     await renderRoute({ quiet: true });
   } catch (error) { toast("Could not apply", error.message, "error"); }
+}
+
+// What a pick in a category picker does, by the picker's role.
+async function categoryPicked(picker, option) {
+  const categoryId = option.dataset.categoryId;
+  const role = picker.dataset.role;
+  if (role === "review-category") {
+    state.reviewChoices.set(picker.dataset.id, categoryId);
+    const row = picker.closest(".review-row");
+    row?.classList.toggle("changed", categoryId !== picker.dataset.suggestionId);
+    row?.querySelectorAll('[data-action="review-accept-group"]').forEach((button) => { button.disabled = false; });
+  }
+  if (role === "proposal-category") {
+    const accept = picker.closest("[data-proposal-id]")?.querySelector('[data-action="proposal-accept"]');
+    if (accept) accept.disabled = false;
+  }
+  if (role === "rule-form-category") {
+    const input = picker.closest("form")?.querySelector('[name="category_id"]');
+    if (input) input.value = categoryId;
+  }
+  if (role === "rule-category") {
+    try {
+      await api(`/api/intelligence/rules/${encodeURIComponent(picker.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ category_id: categoryId }) });
+      toast("Rule changed", `Filed as ${option.dataset.categoryName} from the next run on.`);
+      await renderIntelligence();
+    } catch (error) { toast("Could not change the rule", error.message, "error"); await renderIntelligence(); }
+  }
+  if (role === "recent-category") {
+    try {
+      const result = await api(`/api/decisions/${encodeURIComponent(picker.dataset.id)}/change`, { method: "POST", body: JSON.stringify({ category_id: categoryId }) });
+      if (result.status === "changed") toast("Moved in Actual", `Now ${result.category_name}. Clerk counts it as a correction.`);
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not move it", error.message, "error"); await renderRoute({ quiet: true }); }
+  }
 }
 
 function closeCategoryPickers(except = null) {
@@ -1890,6 +2012,8 @@ document.addEventListener("click", async (event) => {
   if (event.target.closest("[data-stop]")) { event.stopPropagation(); return; }
   const categoryPickerRoot = event.target.closest(".category-picker");
   if (!categoryPickerRoot) closeCategoryPickers();
+  const openMenu = event.target.closest("details.menu");
+  document.querySelectorAll("details.menu[open]").forEach((menu) => { if (menu !== openMenu) menu.removeAttribute("open"); });
   const target = event.target.closest("[data-action]");
   if (!target) return;
   const action = target.dataset.action;
@@ -1925,17 +2049,14 @@ document.addEventListener("click", async (event) => {
     event.stopPropagation();
     const picker = target.closest(".category-picker");
     picker.dataset.value = target.dataset.categoryId;
-    state.reviewChoices.set(picker.dataset.id, target.dataset.categoryId);
     picker.querySelector('[data-role="category-picker-label"]').textContent = `${target.dataset.groupName} · ${target.dataset.categoryName}`;
     picker.querySelectorAll(".category-picker-option").forEach((option) => {
       option.classList.toggle("selected", option === target);
       option.setAttribute("aria-selected", String(option === target));
     });
-    const row = picker.closest(".review-row");
-    row.classList.toggle("changed", target.dataset.categoryId !== picker.dataset.suggestionId);
-    row.querySelectorAll('[data-action="review-accept-group"]').forEach((button) => { button.disabled = false; });
     closeCategoryPickers();
     picker.querySelector('[data-action="category-picker-toggle"]').focus();
+    await categoryPicked(picker, target);
   }
   if (action === "sync-now") enqueue("sync", "Sync");
   if (action === "sync-and-recheck") {
@@ -1943,12 +2064,18 @@ document.addEventListener("click", async (event) => {
     enqueue("sync", "Bank sync and connection check");
   }
   if (action === "retry-reviews") {
-    if (!window.confirm(`Ask Clerk to classify the ${state.reviews.length} waiting transaction(s) again?\n\nModel suggestions will stay in Review for approval. Only reliable history for an established merchant can apply automatically.`)) return;
-    enqueue("categorize", "Review retry", { reviews: true });
+    target.closest("details")?.removeAttribute("open");
+    if (!window.confirm(`Ask the model again about the ${state.reviews.length} waiting item(s)?\n\nNew suggestions still wait here for you. Only a rule or reliable history files anything by itself.`)) return;
+    enqueue("categorize", "Asking again", { reviews: true });
   }
   if (action === "catch-up") {
-    if (!window.confirm("Find uncategorized transactions across the whole retained history, including items older than the normal filing window?\n\nThis is mainly a first-run or occasional catch-up. Existing Review items stay unchanged; use Retry review queue for those.")) return;
+    target.closest("details")?.removeAttribute("open");
+    if (!window.confirm("Look for uncategorized transactions across the whole retained history, beyond the normal filing window?\n\nMainly for a first run. What is already waiting here stays as it is.")) return;
     enqueue("categorize", "History catch-up", { full: true });
+  }
+  if (action === "review-view") {
+    state.reviewView = target.dataset.filter;
+    await renderIntelligence();
   }
   if (action === "send-digest") {
     event.preventDefault();
@@ -2088,14 +2215,9 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "anticipated-teach-alias") {
     event.stopPropagation();
-    const payee = window.prompt(`What payee does the bank post "${target.dataset.merchant || "this merchant"}" as? Type it as it appears in Actual.`);
-    if (!payee || !payee.trim()) return;
-    try {
-      await api(`/api/anticipated/charges/${encodeURIComponent(target.dataset.id)}/alias`, { method: "POST", body: JSON.stringify({ payee: payee.trim() }) });
-      toast("Alias taught", "The merchant's history and memory now apply to this notification.");
-      await renderRoute({ quiet: true });
-    } catch (error) { toast("Could not teach the alias", error.message, "error"); }
+    openAliasDialog({ name: target.dataset.merchant || "this merchant", chargeId: target.dataset.id });
   }
+  if (action === "close-alias") aliasDialog.close();
   if (action === "anticipated-alias-delete") {
     event.stopPropagation();
     try {
@@ -2125,6 +2247,8 @@ document.addEventListener("click", async (event) => {
     await resolveReview(target.dataset.id, chosen ? "recategorize" : "accept", chosen || undefined, target.dataset.always === "1");
   }
   if (action === "review-dismiss") { event.stopPropagation(); await resolveReview(target.dataset.id, "dismiss"); }
+  if (action === "review-restore") { event.stopPropagation(); await resolveReview(target.dataset.id, "restore"); }
+  if (action === "review-restore-group") { event.stopPropagation(); await resolveReviewGroup(target.dataset.ids, "restore"); }
   if (action === "review-accept-group") {
     event.stopPropagation();
     const key = target.dataset.key;
@@ -2142,7 +2266,7 @@ document.addEventListener("click", async (event) => {
   if (action === "review-dismiss-all") {
     event.stopPropagation();
     const ids = (target.dataset.ids || "").split(",").filter(Boolean);
-    if (!window.confirm(`Skip all ${ids.length} waiting transaction(s)?\n\nThey keep whatever category they already have in Actual, and Clerk stops asking about them.`)) return;
+    if (!window.confirm(`Skip all ${ids.length} waiting item(s)?\n\nThey stay uncategorized and Clerk stops asking; each can be brought back from Skipped.`)) return;
     await resolveReviewGroup(target.dataset.ids, "dismiss");
   }
 
@@ -2150,7 +2274,7 @@ document.addEventListener("click", async (event) => {
     event.stopPropagation();
     const accept = action === "proposal-accept";
     const picker = document.querySelector(`[data-role="proposal-category"][data-id="${CSS.escape(target.dataset.id)}"]`);
-    const chosen = picker?.value || "";
+    const chosen = picker?.dataset.value || "";
     if (accept && picker && !chosen) return toast("Choose a category first", "", "error");
     target.disabled = true;
     try {
@@ -2207,13 +2331,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "alias-teach") {
     event.stopPropagation();
-    const payee = window.prompt(`What payee does the bank post "${target.dataset.alias}" as? Type it as it appears in Actual.`);
-    if (!payee || !payee.trim()) return;
-    try {
-      const result = await api("/api/intelligence/aliases", { method: "POST", body: JSON.stringify({ alias: target.dataset.alias, merchant: payee.trim() }) });
-      toast("Alias taught", `“${result.alias.alias_key}” now resolves to “${result.alias.merchant_key}”.`);
-      await renderRoute({ quiet: true });
-    } catch (error) { toast("Could not teach the alias", error.message, "error"); }
+    openAliasDialog({ name: target.dataset.alias });
   }
   if (action === "alias-delete") {
     event.stopPropagation();
@@ -2237,7 +2355,9 @@ document.addEventListener("click", async (event) => {
     } catch (error) { toast("Could not decline", error.message, "error"); }
   }
   if (action === "intelligence-tab") {
+    event.preventDefault();
     state.intelligenceTab = target.dataset.tab;
+    if (target.dataset.tab === "actual" && !state.actualRules && !state.actualRulesError) await readActualRules();
     // A tab is a place on the page, so the address follows it without the
     // hashchange round trip that would redraw from a blank loader.
     history.replaceState(null, "", `#intelligence-${target.dataset.tab}`);
@@ -2305,6 +2425,36 @@ document.addEventListener("keydown", (event) => {
 document.querySelector("#mobile-menu").addEventListener("click", () => document.querySelector(".sidebar").classList.toggle("mobile-open"));
 document.querySelectorAll(".nav-list a").forEach((item) => item.addEventListener("click", () => document.querySelector(".sidebar").classList.remove("mobile-open")));
 
+// "Posts as…": the payee the bank uses for a shop, picked from the payees
+// Actual already has (typing a new one is fine too).
+function openAliasDialog({ name, chargeId = "" }) {
+  aliasDialog.dataset.name = name;
+  aliasDialog.dataset.chargeId = chargeId;
+  aliasDialog.querySelector("[data-role=alias-name]").textContent = name;
+  document.querySelector("#payee-options").innerHTML = (overview().payees || []).map((payee) => `<option value="${escapeHtml(payee)}"></option>`).join("");
+  aliasForm.reset();
+  aliasDialog.showModal();
+  aliasForm.querySelector('[name="payee"]').focus();
+}
+
+aliasForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const payee = String(new FormData(aliasForm).get("payee") || "").trim();
+  if (!payee) return;
+  const button = aliasForm.querySelector('[type="submit"]');
+  button.disabled = true;
+  try {
+    const chargeId = aliasDialog.dataset.chargeId;
+    const result = chargeId
+      ? await api(`/api/anticipated/charges/${encodeURIComponent(chargeId)}/alias`, { method: "POST", body: JSON.stringify({ payee }) })
+      : await api("/api/intelligence/aliases", { method: "POST", body: JSON.stringify({ alias: aliasDialog.dataset.name, merchant: payee }) });
+    toast("Alias taught", `“${result.alias.alias_key}” now resolves to “${result.alias.merchant_key}”, so its rules and history apply.`);
+    aliasDialog.close();
+    await renderRoute({ quiet: true });
+  } catch (error) { toast("Could not teach the alias", error.message, "error"); }
+  finally { button.disabled = false; }
+});
+
 claimForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const token = String(new FormData(claimForm).get("setup_token") || "").trim();
@@ -2355,6 +2505,7 @@ content.addEventListener("submit", async (event) => {
   event.preventDefault();
   const form = event.target;
   const data = new FormData(form);
+  if (!data.get("category_id")) return toast("Choose a category first", "", "error");
   const button = form.querySelector('[type="submit"]');
   button.disabled = true;
   try {
@@ -2381,7 +2532,7 @@ content.addEventListener("submit", async (event) => {
   const locked = new Set(state.settings?.environment_overrides || []);
   const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "memory_dispute_threshold", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "anticipated_match_window_days", "anticipated_expire_days"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "ai_alias_questions", "rule_promotion_enabled", "memory_learn_from_actual", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "ai_alias_questions", "rule_promotion_enabled", "memory_learn_from_actual", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "review_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;
@@ -2432,42 +2583,7 @@ content.addEventListener("change", async (event) => {
   }
 });
 
-content.addEventListener("change", (event) => {
-  const picker = event.target.closest('[data-role="proposal-category"]');
-  if (!picker) return;
-  const row = picker.closest("[data-proposal-id]");
-  const accept = row?.querySelector('[data-action="proposal-accept"]');
-  if (accept) accept.disabled = !picker.value;
-});
-
 content.addEventListener("change", async (event) => {
-  const select = event.target.closest('[data-action="rule-category"]');
-  if (!select) return;
-  select.disabled = true;
-  try {
-    await api(`/api/intelligence/rules/${encodeURIComponent(select.dataset.id)}`, { method: "PATCH", body: JSON.stringify({ category_id: select.value }) });
-    toast("Rule changed", "The next filing run uses the new category.");
-    await renderIntelligence();
-  } catch (error) {
-    toast("Could not change the rule", error.message, "error");
-    select.disabled = false;
-  }
-});
-
-content.addEventListener("change", async (event) => {
-  const teach = event.target.closest('[data-action="anticipated-teach-category"]');
-  if (teach) {
-    teach.disabled = true;
-    try {
-      await api(`/api/anticipated/charges/${encodeURIComponent(teach.dataset.id)}/category`, { method: "POST", body: JSON.stringify({ category_id: teach.value }) });
-      toast(teach.value ? "Rule made" : "Category cleared", teach.value ? "Counted against that category now, and this merchant is always filed there from now on." : "The rule is retired; rules and memory decide again.");
-      await renderRoute({ quiet: true });
-    } catch (error) {
-      toast("Could not teach the category", error.message, "error");
-      teach.disabled = false;
-    }
-    return;
-  }
   const control = event.target.closest('[data-action="anticipated-source-account"], [data-action="anticipated-source-toggle"]');
   if (!control) return;
   const body = control.dataset.action === "anticipated-source-toggle"
@@ -2528,6 +2644,11 @@ content.addEventListener("change", (event) => {
 async function navigateFromHash() {
   const anchor = location.hash.slice(1);
   const requested = anchor.split("-")[0] || "overview";
+  // Review used to be its own page; its links now open the tab.
+  if (requested === "review") {
+    history.replaceState(null, "", "#intelligence-review");
+    return navigateFromHash();
+  }
   state.route = pageMeta[requested] ? requested : "overview";
   if (state.route === "intelligence") {
     const tab = anchor.slice("intelligence-".length);

@@ -41,7 +41,9 @@ class BulkResolveRequest(BaseModel):
     """Resolve a whole merchant at once, which is how a backlog is actually cleared."""
 
     ids: list[str] = Field(min_length=1, max_length=2000)
-    action: Literal["accept", "dismiss", "recategorize"]
+    # dismiss is Skip: leave it uncategorized and stop asking. restore brings
+    # a skipped one back into the queue.
+    action: Literal["accept", "dismiss", "recategorize", "restore"]
     category_id: str | None = None
     # Also declare a rule: from now on this merchant is filed here without
     # asking, whatever the evidence says.
@@ -59,7 +61,7 @@ class ClaimSetupTokenRequest(BaseModel):
 
 
 class ResolveDecisionRequest(BaseModel):
-    action: Literal["accept", "dismiss", "recategorize"]
+    action: Literal["accept", "dismiss", "recategorize", "restore"]
     category_id: str | None = None
     always: bool = False
 
@@ -68,6 +70,12 @@ class ResolveDecisionRequest(BaseModel):
         if self.action == "recategorize" and not self.category_id:
             raise ValueError("a category is required when recategorizing")
         return self
+
+
+class ChangeFilingRequest(BaseModel):
+    """Move a row Clerk filed to the category it should have gone to."""
+
+    category_id: str = Field(min_length=1, max_length=100)
 
 
 class DeclineProposalsRequest(BaseModel):
@@ -429,11 +437,6 @@ class ForwardNotificationRequest(BaseModel):
         if not self.title and not self.text:
             raise ValueError("a notification needs a title or a text")
         return self
-
-
-class TeachCategoryRequest(BaseModel):
-    # Blank clears a taught category and lets memory decide again.
-    category_id: str = Field(default="", max_length=100)
 
 
 class TeachAliasRequest(BaseModel):

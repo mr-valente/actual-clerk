@@ -61,7 +61,7 @@ A refund settles against the month that paid for the purchase. Return something 
 
 ### Counts a card charge the moment it happens
 
-Some card feeds are slow by design: a purchase made this morning reaches Actual a day or three later, and some issuers never expose it as pending at all. The card's own phone app, though, announces the charge instantly. A small Android companion app forwards those notifications to Clerk, which counts each as an **anticipated charge**: spent as far as the budget is concerned, held in Clerk's own ledger, and never written into Actual. A merchant your history already knows is categorized on the spot from the same memory the filing cascade uses, so an anticipated bill draws on its own budget rather than on free money; an unknown one is discretionary until you teach it, and the teaching is remembered. When the bank's transaction arrives through the ordinary feed, Clerk settles the anticipation against it and the real row takes over; one that never posts stops counting after two weeks. [How it works and how to build the app](docs/anticipated-charges.md).
+Some card feeds are slow by design: a purchase made this morning reaches Actual a day or three later, and some issuers never expose it as pending at all. The card's own phone app, though, announces the charge instantly. A small Android companion app forwards those notifications to Clerk, which counts each as an **anticipated charge**: spent as far as the budget is concerned, held in Clerk's own ledger, and never written into Actual. Each charge goes through the same filing cascade as a bank row: a merchant a rule or your history already knows is categorized on the spot, so an anticipated bill draws on its own budget rather than on free money; an unknown one is asked about in Review with the model's suggestion (and an ntfy message), and counts as uncategorized until you answer. Whatever you decide carries over to the bank's row, so each purchase is decided once. When the bank's transaction arrives through the ordinary feed, Clerk settles the anticipation against it and the real row takes over; one that never posts stops counting after two weeks. [How it works and how to build the app](docs/anticipated-charges.md).
 
 ### Finds the commitments you forgot about
 
@@ -129,13 +129,12 @@ context rather than an active limitation.
 
 ### 5. Catch up on your existing transactions
 
-A new install only files the last 45 days. To work through everything already in your budget, open **Review → Catch up on all history**. Clerk goes back over your whole retained history (`CLERK_HISTORY_LOOKBACK_DAYS`, two years by default) and asks the local model once per unfamiliar merchant — not once per transaction — so even a long history is a bounded number of calls. Watch it on the Activity page; the run is labelled *full history*.
+A new install only files the last 45 days. To work through everything already in your budget, open **Intelligence → Review**, and from its **⋯** menu choose **Look through older history**. Clerk goes back over your whole retained history (`CLERK_HISTORY_LOOKBACK_DAYS`, two years by default) and asks the local model once per unfamiliar merchant — not once per transaction — so even a long history is a bounded number of calls. Watch it on the Activity page; the run is labelled *full history*.
 
 Anything Clerk is not confident about lands in the review queue rather than in your budget.
 
-The two manual actions have separate scopes. **Retry review queue** asks Clerk to
-reconsider only the transactions already waiting, which is useful after changing
-the model, settings, or classification code. **Catch up older history** searches
+The two manual actions in that menu have separate scopes. **Ask the model again** reconsiders only the items already waiting, which is useful after changing
+the model, settings, or classification code. **Look through older history** searches
 for other uncategorized transactions beyond the normal 45-day filing window.
 Scheduled filing deliberately leaves open reviews alone so an unresolved
 exception does not churn after every sync. A sync still removes a waiting item
@@ -143,6 +142,12 @@ when you have already resolved it in Actual by categorizing or deleting the
 transaction, converting it to a transfer, or otherwise making it ineligible
 for filing. Clerk retains that outcome in Activity without learning merchant
 memory from a choice made outside Clerk.
+
+**Skip** leaves an item uncategorized and stops asking; skipped items wait under
+**Review → Skipped** and **Ask me again** brings one back. **Review → Recently
+filed** lists what Clerk filed in the last two weeks: moving one there writes the
+new category to Actual and counts as a correction, just as editing it in Actual
+would.
 
 ### 6. Forward card notifications from your phone (optional)
 
@@ -288,6 +293,8 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_NTFY_URL` | `https://ntfy.sh` | ntfy server |
 | `CLERK_NTFY_TOPIC` | — | Topic (required when notifications are on) |
 | `CLERK_NTFY_TOKEN` | — | For a protected topic |
+| `CLERK_REVIEW_ALERTS_ENABLED` | `true` | Notify when something needs a category |
+| `CLERK_PUBLIC_URL` | — | Clerk's web address, so notifications open Review |
 
 `TZ` seeds the time zone until you pick one in **Settings → Sync & digest**, after which your choice stands and `TZ` stops reclaiming it. `CLERK_TIMEZONE` overrides both and locks the field.
 

@@ -635,6 +635,7 @@ def test_dashboard_counts_reflect_the_work_outstanding(database):
         "active_jobs": 1,
         "failed_jobs": 0,
         "needs_review": 1,
+        "skipped": 0,
         "applied_today": 1,
         "proposals": 1,
         "rules": 1,

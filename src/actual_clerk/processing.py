@@ -15,11 +15,13 @@ import datetime
 import logging
 import uuid
 from collections.abc import Sequence
+from types import SimpleNamespace
 from typing import Any
 
 from actual_clerk import anticipated
 from actual_clerk.categorize import (
     STATUS_APPLIED,
+    STATUS_REVIEW,
     Categorizer,
     build_memory,
     rule_proposal_candidates,
@@ -32,6 +34,7 @@ from actual_clerk.config import Settings, SettingsManager
 from actual_clerk.db import Database
 from actual_clerk.digest import build_digest, health_alert
 from actual_clerk.domain import tagging
+from actual_clerk.domain.budget import format_money
 from actual_clerk.domain.health import evaluate_accounts, summarize
 from actual_clerk.domain.intelligence import (
     ALIAS_ACTUAL_PAYEE,
@@ -281,6 +284,7 @@ class JobManager:
         handlers = {
             "sync": self._run_sync,
             "categorize": self._run_categorize,
+            "phone": self._run_phone,
             "health": self._run_health,
             "digest": self._run_digest,
         }
@@ -360,12 +364,12 @@ class JobManager:
             await self.gateway.pull()
 
         self.database.update_job(job["id"], phase="reading")
-        open_review_ids = self.database.open_review_transaction_ids()
+        pending_ids = self.database.pending_transaction_ids()
         snapshot = await self.snapshot(
-            today=today, transaction_ids=open_review_ids
+            today=today, transaction_ids=pending_ids
         )
         review_resolutions = _reconcile_open_reviews(
-            self.database, snapshot, open_review_ids, job_id=job["id"]
+            self.database, snapshot, pending_ids, job_id=job["id"]
         )
         overview = await self._refresh_overview(snapshot, settings, today)
         result["accounts"] = len(snapshot["accounts"])
@@ -398,13 +402,15 @@ class JobManager:
             return {"skipped": "categorization is disabled"}
         today = datetime.datetime.now(settings.zone).date()
         self.database.update_job(job["id"], phase="reading")
-        open_review_ids = self.database.open_review_transaction_ids()
+        pending_ids = self.database.pending_transaction_ids()
         snapshot = await self.snapshot(
-            today=today, transaction_ids=open_review_ids
+            today=today, transaction_ids=pending_ids
         )
         review_resolutions = _reconcile_open_reviews(
-            self.database, snapshot, open_review_ids, job_id=job["id"]
+            self.database, snapshot, pending_ids, job_id=job["id"]
         )
+        # Answers given about phone charges whose bank rows have now arrived.
+        carried = await self._apply_carried(settings, job_id=job["id"])
 
         # A first run against an existing budget has years of uncategorized
         # history to work through, which the recent-window default would skip.
@@ -447,20 +453,33 @@ class JobManager:
                 stored_memory=[row for rows in stored.values() for row in rows],
                 rules=rules,
                 aliases=self.database.alias_map(),
+                # The rows pending when the run began include answers just
+                # written above, which this snapshot still shows as bare.
                 exclude_transaction_ids=(
                     None
                     if retry_reviews
-                    else self.database.open_review_transaction_ids()
+                    else self.database.pending_transaction_ids() | pending_ids
                 ),
                 only_transaction_ids=review_transaction_ids,
+            )
+            phone = await self._review_phone_charges(
+                snapshot,
+                settings,
+                today,
+                categorizer=categorizer,
+                job_id=job["id"],
+                retry=retry_reviews,
             )
         finally:
             await categorizer.close()
 
         if not result.proposals:
             await self._refresh_overview(snapshot, settings, today)
+            carried += await self._apply_carried(settings, job_id=job["id"])
             return {
                 "considered": 0,
+                "carried": carried,
+                "phone": phone,
                 "lookback_days": lookback,
                 "full_history": full,
                 "review_retry": retry_reviews,
@@ -494,7 +513,7 @@ class JobManager:
         rules_applied: dict[str, int] = {}
         for proposal in result.proposals:
             if proposal.status == STATUS_APPLIED and proposal.transaction_id in skipped:
-                proposal.status = "skipped"
+                proposal.status = "write_skipped"
                 proposal.rationale["skipped_reason"] = skipped[proposal.transaction_id]
             self.database.add_decision(proposal.as_decision(job["id"]))
             if proposal.status != STATUS_APPLIED or proposal.transaction_id not in applied_ids:
@@ -518,7 +537,14 @@ class JobManager:
 
         refreshed = await self.snapshot(today=today)
         await self._refresh_overview(refreshed, settings, today)
+        carried += await self._apply_carried(settings, job_id=job["id"])
+        # A person clearing an old backlog by hand is already looking at it;
+        # the phone only hears about what the schedule found.
+        if job.get("trigger") != "manual" and not full and not retry_reviews:
+            await self._alert_bank_reviews(result.review, settings)
         summary = result.summary()
+        summary["carried"] = carried
+        summary["phone"] = phone
         summary["written"] = len(applied_ids)
         summary["rule_proposals"] = promotions
         summary["aliases_learned"] = aliases_learned
@@ -532,6 +558,236 @@ class JobManager:
         summary["review_retry"] = retry_reviews
         summary["reviews_resolved"] = sum(review_resolutions.values())
         return summary
+
+    async def _run_phone(self, job: dict[str, Any], settings: Settings) -> dict[str, Any]:
+        """Put the phone's new charges through the cascade, model included.
+
+        Queued when a notification arrives, after the charge is stored and
+        rules and history have had their say, so the phone never waits on the
+        model. A charge that still has no category becomes a review.
+        """
+        if not settings.categorization_enabled or not settings.anticipated_enabled:
+            return {"skipped": "categorization or anticipated charges are off"}
+        today = datetime.datetime.now(settings.zone).date()
+        self.database.update_job(job["id"], phase="reading")
+        snapshot = await self.snapshot(today=today)
+        await self._refresh_overview(snapshot, settings, today)
+        categorizer = Categorizer(settings)
+        try:
+            self.database.update_job(job["id"], phase="classifying")
+            result = await self._review_phone_charges(
+                snapshot, settings, today, categorizer=categorizer, job_id=job["id"]
+            )
+        finally:
+            await categorizer.close()
+        if result.get("filed"):
+            await self._refresh_overview(snapshot, settings, today)
+        return result
+
+    async def _review_phone_charges(
+        self,
+        snapshot: dict[str, Any],
+        settings: Settings,
+        today: datetime.date,
+        *,
+        categorizer: Categorizer,
+        job_id: str,
+        retry: bool = False,
+    ) -> dict[str, int]:
+        """Ask about every open phone charge nothing has categorized yet.
+
+        Rules and reliable history are applied on the spot when a charge is
+        recorded; this is the rest of the cascade. What it settles confidently
+        (a rule made since, say) becomes the charge's category; everything
+        else waits in Review with the model's suggestion, exactly like a bank
+        row -- and until the person answers, the charge counts as
+        uncategorized.
+        """
+        summary = {"reviews": 0, "filed": 0, "model_calls": 0}
+        if not settings.anticipated_enabled:
+            return summary
+        waiting: list[dict[str, Any]] = []
+        for row in self.database.list_anticipated_charges(status=anticipated.OPEN, limit=500):
+            if row.get("kind") != anticipated.KIND_CHARGE or row.get("category_id"):
+                continue
+            decision = self.database.phone_decision(row["id"])
+            if decision is None or (retry and decision["status"] == STATUS_REVIEW):
+                waiting.append({**row, "_retry": decision is not None})
+        if not waiting:
+            return summary
+        names = {account["id"]: account["name"] for account in snapshot.get("accounts") or []}
+        aliases = self.database.alias_map()
+        keys = {str(row.get("merchant_key") or "") for row in waiting} - {""}
+        keys |= {aliases[key] for key in keys if key in aliases}
+        stored = _stored_memory(self.database, snapshot, extra_keys=keys)
+        result = await categorizer.classify(
+            snapshot,
+            [
+                anticipated.phone_item(row, account_name=names.get(row.get("actual_account_id"), ""))
+                for row in waiting
+            ],
+            today=today,
+            stored_memory=[entry for entries in stored.values() for entry in entries],
+            rules=RuleBook.from_rows(self.database.active_rules()),
+            aliases=aliases,
+        )
+        summary["model_calls"] = result.model_calls
+        by_id = {anticipated.phone_transaction_id(row["id"]): row for row in waiting}
+        created: list[tuple[dict[str, Any], dict[str, Any]]] = []
+        for proposal in result.proposals:
+            row = by_id.get(proposal.transaction_id)
+            if row is None:
+                continue
+            if proposal.status == STATUS_APPLIED and proposal.category_id:
+                self.database.set_anticipated_category(
+                    row["id"],
+                    category_id=proposal.category_id,
+                    category_name=proposal.category_name,
+                    source=(
+                        anticipated.SOURCE_RULE
+                        if proposal.source == SOURCE_RULE
+                        else anticipated.SOURCE_MEMORY
+                    ),
+                    confidence=proposal.confidence,
+                )
+                summary["filed"] += 1
+                continue
+            decision = {
+                **proposal.as_decision(job_id),
+                "status": STATUS_REVIEW,
+                "tags": [],
+                "anticipated_id": row["id"],
+            }
+            decision["rationale"] = {
+                **decision["rationale"],
+                "phone": {"title": row.get("title") or "", "text": row.get("text") or ""},
+            }
+            self.database.add_decision(decision)
+            summary["reviews"] += 1
+            if not row.get("_retry"):
+                created.append((row, decision))
+        for row, decision in created:
+            await self._alert_phone_review(row, decision, settings)
+        return summary
+
+    async def _apply_carried(self, settings: Settings, *, job_id: str) -> int:
+        """Write the answers given about phone charges onto their bank rows.
+
+        An answer is carried when the charge settles; this is where it
+        reaches Actual. A row someone has categorized in Actual meanwhile
+        keeps its own category: the write never overwrites.
+        """
+        pending = self.database.approved_decisions()
+        if not pending:
+            return 0
+        tags = [settings.clerk_tag] if settings.tag_provenance and settings.clerk_tag else []
+        try:
+            outcome = await self.gateway.apply_updates(
+                [
+                    {
+                        "transaction_id": item["transaction_id"],
+                        "category_id": item["category_id"],
+                        "add_tags": tags,
+                    }
+                    for item in pending
+                ]
+            )
+        except ActualGatewayError as exc:
+            self.database.add_event(job_id, "warning", "carry_failed", str(exc))
+            return 0
+        applied = set(outcome["applied"])
+        skipped = {item["id"]: item["reason"] for item in outcome["skipped"]}
+        written = 0
+        for item in pending:
+            transaction_id = item["transaction_id"]
+            if transaction_id in applied:
+                if self.database.resolve_decision(
+                    item["id"], STATUS_APPLIED, from_statuses=("approved",)
+                ):
+                    written += 1
+                    # Memory already holds the answer under the phone's name;
+                    # the bank's name is what the next bank row is read by.
+                    phone_key = str((item.get("rationale") or {}).get("phone_key") or "")
+                    if item["merchant_key"] and item["merchant_key"] != phone_key:
+                        self.database.record_memory(
+                            item["merchant_key"], item["category_id"], item["category_name"]
+                        )
+            elif transaction_id in skipped:
+                self.database.close_decision(
+                    item["id"], "resolved_external", reason=skipped[transaction_id]
+                )
+        if written:
+            self.database.add_event(
+                job_id,
+                "info",
+                "carried",
+                f"Filed {written} bank row(s) the way you categorized the phone charge",
+                {"written": written},
+            )
+        return written
+
+    def _review_link(self, settings: Settings) -> str:
+        return f"{settings.clerk_public_url}/#intelligence-review" if settings.clerk_public_url else ""
+
+    async def _notify(self, settings: Settings, **message: Any) -> None:
+        if not (settings.notifications_enabled and settings.review_alerts_enabled):
+            return
+        client = NtfyClient(settings)
+        try:
+            await client.publish(**message)
+        except NotificationError as exc:
+            log.warning("Could not deliver the review alert: %s", exc)
+        finally:
+            await client.close()
+
+    async def _alert_phone_review(
+        self, row: dict[str, Any], decision: dict[str, Any], settings: Settings
+    ) -> None:
+        merchant = row.get("merchant") or row.get("title") or "A charge"
+        amount = format_money(abs(int(row.get("amount_cents", 0))), settings.budget_currency)
+        suggestion = decision.get("category_name") or ""
+        confidence = float(decision.get("confidence") or 0)
+        body = (
+            f"{amount} seen by your phone. "
+            + (
+                f"Clerk suggests {suggestion} ({round(confidence * 100)}% sure)."
+                if suggestion
+                else "Clerk has no suggestion."
+            )
+            + " It counts as uncategorized until you choose."
+        )
+        await self._notify(
+            settings,
+            title=f"Needs a category: {merchant}",
+            message=body,
+            tags=("label",),
+            click=self._review_link(settings),
+        )
+
+    async def _alert_bank_reviews(self, reviews: Sequence[Any], settings: Settings) -> None:
+        if not reviews:
+            return
+        merchants: dict[str, list[Any]] = {}
+        for proposal in reviews:
+            merchants.setdefault(proposal.merchant_key or proposal.transaction_id, []).append(proposal)
+        lines = []
+        for items in list(merchants.values())[:5]:
+            first = items[0]
+            total = sum(abs(item.amount_cents) for item in items)
+            label = first.payee_name or first.merchant_label or "A transaction"
+            hint = f", suggested {first.category_name}" if first.category_name else ""
+            count = f" ×{len(items)}" if len(items) > 1 else ""
+            lines.append(f"{label}{count}: {format_money(total, settings.budget_currency)}{hint}")
+        if len(merchants) > 5:
+            lines.append(f"…and {len(merchants) - 5} more")
+        count = len(reviews)
+        await self._notify(
+            settings,
+            title=f"{count} transaction{'s' if count != 1 else ''} need{'s' if count == 1 else ''} a category",
+            message="\n".join(lines),
+            tags=("label",),
+            click=self._review_link(settings),
+        )
 
     def _learn_from_actual(
         self, snapshot: dict[str, Any], settings: Settings, *, job_id: str
@@ -590,6 +846,37 @@ class JobManager:
                 {**counts, "proposals": proposals},
             )
         return counts
+
+    def note_correction(
+        self, decision: dict[str, Any], category_id: str, category_name: str
+    ) -> None:
+        """A person moved a row Clerk filed, from Clerk itself rather than in Actual.
+
+        The same lesson as a correction read back from Actual: evidence in
+        memory, a dispute against the rule that filed it, and a question
+        about the rule once disputes reach the threshold. The decision is
+        marked as observed so the next run does not read it a second time.
+        """
+        settings = self.settings_manager.get()
+        merchant_key = str(decision.get("merchant_key") or "")
+        self.database.record_memory(merchant_key, category_id, category_name, correction=True)
+        self.database.mark_observed(
+            decision["id"], OBSERVED_CORRECTED, category_id=category_id, category_name=category_name
+        )
+        rule_id = str(((decision.get("rationale") or {}).get("rule") or {}).get("id") or "")
+        if decision.get("source") != SOURCE_RULE or not rule_id:
+            return
+        disputes = self.database.record_rule_dispute(rule_id)
+        if disputes >= settings.memory_dispute_threshold:
+            self._propose_rule_change(
+                rule_id,
+                merchant_key,
+                SimpleNamespace(
+                    status=OBSERVED_CORRECTED, category_id=category_id, category_name=category_name
+                ),
+                {category_id: category_name},
+                disputes,
+            )
 
     def _propose_rule_change(
         self,
@@ -942,6 +1229,10 @@ class JobManager:
         # count whatever is still outstanding as spent. This is the one place
         # every path to a fresh overview passes through.
         anticipations = anticipated.reconcile(self.database, snapshot, settings, today=today)
+        if anticipations.get("carried") and settings.categorization_enabled:
+            # A charge settled with the person's answer on it; the filing run
+            # is what writes that answer onto the bank's row.
+            self._enqueue_nowait("categorize", trigger="settled")
         overview = {
             "budget": budget_report(
                 snapshot, settings, today=today, anticipated=anticipations["open"]
@@ -984,6 +1275,15 @@ class JobManager:
                     if category["group_name"] and not category["is_income"]
                 }
             ),
+            # The payee names the bank posts, for "Posts as..." to pick from.
+            "payees": sorted(
+                {
+                    str(item.get("payee_name") or "").strip()
+                    for item in snapshot["transactions"]
+                    if item.get("payee_name") and not item.get("is_transfer")
+                },
+                key=str.casefold,
+            )[:3000],
             "currency": settings.budget_currency,
             "today": today.isoformat(),
         }
@@ -1002,13 +1302,15 @@ class JobManager:
         return await self._refresh_overview(snapshot, settings, today)
 
 
-def _stored_memory(database: Database, snapshot: dict[str, Any]) -> dict[str, list[dict[str, Any]]]:
+def _stored_memory(
+    database: Database, snapshot: dict[str, Any], *, extra_keys: set[str] | None = None
+) -> dict[str, list[dict[str, Any]]]:
     """Clerk's own learned rows for the merchants about to be considered."""
     keys = {
         item["merchant_key"]
         for item in snapshot["transactions"]
         if item.get("merchant_key") and not item.get("category_id")
-    }
+    } | (extra_keys or set())
     stored: dict[str, list[dict[str, Any]]] = {}
     for key in keys:
         rows = database.memory_for(key)
@@ -1049,7 +1351,19 @@ def _describe(kind: str, result: dict[str, Any]) -> str:
         )
         if result.get("reviews_resolved"):
             description += f", {result['reviews_resolved']} resolved in Actual"
+        if result.get("carried"):
+            description += f", {result['carried']} filed from a phone answer"
+        phone = result.get("phone") or {}
+        if phone.get("reviews"):
+            description += f", {phone['reviews']} phone charge(s) to review"
         return description
+    if kind == "phone":
+        if result.get("skipped"):
+            return str(result["skipped"])
+        return (
+            f"{result.get('reviews', 0)} phone charge(s) to review, "
+            f"{result.get('filed', 0)} categorized, {result.get('model_calls', 0)} model call(s)"
+        )
     if kind == "health":
         return f"{result.get('linked', 0)} linked account(s), {result.get('degraded', 0)} degraded"
     if kind == "digest":

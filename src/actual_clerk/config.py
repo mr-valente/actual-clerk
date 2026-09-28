@@ -172,6 +172,12 @@ class Settings(BaseModel):
     ntfy_url: str = "https://ntfy.sh"
     ntfy_topic: str = Field(default="", max_length=64)
     ntfy_token: SecretStr = SecretStr("")
+    # A message when something lands in Review: each phone charge as it
+    # arrives, and one message per filing run for rows from the bank.
+    review_alerts_enabled: bool = True
+    # Where Clerk's own web page is reached from the phone, so a notification
+    # opens the Review tab. Empty sends notifications without a link.
+    clerk_public_url: str = Field(default="", max_length=300)
 
     # --- Reliability ------------------------------------------------------
     request_timeout_seconds: int = Field(default=180, ge=10, le=3600)
@@ -191,6 +197,14 @@ class Settings(BaseModel):
     def normalize_url(cls, value: str) -> str:
         value = value.strip().rstrip("/")
         if not value.startswith(("http://", "https://")):
+            raise ValueError("must start with http:// or https://")
+        return value
+
+    @field_validator("clerk_public_url")
+    @classmethod
+    def normalize_public_url(cls, value: str) -> str:
+        value = value.strip().rstrip("/")
+        if value and not value.startswith(("http://", "https://")):
             raise ValueError("must start with http:// or https://")
         return value
 
@@ -457,6 +471,8 @@ ENVIRONMENT_FIELDS = {
     "CLERK_NTFY_URL": "ntfy_url",
     "CLERK_NTFY_TOPIC": "ntfy_topic",
     "CLERK_NTFY_TOKEN": "ntfy_token",
+    "CLERK_REVIEW_ALERTS_ENABLED": "review_alerts_enabled",
+    "CLERK_PUBLIC_URL": "clerk_public_url",
     "CLERK_REQUEST_TIMEOUT_SECONDS": "request_timeout_seconds",
     "CLERK_MODEL_MAX_RETRIES": "model_max_retries",
     "CLERK_JOB_MAX_ATTEMPTS": "job_max_attempts",
