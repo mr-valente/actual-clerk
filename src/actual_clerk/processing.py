@@ -167,6 +167,13 @@ class JobManager:
             asyncio.create_task(self._worker_loop(), name="clerk-worker"),
             asyncio.create_task(self._scheduler_loop(), name="clerk-scheduler"),
         ]
+        # Phone charges seen while Clerk was down, or before this version,
+        # belong in Review now rather than after the next scheduled sync.
+        if any(
+            row.get("kind") == anticipated.KIND_CHARGE and not row.get("category_id")
+            for row in self.database.list_anticipated_charges(status=anticipated.OPEN, limit=500)
+        ):
+            self._enqueue_nowait("phone", trigger="startup")
         self.wake()
 
     async def stop(self) -> None:
@@ -611,8 +618,15 @@ class JobManager:
             if row.get("kind") != anticipated.KIND_CHARGE or row.get("category_id"):
                 continue
             decision = self.database.phone_decision(row["id"])
-            if decision is None or (retry and decision["status"] == STATUS_REVIEW):
-                waiting.append({**row, "_retry": decision is not None})
+            # A review opened while the model was still to be asked is this
+            # job's to fill in; any other waiting review only on a retry.
+            asking = (
+                decision is not None
+                and decision["status"] == STATUS_REVIEW
+                and bool(decision["rationale"].get("asking"))
+            )
+            if decision is None or asking or (retry and decision["status"] == STATUS_REVIEW):
+                waiting.append({**row, "_announce": decision is None or asking})
         if not waiting:
             return summary
         names = {account["id"]: account["name"] for account in snapshot.get("accounts") or []}
@@ -637,6 +651,16 @@ class JobManager:
         for proposal in result.proposals:
             row = by_id.get(proposal.transaction_id)
             if row is None:
+                continue
+            # The person may have answered while the model was thinking.
+            current = self.database.get_anticipated_charge(row["id"])
+            decision = self.database.phone_decision(row["id"])
+            if (
+                current is None
+                or current["status"] != anticipated.OPEN
+                or current.get("category_id")
+                or (decision is not None and decision["status"] != STATUS_REVIEW)
+            ):
                 continue
             if proposal.status == STATUS_APPLIED and proposal.category_id:
                 self.database.set_anticipated_category(
@@ -664,7 +688,7 @@ class JobManager:
             }
             self.database.add_decision(decision)
             summary["reviews"] += 1
-            if not row.get("_retry"):
+            if row.get("_announce"):
                 created.append((row, decision))
         for row, decision in created:
             await self._alert_phone_review(row, decision, settings)
@@ -1229,6 +1253,9 @@ class JobManager:
         # count whatever is still outstanding as spent. This is the one place
         # every path to a fresh overview passes through.
         anticipations = anticipated.reconcile(self.database, snapshot, settings, today=today)
+        if anticipations.get("asking") and settings.categorization_enabled:
+            # Reviews opened for new charges wait on the model's suggestion.
+            self._enqueue_nowait("phone", trigger="asking")
         if anticipations.get("carried") and settings.categorization_enabled:
             # A charge settled with the person's answer on it; the filing run
             # is what writes that answer onto the bank's row.

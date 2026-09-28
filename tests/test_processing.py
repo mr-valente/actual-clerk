@@ -1138,3 +1138,57 @@ async def test_a_manual_run_does_not_alert(manager, database, settings_manager, 
     await run_job(manager, "categorize")
     assert database.list_decisions(status="needs_review")
     assert delivers == []
+
+
+async def test_the_model_fills_in_the_review_opened_on_arrival(
+    manager, database, settings_manager, delivers, model
+):
+    settings_manager.update({"notifications_enabled": True, "ntfy_topic": "clerk"})
+    row = phone_charge(database, settings_manager)
+    await manager.refresh_now()
+    [placeholder] = database.list_decisions(status="needs_review")
+    assert placeholder["rationale"]["asking"] is True
+    # The refresh queued the phone job for it.
+    assert [job["kind"] for job in database.list_jobs(status="queued")] == ["phone"]
+    claimed = database.claim_job("test-worker", 600)
+    await manager._run_job(claimed)
+    [decision] = database.list_decisions(status="needs_review")
+    assert decision["anticipated_id"] == row["id"]
+    assert (decision["category_name"], decision["rationale"].get("asking")) == ("Coffee", None)
+    assert database.get_decision(placeholder["id"])["status"] == "superseded"
+    [alert] = delivers
+    assert "Clerk suggests Coffee" in alert["message"]
+
+
+async def test_an_answer_given_while_the_model_thinks_is_kept(
+    manager, database, settings_manager, monkeypatch
+):
+    from actual_clerk import anticipated
+    from actual_clerk.categorize import Categorizer
+
+    from .factories import FakeModel
+
+    row = phone_charge(database, settings_manager)
+    await manager.refresh_now()
+    [placeholder] = database.list_decisions(status="needs_review")
+
+    class Answering(FakeModel):
+        async def structured(self, **kwargs):
+            database.resolve_decision(placeholder["id"], "applied", category_id="cat-dining", category_name="Dining")
+            anticipated.apply_answer(database, database.get_anticipated_charge(row["id"]), category_id="cat-dining", category_name="Dining")
+            return {"category_number": 1, "confidence": 0.9, "reason": "", "suggested_new_category": ""}
+
+    fake = Answering()
+    monkeypatch.setattr(processing, "Categorizer", lambda settings: Categorizer(settings, model_client=fake))
+    await run_job(manager, "phone", trigger="phone")
+    assert database.list_decisions(status="needs_review") == []
+    assert database.get_anticipated_charge(row["id"])["category_id"] == "cat-dining"
+
+
+async def test_startup_queues_the_phone_job_for_charges_nobody_placed(manager, database, settings_manager):
+    phone_charge(database, settings_manager)
+    await manager.start()
+    try:
+        assert any(job["kind"] == "phone" for job in database.list_jobs())
+    finally:
+        await manager.stop()

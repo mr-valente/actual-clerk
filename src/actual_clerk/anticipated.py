@@ -222,6 +222,9 @@ def reconcile(
     remaining = database.list_anticipated_charges(status=OPEN, limit=1000)
     summary["categorized"] = classify(database, snapshot, settings, remaining, today=today)
     close_overtaken_reviews(database)
+    summary["asking"] = open_reviews(
+        database, database.list_anticipated_charges(status=OPEN, limit=1000), settings
+    )
     summary["open"] = public_charges(
         database, database.list_anticipated_charges(status=OPEN, limit=1000)
     )
@@ -367,6 +370,55 @@ def apply_answer(
         )
         database.close_proposals_for(target, kind="rule")
     return rule
+
+
+def open_reviews(database: Database, rows: list[dict[str, Any]], settings: Settings) -> int:
+    """Put every charge nothing has categorized into Review straight away.
+
+    The model can take minutes on a large local server, and a charge must be
+    answerable from the moment it is seen. So the review is opened at once,
+    marked as still asking, and the phone job fills in the model's suggestion
+    when it has one. Returns how many reviews are still waiting on the model,
+    so the caller can make sure the phone job is queued.
+    """
+
+    asking = settings.categorization_enabled
+    waiting = 0
+    for row in rows:
+        if row.get("kind") != KIND_CHARGE or row.get("category_id"):
+            continue
+        decision = database.phone_decision(str(row["id"]))
+        if decision is not None:
+            if decision["status"] == "needs_review" and decision["rationale"].get("asking"):
+                waiting += 1
+            continue
+        source = database.get_notification_source(str(row.get("source_id") or "")) or {}
+        database.add_decision(
+            {
+                "transaction_id": phone_transaction_id(str(row["id"])),
+                "anticipated_id": row["id"],
+                "account_id": str(row.get("actual_account_id") or ""),
+                "account_name": str(source.get("account_name") or ""),
+                "payee_name": str(row.get("merchant") or row.get("title") or ""),
+                "merchant_key": str(row.get("merchant_key") or ""),
+                "transaction_date": str(row.get("noticed_date") or ""),
+                "amount_cents": int(row.get("amount_cents", 0)),
+                "source": "unresolved",
+                "status": "needs_review",
+                "confidence": 0.0,
+                "rationale": {
+                    "reason": (
+                        "Clerk is asking the model about this merchant."
+                        if asking
+                        else "Categorization is switched off, so Clerk has no suggestion."
+                    ),
+                    "asking": asking,
+                    "phone": {"title": row.get("title") or "", "text": row.get("text") or ""},
+                },
+            }
+        )
+        waiting += int(asking)
+    return waiting
 
 
 def close_overtaken_reviews(database: Database) -> int:
@@ -548,6 +600,7 @@ def public_charges(database: Database, rows: list[dict[str, Any]]) -> list[dict[
                 "id": decision["id"],
                 "status": decision["status"],
                 "suggestion": decision.get("category_name") or "",
+                "asking": bool(decision["rationale"].get("asking")),
             }
             if decision
             else None

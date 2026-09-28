@@ -790,3 +790,23 @@ def test_a_repeat_within_ten_minutes_is_the_same_charge(database, settings):
         database, settings, source=other, posted_at_ms=base, title="Card", text="A charge of $4.00 at CAFE was approved.", key="d",
     )
     assert created_elsewhere is True
+
+
+def test_an_unplaced_charge_is_in_review_at_once_while_the_model_is_asked(database, settings):
+    row = valve_charge(database, settings)
+    summary = anticipated.reconcile(database, snapshot(accounts=[account("Card", account_id="acct-card")]), settings, today=TODAY)
+    assert summary["asking"] == 1
+    decision = database.phone_decision(row["id"])
+    assert (decision["status"], decision["source"]) == ("needs_review", "unresolved")
+    assert decision["rationale"]["asking"] is True
+    assert summary["open"][0]["review"]["asking"] is True
+    # Opened once, not once per rebuild.
+    anticipated.reconcile(database, snapshot(accounts=[account("Card", account_id="acct-card")]), settings, today=TODAY)
+    assert len(database.list_decisions(status="needs_review")) == 1
+
+
+def test_with_filing_off_the_review_opens_without_waiting_on_a_model(database, settings):
+    row = valve_charge(database, settings)
+    summary = anticipated.reconcile(database, snapshot(accounts=[account("Card", account_id="acct-card")]), settings.model_copy(update={"categorization_enabled": False}), today=TODAY)
+    assert summary["asking"] == 0
+    assert database.phone_decision(row["id"])["rationale"]["asking"] is False

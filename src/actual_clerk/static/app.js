@@ -512,6 +512,7 @@ function groupReviews(reviews) {
     group.total_cents += Number(item.amount_cents) || 0;
     group.confidence = Math.min(group.confidence, item.confidence ?? 0);
     if (item.anticipated_id) group.phone += 1;
+    if (item.rationale?.asking) group.asking = true;
     // The bank's name reads better than a notification's shouting descriptor.
     if (!group.label || (!item.anticipated_id && group.labelFromPhone)) {
       group.label = item.payee_name || item.merchant_key || "Transaction";
@@ -583,7 +584,9 @@ function reviewGroupRow(group, { skipped = false } = {}) {
   const phoneNote = group.phone ? `<span class="status-chip stale" title="Seen by your phone; counts as uncategorized until you choose. Nothing is written to Actual until the bank posts it, and then that row is filed the same way.">📱 Phone</span>` : "";
   const confidence = group.suggestion_id
     ? `<span class="confidence ${group.confidence < 0.5 ? "low" : ""}">${percent(group.confidence)}</span><small>${escapeHtml(sourceLabel(group.source).toLowerCase())}</small>`
-    : `<span class="confidence none">—</span><small>no suggestion</small>`;
+    : group.asking
+      ? `<span class="confidence none">…</span><small>asking the model</small>`
+      : `<span class="confidence none">—</span><small>no suggestion</small>`;
   const actions = skipped
     ? `<button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(group.items[0].id)}">Why</button>
       <button class="button secondary small" data-action="review-restore-group" data-ids="${escapeHtml(ids)}">Ask me again</button>`
@@ -1086,7 +1089,7 @@ function chargeLabel(item) {
 function categoryChip(item) {
   if (!item.category_id) {
     if (item.review?.status === "needs_review") {
-      return `<a class="status-chip warning" href="#intelligence-review" title="Waiting in Review${item.review.suggestion ? `; Clerk suggests ${escapeHtml(item.review.suggestion)}` : ""}. Counts as uncategorized until you choose.">${item.review.suggestion ? `Suggested: ${escapeHtml(item.review.suggestion)}` : "Needs a category"}</a>`;
+      return `<a class="status-chip warning" href="#intelligence-review" title="Waiting in Review${item.review.suggestion ? `; Clerk suggests ${escapeHtml(item.review.suggestion)}` : item.review.asking ? "; Clerk is still asking the model, but you can choose now" : ""}. Counts as uncategorized until you choose.">${item.review.suggestion ? `Suggested: ${escapeHtml(item.review.suggestion)}` : "Needs a category"}</a>`;
     }
     if (item.review?.status === "skipped") return `<span class="status-chip muted" title="You skipped it; it counts as uncategorized">Skipped</span>`;
     return `<span class="status-chip muted" title="No category yet: counted as discretionary until one is known">Uncategorized</span>`;
