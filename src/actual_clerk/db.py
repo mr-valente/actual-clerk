@@ -214,6 +214,9 @@ CREATE TABLE IF NOT EXISTS plaid_items (
     last_refresh_at REAL,
     last_sync_at REAL,
     last_successful_update TEXT NOT NULL DEFAULT '',
+    -- Cleared when the institution refuses /transactions/refresh, so Clerk
+    -- stops asking every hour and reads what Plaid collects on its own.
+    refresh_supported INTEGER NOT NULL DEFAULT 1,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
 );
@@ -387,7 +390,28 @@ _PLAID_ITEM_DEFAULTS: dict[str, Any] = {
     "last_refresh_at": None,
     "last_sync_at": None,
     "last_successful_update": "",
+    "refresh_supported": 1,
 }
+
+
+def _starts_over(before: dict[str, Any], after: dict[str, Any]) -> bool:
+    """Whether a mapping change needs its next delivery served from the start.
+
+    An Item's cursor is shared by all its accounts and keeps moving while one
+    of them is paused, so a resumed (or re-pointed) mapping would never see
+    what arrived in the meantime. Forgetting its last delivery makes the sync
+    engine treat it as new: it is read from the beginning of the Item's
+    history, from its cutover date, and Actual's dedup by ``imported_id``
+    keeps what was already delivered from arriving twice.
+    """
+
+    resumed = not before.get("enabled") and bool(after.get("enabled"))
+    moved = any(
+        (before.get(key) or "") != (after.get(key) or "")
+        for key in ("provider", "item_id", "external_account_id")
+    )
+    return bool(before.get("last_import_at")) and (resumed or moved)
+
 
 _BANK_LINK_DEFAULTS: dict[str, Any] = {
     "item_id": "",
@@ -428,6 +452,7 @@ class Database:
             connection.executescript(SCHEMA)
             self._migrate_health_candidates(connection)
             self._migrate_bank_links(connection)
+            self._migrate_plaid_items(connection)
             self._migrate_anticipated(connection)
             self._migrate_decisions(connection)
             self._restore_digests(connection)
@@ -497,6 +522,16 @@ class Database:
                 connection.execute(
                     f"ALTER TABLE bank_links ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+
+    @staticmethod
+    def _migrate_plaid_items(connection: sqlite3.Connection) -> None:
+        """Add the refresh flag to Item tables from the first Plaid builds."""
+
+        columns = {row["name"] for row in connection.execute("PRAGMA table_info(plaid_items)")}
+        if columns and "refresh_supported" not in columns:
+            connection.execute(
+                "ALTER TABLE plaid_items ADD COLUMN refresh_supported INTEGER NOT NULL DEFAULT 1"
+            )
 
     @staticmethod
     def _migrate_anticipated(connection: sqlite3.Connection) -> None:
@@ -1593,6 +1628,7 @@ class Database:
         snapshots: list[dict[str, Any]],
         *,
         drift_confirmation_checks: int = 1,
+        feed_lag_hours: float = 0,
     ) -> list[dict[str, Any]]:
         """Persist stable per-account health and return genuine transitions.
 
@@ -1603,6 +1639,12 @@ class Database:
         one unchanged ``balance-date`` does not manufacture new evidence.
         ``snapshots`` is updated in place so every caller shows the same
         stabilized status that was saved.
+
+        A mismatch marked ``feed_current`` (Clerk's own delivery of the
+        provider's feed is working and recent) is most likely the bank moving
+        its balance ahead of its transaction list. It also waits until
+        ``feed_lag_hours`` have passed since it was first seen, long enough
+        for a deposit to post.
         """
         now = time.time()
         required = max(1, int(drift_confirmation_checks))
@@ -1656,7 +1698,12 @@ class Database:
                         if same_candidate
                         else now
                     )
-                    if checks < required:
+                    feed_lag = bool(snapshot.get("feed_current")) and feed_lag_hours > 0
+                    waiting = checks < required or (
+                        feed_lag and now - first_seen < feed_lag_hours * 3600
+                    )
+                    label = str(snapshot.get("provider_label") or "bank")
+                    if waiting:
                         connection.execute(
                             "INSERT INTO health_candidates(account_id,status,checks,remote_balance_date,"
                             "first_seen,checked_at) VALUES(?,?,?,?,?,?) "
@@ -1684,16 +1731,25 @@ class Database:
                                 "detail": (
                                     snapshot.get("detail_without_drift")
                                     if fallback != "ok"
+                                    else "Clerk saw a possible balance mismatch and is giving the "
+                                    f"bank {feed_lag_hours:g} hours to list the transaction before "
+                                    "declaring it."
+                                    if feed_lag and checks >= required
                                     else "Clerk saw a possible balance mismatch and is waiting "
-                                    f"for {required} successively newer SimpleFIN balance snapshots "
+                                    f"for {required} successively newer {label} balance snapshots "
                                     "before declaring it."
                                 ),
                                 "signals": list(snapshot.get("signals_without_drift") or [])
                                 + [
-                                    f"Possible balance mismatch seen in {checks} of {required} "
-                                    "successively newer SimpleFIN balance snapshots; repeated checks of "
-                                    "the same snapshot do not count."
-                                ],
+                                    f"Possible balance mismatch seen in {min(checks, required)} of "
+                                    f"{required} successively newer {label} balance snapshots; "
+                                    "repeated checks of the same snapshot do not count."
+                                ]
+                                + (
+                                    [snapshot.get("detail") or ""]
+                                    if feed_lag
+                                    else []
+                                ),
                                 "balance_mismatch_pending": True,
                                 "balance_mismatch_checks": checks,
                                 "balance_mismatch_required": required,
@@ -1933,6 +1989,7 @@ class Database:
         "last_refresh_at",
         "last_sync_at",
         "last_successful_update",
+        "refresh_supported",
     )
 
     def upsert_plaid_item(self, item: dict[str, Any]) -> dict[str, Any]:
@@ -2042,6 +2099,8 @@ class Database:
             if not merged.get("provider") or not merged.get("external_account_id"):
                 raise ValueError("A bank link needs a provider and an external account id")
             merged["enabled"] = 1 if merged.get("enabled", 1) else 0
+            if existing and "last_import_at" not in link and _starts_over(dict(existing), merged):
+                merged["last_import_at"] = None
             merged["updated_at"] = now
             columns = ["actual_account_id", "created_at", "updated_at", *self.BANK_LINK_FIELDS]
             # An explicit upsert on the primary key: OR REPLACE would silently
@@ -2067,10 +2126,21 @@ class Database:
             fields["enabled"] = 1 if fields["enabled"] else 0
         assignments = ", ".join(f"{name}=?" for name in fields)
         with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM bank_links WHERE actual_account_id=?", (account_id,)
+            ).fetchone()
+            if (
+                existing
+                and "last_import_at" not in fields
+                and _starts_over(dict(existing), {**dict(existing), **fields})
+            ):
+                assignments += ", last_import_at=NULL"
             connection.execute(
                 f"UPDATE bank_links SET {assignments}, updated_at=? WHERE actual_account_id=?",
                 [*fields.values(), time.time(), account_id],
             )
+            connection.commit()
         return self.get_bank_link(account_id)
 
     def get_bank_link(self, account_id: str) -> dict[str, Any] | None:

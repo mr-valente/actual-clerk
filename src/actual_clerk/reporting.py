@@ -56,6 +56,12 @@ def apply_bank_links(
         account["bank_name"] = str(link.get("institution") or account.get("bank_name") or "")
         account["connection_id"] = str(link.get("item_id") or "")
         account["managed_by_clerk"] = True
+        account["delivery_error"] = str(link.get("last_error") or "")
+        account["last_delivery"] = (
+            datetime.datetime.fromtimestamp(float(link["last_import_at"]), datetime.UTC)
+            if link.get("last_import_at")
+            else None
+        )
     return snapshot
 
 
@@ -149,6 +155,8 @@ def to_actual_accounts(snapshot: dict[str, Any]) -> list[ActualAccountInfo]:
             managed_by_clerk=bool(account.get("managed_by_clerk", False)),
             actual_sync_source=str(account.get("actual_sync_source") or ""),
             connection_id=str(account.get("connection_id") or ""),
+            delivery_error=str(account.get("delivery_error") or ""),
+            last_delivery=account.get("last_delivery"),
         )
         for account in snapshot["accounts"]
     ]
@@ -173,6 +181,7 @@ def to_remote_accounts(
             last_transaction_date=account.get("last_transaction_date"),
             currency=account.get("currency", "USD"),
             provider=str(account.get("provider") or provider),
+            feed_read_at=account.get("feed_read_at"),
         )
         for account in payload.get("accounts", [])
     ]

@@ -45,6 +45,13 @@ log = logging.getLogger(__name__)
 MUTATION_ERROR = "TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION"
 MAX_MUTATION_RESTARTS = 3
 NOT_READY = "TRANSACTIONS_UPDATE_STATUS_NOT_READY"
+# Plaid has the last 30 days ready; the rest of the history is still coming.
+INITIAL_ONLY = "INITIAL_UPDATE_COMPLETE"
+# Plaid's answer to /transactions/refresh when the institution does not offer
+# on-demand extraction at all. It will not change on a retry; Plaid still
+# updates such an Item on its own schedule. (A refusal about the Plaid team's
+# own plan is left to retry, since the plan can change.)
+REFRESH_UNSUPPORTED = frozenset({"PRODUCTS_NOT_SUPPORTED"})
 REFRESH_POLL_SECONDS = 5.0
 STARTING_BALANCE_PAYEE = "Starting Balance"
 STARTING_BALANCE_CATEGORY = "Starting Balances"
@@ -148,7 +155,9 @@ class PlaidSyncEngine:
                 totals["items"] += 1
                 try:
                     result = await self._sync_item(client, item, by_item[item["item_id"]])
-                except (PlaidError, ActualGatewayError, PlaidTransactionError) as exc:
+                except Exception as exc:  # noqa: BLE001 - one Item must never sink the others
+                    if not isinstance(exc, (PlaidError, ActualGatewayError, PlaidTransactionError)):
+                        log.exception("Plaid Item %s raised an unexpected error", item["item_id"])
                     totals["items_failed"] += 1
                     needs_repair = getattr(exc, "needs_repair", False)
                     self.database.update_plaid_item(
@@ -211,9 +220,15 @@ class PlaidSyncEngine:
 
         stream = await read_stream(client, access_token, cursor)
         changes = len(stream["added"]) + len(stream["modified"]) + len(stream["removed"])
-        if not changes and stream["update_status"] == NOT_READY and not cursor:
+        if not cursor and (
+            (not changes and stream["update_status"] == NOT_READY)
+            or (stream["update_status"] == INITIAL_ONLY and await self._opens_an_account(links))
+        ):
             # Right after linking, Plaid is still preparing history. Keep the
-            # empty cursor so the next run asks from the beginning again.
+            # empty cursor so the next run asks from the beginning again. An
+            # account that will get an opening balance also waits for the
+            # full history: the opening is worked out from what is imported,
+            # and older rows arriving later would count twice.
             counts["not_ready"] = 1
             self.events("info", "plaid_not_ready", f"{label}: Plaid is still preparing this connection's history")
             return counts
@@ -241,9 +256,18 @@ class PlaidSyncEngine:
             )
         return counts
 
+    async def _opens_an_account(self, links: list[dict[str, Any]]) -> bool:
+        """Whether a first delivery here would write an opening balance."""
+        if not self.settings.plaid_starting_balance:
+            return False
+        for link in links:
+            if not await self.gateway.account_transactions(link["actual_account_id"]):
+                return True
+        return False
+
     async def _maybe_refresh(self, client: PlaidClient, item: dict[str, Any]) -> bool:
         settings = self.settings
-        if not settings.plaid_refresh_enabled:
+        if not settings.plaid_refresh_enabled or not item.get("refresh_supported", 1):
             return False
         last = item.get("last_refresh_at")
         if last and self.clock() - float(last) < settings.plaid_refresh_min_interval_minutes * 60:
@@ -255,9 +279,21 @@ class PlaidSyncEngine:
         except PlaidError as exc:
             if exc.needs_repair:
                 raise
+            label = item.get("institution_name") or item["item_id"]
             # A refresh that Plaid declines (unsupported institution, rate
             # limit) is not a reason to skip reading what is already there.
-            self.events("warning", "plaid_refresh_failed", f"{item.get('institution_name') or item['item_id']}: {exc}")
+            if exc.error_code in REFRESH_UNSUPPORTED:
+                # Asking again every hour would only repeat the refusal.
+                self.database.update_plaid_item(item["item_id"], refresh_supported=0)
+                self.events(
+                    "info",
+                    "plaid_refresh_unsupported",
+                    f"{label}: this bank does not offer on-demand refresh through Plaid, so Clerk "
+                    f"reads what Plaid collects on its own schedule ({exc.error_code})",
+                    {"item_id": item["item_id"]},
+                )
+                return False
+            self.events("warning", "plaid_refresh_failed", f"{label}: {exc}")
             return False
         self.database.update_plaid_item(item["item_id"], last_refresh_at=self.clock())
         await self._wait_for_update(client, item, before)
@@ -331,9 +367,10 @@ class PlaidSyncEngine:
         matched_by_actual = 0
         if plan.imports:
             preview = await self.gateway.import_transactions(account_id, plan.imports, dry_run=True)
-            matched_by_actual = sum(
-                1 for entry in preview.get("preview", []) if entry.get("existing")
-            )
+            # A dry run still lists the rows it would add. Whatever it would
+            # not add, Actual matched to a row it already holds (a reconciled
+            # or unchanged match is reported as ignored, not as existing).
+            matched_by_actual = len(plan.imports) - len(preview.get("added") or [])
         empty = not existing and not await self.gateway.account_transactions(account_id)
         balance = next(
             (a for a in stream["accounts"] if a["id"] == link["external_account_id"]), None

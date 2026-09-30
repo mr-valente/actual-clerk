@@ -167,7 +167,9 @@ class FakeGateway:
         return {"id": created["id"], "previous_id": rule.get("id", "")}
 
     async def import_transactions(self, account_id, transactions, *, dry_run=False):
-        return {"added": [], "updated": [], "errors": [], "preview": [], "dry_run": dry_run}
+        # Like Actual, a dry run still lists the rows it would add.
+        added = [f"new-{index}" for index, _ in enumerate(transactions)]
+        return {"added": added, "updated": [], "errors": [], "preview": [], "dry_run": dry_run}
 
 
 @pytest.fixture

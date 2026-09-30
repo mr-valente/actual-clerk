@@ -126,7 +126,7 @@ def plan_account(
     """Decide imports, adoptions, and deletions for one account.
 
     ``existing`` is the account's current Actual rows (id, date, amount_cents,
-    imported_id, cleared, reconciled, is_child, is_starting_balance); the
+    imported_id, cleared, reconciled, is_parent, is_child, is_starting_balance); the
     caller reads them from a window around the cutover and forward.
     """
 
@@ -150,10 +150,17 @@ def plan_account(
         and cutover - window <= row["date"] <= cutover + window
     ]
 
+    # One read can span several of Plaid's updates, so a transaction added
+    # early in it may already be removed later on. Removed is the final word.
+    withdrawn = {str(entry.get("transaction_id") or "") for entry in removed}
     incoming: dict[str, dict[str, Any]] = {}
     for transaction in [*added, *modified]:
         transaction_id = str(transaction.get("transaction_id") or "")
-        if transaction_id and transaction.get("account_id") == external_account_id:
+        if (
+            transaction_id
+            and transaction_id not in withdrawn
+            and transaction.get("account_id") == external_account_id
+        ):
             incoming[transaction_id] = transaction
 
     swapped_pending: set[str] = set()
@@ -237,16 +244,24 @@ def _settlement(
 
     The date is one of them: a posted transaction usually lands a day or
     more after the pending one Actual already holds, and Actual's import
-    would never move it.
+    would never move it. A reconciled row only ever takes the id.
     """
     fields: dict[str, Any] = {}
     if (row.get("imported_id") or "") != transaction_id:
         fields["imported_id"] = transaction_id
-    cleared = not bool(transaction.get("pending"))
-    if bool(row.get("cleared")) != cleared:
-        fields["cleared"] = cleared
+    if row.get("reconciled"):
+        # The user has reconciled this row against a statement. It takes the
+        # Plaid id so later changes find it, but its money stays as agreed.
+        return fields
+    # Clearing only ever goes one way, as in Actual's own import: a row the
+    # user cleared by hand is not un-cleared because the bank still lists
+    # the charge as pending.
+    if not transaction.get("pending") and not row.get("cleared"):
+        fields["cleared"] = True
     amount = plaid_amount_to_cents(transaction.get("amount"))
-    if row.get("amount_cents") != amount:
+    # A split's children must add up to its parent, so a parent's amount is
+    # the user's to change.
+    if row.get("amount_cents") != amount and not row.get("is_parent"):
         fields["amount_cents"] = amount
     if row.get("date") != date:
         fields["date"] = date

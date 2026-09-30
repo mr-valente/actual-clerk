@@ -70,6 +70,9 @@ DIGEST_WINDOW_HOURS = 6
 # hourly observations turn a one-cycle race into silence while still surfacing
 # a real mismatch the same morning or afternoon.
 BALANCE_DRIFT_CONFIRMATION_CHECKS = 3
+# A bank can move a balance a day before it lists the deposit or charge behind
+# it. While Clerk's own delivery is current, that mismatch is given this long.
+FEED_LAG_HOURS = 24
 
 
 def _reconcile_open_reviews(
@@ -1118,6 +1121,7 @@ class JobManager:
         transitions = self.database.record_health(
             snapshots,
             drift_confirmation_checks=BALANCE_DRIFT_CONFIRMATION_CHECKS,
+            feed_lag_hours=FEED_LAG_HOURS,
         )
 
         if settings.health_alerts_enabled and transitions:

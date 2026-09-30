@@ -275,12 +275,28 @@ async def test_refresh_is_rate_limited_and_waits_for_a_newer_update(linked):
 
 async def test_a_declined_refresh_still_reads_the_stream(linked):
     client = FakePlaid([{"cursor": "", "added": [plaid_txn("t1", 1, "2026-09-02")]}])
-    client.refresh_error = PlaidError("no", error_type="INVALID_REQUEST", error_code="PRODUCTS_NOT_SUPPORTED")
+    client.refresh_error = PlaidError("slow down", error_type="RATE_LIMIT_EXCEEDED", error_code="TRANSACTIONS_LIMIT")
     gateway = StubGateway()
     instance, events, _ = engine(linked, gateway, client)
     result = await instance.run()
     assert result["refreshed"] == 0 and result["imported"] == 1
     assert events[0][1] == "plaid_refresh_failed"
+    assert linked.get_plaid_item("item-1")["refresh_supported"] == 1, "a passing refusal is tried again"
+
+
+async def test_a_bank_without_on_demand_refresh_is_not_asked_again(linked):
+    client = FakePlaid([{"cursor": "", "added": [plaid_txn("t1", 1, "2026-09-02")]}])
+    client.refresh_error = PlaidError("no", error_type="ITEM_ERROR", error_code="PRODUCTS_NOT_SUPPORTED")
+    instance, events, _ = engine(linked, StubGateway(), client)
+    first = await instance.run()
+    assert first["imported"] == 1
+    assert [kind for level, kind, _ in events if kind.startswith("plaid_refresh")] == ["plaid_refresh_unsupported"]
+    assert linked.get_plaid_item("item-1")["refresh_supported"] == 0
+    client.calls.clear()
+    events.clear()
+    await instance.run()
+    assert not [call for call in client.calls if call[0] in ("refresh", "item")]
+    assert not [kind for _, kind, _ in events if kind.startswith("plaid_refresh")]
 
 
 async def test_a_broken_item_is_recorded_as_needing_repair_and_its_cursor_kept(linked):
@@ -325,6 +341,66 @@ async def test_a_gateway_failure_fails_only_that_item(linked):
     assert result["items"] == 2 and result["items_failed"] == 1 and result["imported"] == 1
     assert linked.get_plaid_item("item-1")["status"] == "error"
     assert linked.get_plaid_item("item-2")["status"] == "ok"
+
+
+async def test_an_unexpected_fault_in_one_item_spares_the_others(linked):
+    linked.upsert_plaid_item({"item_id": "item-2", "access_token": "access-2"})
+    linked.upsert_bank_link({"actual_account_id": "acct-2", "provider": "plaid", "item_id": "item-2",
+                             "external_account_id": "plaid-2", "cutover_date": "2026-09-01"})
+
+    class OddPlaid(FakePlaid):
+        async def transactions_sync_page(self, access_token, *, cursor="", count=500):
+            if access_token == "access-1":
+                raise KeyError("added")
+            return await super().transactions_sync_page(access_token, cursor=cursor, count=count)
+
+    client = OddPlaid([{"cursor": "", "added": [plaid_txn("t9", 3, "2026-09-02", account="plaid-2")]}])
+    instance, events, _ = engine(linked, StubGateway(), client, plaid_refresh_enabled=False, plaid_starting_balance=False)
+    result = await instance.run()
+    assert result["items_failed"] == 1 and result["imported"] == 1
+    assert linked.get_plaid_item("item-1")["status"] == "error"
+    assert linked.get_bank_link("acct-chk")["last_error"]
+
+
+async def test_an_opening_balance_waits_for_the_whole_history(linked):
+    client = FakePlaid([{"cursor": "", "added": [plaid_txn("t1", 1, "2026-09-02")],
+                         "accounts": [{"id": "plaid-chk", "balance_cents": 10000}],
+                         "update_status": "INITIAL_UPDATE_COMPLETE", "next_cursor": "c1"}])
+    gateway = StubGateway()
+    instance, events, _ = engine(linked, gateway, client, plaid_refresh_enabled=False)
+    result = await instance.run()
+    assert result["not_ready"] == 1 and gateway.imports == []
+    assert linked.get_plaid_item("item-1")["cursor"] == ""
+    # The same partial history is fine for an account that already has rows.
+    gateway.rows["acct-chk"] = [{"id": "r0", "date": datetime.date(2026, 8, 1), "amount_cents": -1,
+                                 "imported_id": "", "cleared": True, "reconciled": False}]
+    result = await instance.run()
+    assert result["imported"] == 1
+    assert linked.get_plaid_item("item-1")["cursor"] == "c1"
+
+
+async def test_a_resumed_mapping_catches_up_on_what_it_missed(linked):
+    linked.upsert_bank_link({"actual_account_id": "acct-sav", "provider": "plaid", "item_id": "item-1",
+                             "external_account_id": "plaid-sav", "cutover_date": "2026-09-01",
+                             "last_import_at": 5.0})
+    linked.update_bank_link("acct-chk", last_import_at=5.0)
+    linked.update_plaid_item("item-1", cursor="cursor-paused")
+    linked.update_bank_link("acct-sav", enabled=False)
+    # While paused, the Item's cursor moved on for the checking account.
+    linked.update_bank_link("acct-sav", enabled=True)
+    assert linked.get_bank_link("acct-sav")["last_import_at"] is None
+    assert linked.get_bank_link("acct-chk")["last_import_at"] == 5.0
+    client = FakePlaid([
+        {"cursor": "", "added": [plaid_txn("missed", 2, "2026-09-05", account="plaid-sav")], "next_cursor": "cursor-paused"},
+        {"cursor": "cursor-paused", "next_cursor": "cursor-paused"},
+    ])
+    gateway = StubGateway()
+    instance, events, _ = engine(linked, gateway, client, plaid_refresh_enabled=False, plaid_starting_balance=False)
+    await instance.run()
+    assert [(account, [row["imported_id"] for row in rows]) for account, rows in gateway.imports] == [
+        ("acct-sav", ["missed"])
+    ]
+    assert any(kind == "plaid_backfilled" for _, kind, _ in events)
 
 
 async def test_a_mapping_added_after_the_cursor_moved_is_served_from_the_start(linked):

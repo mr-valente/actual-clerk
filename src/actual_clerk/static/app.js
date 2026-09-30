@@ -1554,7 +1554,7 @@ function showPlaidItem(itemId) {
       <div class="detail-stat"><span>Connected</span><strong>${item.created_at ? escapeHtml(relativeTime(item.created_at)) : "—"}</strong></div>
       <div class="detail-stat"><span>Consent expires</span><strong>${item.consent_expiration_time ? escapeHtml(shortDate(item.consent_expiration_time)) : "—"}</strong></div>
       <div class="detail-stat"><span>Last delivery</span><strong>${item.last_sync_at ? escapeHtml(relativeTime(item.last_sync_at)) : "never"}</strong></div>
-      <div class="detail-stat"><span>Last refresh asked</span><strong>${item.last_refresh_at ? escapeHtml(relativeTime(item.last_refresh_at)) : "never"}</strong></div>
+      <div class="detail-stat"><span>Last refresh asked</span><strong>${item.refresh_supported === 0 ? "not offered by this bank" : item.last_refresh_at ? escapeHtml(relativeTime(item.last_refresh_at)) : "never"}</strong></div>
     </div>${item.last_error && !item.error ? `<p class="muted" style="font-size:10px;margin:8px 0 0">Last problem: ${escapeHtml(item.last_error)}</p>` : ""}</section>
     <section class="detail-section"><h3>Accounts</h3><p class="muted" style="font-size:10px;margin:0 0 10px">Map each bank account onto the Actual account it should feed. Nothing is imported until a mapping exists, and only transactions dated on or after the import date are ever taken from Plaid.</p>
     <div class="change-list">${accounts.length ? accounts.map((account) => `<div class="change" style="display:block">

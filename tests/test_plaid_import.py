@@ -193,6 +193,52 @@ def test_adoption_prefers_the_closest_date_and_respects_the_window():
     assert len(outside.imports) == 1
 
 
+def test_a_reconciled_row_only_takes_the_id():
+    existing = [row("row-r", -450, "2026-09-03", imported_id="t-pending", cleared=True, reconciled=True)]
+    result = plan(
+        added=[plaid_txn("t-posted", 4.75, "2026-09-05", pending_transaction_id="t-pending")],
+        removed=[{"transaction_id": "t-pending", "account_id": "acc-1"}],
+        existing=existing,
+    )
+    [adoption] = result.adoptions
+    assert adoption == {"transaction_id": "row-r", "previous_imported_id": "t-pending",
+                        "reason": "posted", "imported_id": "t-posted"}
+
+
+def test_a_hand_cleared_row_is_not_uncleared_by_a_pending_update():
+    existing = [row("row-1", -450, "2026-09-03", imported_id="t1", cleared=True)]
+    result = plan(modified=[plaid_txn("t1", 4.5, "2026-09-03", pending=True)], existing=existing)
+    assert result.empty
+
+
+def test_a_split_parent_settles_everything_but_its_amount():
+    existing = [
+        row("parent", -450, "2026-09-03", imported_id="t-pending", is_parent=True),
+        row("child-a", -200, "2026-09-03", is_child=True),
+        row("child-b", -250, "2026-09-03", is_child=True),
+    ]
+    result = plan(
+        added=[plaid_txn("t-posted", 4.75, "2026-09-04", pending_transaction_id="t-pending")],
+        removed=[{"transaction_id": "t-pending", "account_id": "acc-1"}],
+        existing=existing,
+    )
+    assert result.imports == [] and result.deletions == []
+    [adoption] = result.adoptions
+    assert adoption["transaction_id"] == "parent"
+    assert adoption["imported_id"] == "t-posted" and adoption["cleared"] is True
+    assert "amount_cents" not in adoption
+
+
+def test_a_transaction_removed_later_in_the_same_read_is_not_imported():
+    result = plan(
+        added=[plaid_txn("t-pending", 4.5, "2026-09-03", pending=True),
+               plaid_txn("t-posted", 4.5, "2026-09-04", pending_transaction_id="t-pending")],
+        removed=[{"transaction_id": "t-pending", "account_id": "acc-1"}],
+    )
+    assert [item["imported_id"] for item in result.imports] == ["t-posted"]
+    assert result.unknown_removed == 1
+
+
 def test_split_children_and_starting_balances_are_never_touched():
     existing = [
         row("child", -450, "2026-09-03", imported_id="t1", is_child=True),

@@ -82,6 +82,14 @@ MUTED = "muted"
 # as spent in the meantime. Long enough to sit clear of any real pending window.
 STUCK_IMPORT_DAYS = 14
 
+# Clerk delivers a Plaid account itself and syncs hourly, so one failed run is
+# usually a passing outage the next run repairs. A delivery that has not
+# succeeded for this long is a fault worth an alert of its own.
+DELIVERY_FAILURE_HOURS = 3
+# A Clerk delivery this recent, with no error since, means Clerk is not behind
+# on the provider's transaction feed.
+FEED_CURRENT_HOURS = 2
+
 
 @dataclass(frozen=True)
 class UnconfirmedTransferInfo:
@@ -133,6 +141,11 @@ class ActualAccountInfo:
     # answering returns no readings at all, and this is what still lets its
     # error reach every account on it.
     connection_id: str = ""
+    # Clerk's own delivery of this account's feed into Actual: the last
+    # problem it hit and when it last succeeded. Only set for accounts
+    # Clerk manages.
+    delivery_error: str = ""
+    last_delivery: datetime.datetime | None = None
 
     @property
     def cleared_cents(self) -> int:
@@ -155,12 +168,16 @@ class RemoteAccountInfo:
     name: str
     org_name: str = ""
     connection_id: str = ""
-    balance_cents: int = 0
+    # None when the provider reports no balance at all, which is not zero.
+    balance_cents: int | None = 0
     balance_date: datetime.datetime | None = None
     available_cents: int | None = None
     last_transaction_date: datetime.date | None = None
     currency: str = "USD"
     provider: str = SIMPLEFIN
+    # When Clerk last read this provider's transaction feed to the end and
+    # delivered it (Plaid).
+    feed_read_at: datetime.datetime | None = None
 
 
 # The original name, kept for callers and tests written against SimpleFIN.
@@ -193,6 +210,10 @@ class AccountHealth:
     transfer_adjusted: bool = False
     remote_balance_cents: int | None = None
     drift_cents: int | None = None
+    # A mismatch while Clerk's own delivery is working and recent: most likely
+    # the bank moving its balance before listing the transaction. Given longer
+    # to settle before it alerts.
+    feed_current: bool = False
     monitored: bool = True
     # What the account would have been scored as if it were being monitored.
     underlying_status: str = ""
@@ -449,6 +470,15 @@ def _evaluate_one(
     elif general_errors.get(provider) and not remote:
         for message in general_errors[provider]:
             flag("error", message)
+    delivery_failing = bool(account.managed_by_clerk and account.delivery_error) and (
+        account.last_delivery is None
+        or (now - account.last_delivery).total_seconds() > DELIVERY_FAILURE_HOURS * 3600
+    )
+    if delivery_failing and not reported:
+        flag(
+            "error",
+            f"Clerk could not deliver {label}'s transactions into Actual: {account.delivery_error}",
+        )
 
     if not provider_configured:
         note(f"{label} is not configured in Clerk, so only Actual's own data is checked.")
@@ -469,53 +499,72 @@ def _evaluate_one(
                     f"{label}'s balance is {age_hours / 24:.1f} days old; the bank has stopped "
                     "refreshing this account."
                 )
-        # Compare like with like: the bank reports what it has posted, so the
-        # cleared side of Actual is the only fair comparison. Anything still
-        # waiting to clear is normal and is reported separately rather than
-        # counted as a fault.
-        raw_drift = account.cleared_cents - remote.balance_cents
-        comparison_balance = account.cleared_cents
-        transfer_adjustment, transfer_count = _transfer_adjustment(
-            account.unconfirmed_transfers,
-            drift_cents=raw_drift,
-            today=today,
-            tolerance_cents=balance_tolerance_cents,
-        )
-        adjusted_balance = account.cleared_cents - transfer_adjustment
-        # Do not broadly distrust transfers or Actual's cleared flag. Apply the
-        # provenance adjustment only when it explains the entire mismatch: the
-        # linked source was imported from its bank, this account's generated
-        # half was not, and the provider agrees with the ledger without that half.
-        if (
-            transfer_count > 0
-            and abs(raw_drift) > balance_tolerance_cents
-            and abs(adjusted_balance - remote.balance_cents) <= balance_tolerance_cents
-        ):
-            comparison_balance = adjusted_balance
-            health.transfer_adjusted = True
-            health.unconfirmed_transfer_cents = transfer_adjustment
-            health.unconfirmed_transfer_count = transfer_count
-            note(
-                f"Actual generated {_money(abs(transfer_adjustment))} of "
-                "cleared transfer activity from another account before this account imported "
-                "its own side. Clerk leaves that inferred amount out of the bank comparison."
+        if remote.balance_cents is None:
+            note(f"{label} reports no balance for this account, so it cannot be compared.")
+        else:
+            # Compare like with like: the bank reports what it has posted, so the
+            # cleared side of Actual is the only fair comparison. Anything still
+            # waiting to clear is normal and is reported separately rather than
+            # counted as a fault.
+            raw_drift = account.cleared_cents - remote.balance_cents
+            comparison_balance = account.cleared_cents
+            transfer_adjustment, transfer_count = _transfer_adjustment(
+                account.unconfirmed_transfers,
+                drift_cents=raw_drift,
+                today=today,
+                tolerance_cents=balance_tolerance_cents,
             )
-        health.comparison_balance_cents = comparison_balance
-        health.raw_drift_cents = raw_drift
-        drift = comparison_balance - remote.balance_cents
-        health.drift_cents = drift
-        if account.uncleared_cents:
-            note(
-                f"{_money(abs(account.uncleared_cents))} of this account's balance has not "
-                "cleared the bank yet. Clerk counts it as spent for the budget and leaves it "
-                "out of this comparison."
-            )
-        if abs(drift) > balance_tolerance_cents:
-            flag(
-                "drifted",
-                "Actual's cleared balance and the bank's balance disagree, so a posted "
-                "transaction is missing on one side."
-            )
+            adjusted_balance = account.cleared_cents - transfer_adjustment
+            # Do not broadly distrust transfers or Actual's cleared flag. Apply the
+            # provenance adjustment only when it explains the entire mismatch: the
+            # linked source was imported from its bank, this account's generated
+            # half was not, and the provider agrees with the ledger without that half.
+            if (
+                transfer_count > 0
+                and abs(raw_drift) > balance_tolerance_cents
+                and abs(adjusted_balance - remote.balance_cents) <= balance_tolerance_cents
+            ):
+                comparison_balance = adjusted_balance
+                health.transfer_adjusted = True
+                health.unconfirmed_transfer_cents = transfer_adjustment
+                health.unconfirmed_transfer_count = transfer_count
+                note(
+                    f"Actual generated {_money(abs(transfer_adjustment))} of "
+                    "cleared transfer activity from another account before this account imported "
+                    "its own side. Clerk leaves that inferred amount out of the bank comparison."
+                )
+            health.comparison_balance_cents = comparison_balance
+            health.raw_drift_cents = raw_drift
+            drift = comparison_balance - remote.balance_cents
+            health.drift_cents = drift
+            if account.uncleared_cents:
+                note(
+                    f"{_money(abs(account.uncleared_cents))} of this account's balance has not "
+                    "cleared the bank yet. Clerk counts it as spent for the budget and leaves it "
+                    "out of this comparison."
+                )
+            if abs(drift) > balance_tolerance_cents:
+                health.feed_current = bool(
+                    remote.feed_read_at
+                    and (now - remote.feed_read_at).total_seconds() <= FEED_CURRENT_HOURS * 3600
+                    and not account.delivery_error
+                )
+                if health.feed_current:
+                    direction = "more" if drift < 0 else "less"
+                    flag(
+                        "drifted",
+                        f"The bank's balance shows {_money(abs(drift))} {direction} than Actual's "
+                        f"cleared balance, while Clerk's delivery from {label} is working and up "
+                        "to date. Banks often move a balance before they list the transaction "
+                        "behind it, and this settles once it posts. If it does not, a "
+                        "transaction is missing from Actual.",
+                    )
+                else:
+                    flag(
+                        "drifted",
+                        "Actual's cleared balance and the bank's balance disagree, so a posted "
+                        "transaction is missing on one side."
+                    )
 
     if days_since is not None and days_since > transaction_stale_days:
         flag("no_transactions", f"No transaction has arrived in Actual for {days_since} days.")

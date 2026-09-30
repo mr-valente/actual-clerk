@@ -338,6 +338,41 @@ def test_repolling_one_simplefin_snapshot_does_not_confirm_a_mismatch(database):
     assert transition["status"] == "drifted"
 
 
+def test_a_mismatch_while_clerk_is_current_waits_for_the_bank_to_list_it(database, monkeypatch):
+    clock = {"now": 1_800_000_000.0}
+    monkeypatch.setattr("actual_clerk.db.time.time", lambda: clock["now"])
+    database.record_health([snapshot()])
+
+    def mismatch(balance_date):
+        return {
+            **snapshot(status="drifted", detail="the bank shows more"),
+            "status_label": "Balance mismatch",
+            "alerting": True,
+            "status_without_drift": "ok",
+            "status_without_drift_label": "Connected",
+            "alerting_without_drift": False,
+            "detail_without_drift": "Balances agree and data is current.",
+            "signals": [],
+            "signals_without_drift": [],
+            "remote_balance_date": balance_date,
+            "feed_current": True,
+            "provider_label": "Plaid",
+        }
+
+    for hour in range(5):
+        clock["now"] += 3600
+        held = mismatch(f"2026-09-30T{10 + hour:02d}:00:00+00:00")
+        assert database.record_health([held], drift_confirmation_checks=3, feed_lag_hours=24) == []
+        assert held["status"] == "ok" and held["balance_mismatch_pending"] is True
+    assert "24 hours to list the transaction" in held["detail"]
+    assert "Plaid balance snapshots" in held["signals"][0]
+    clock["now"] += 24 * 3600
+    [transition] = database.record_health(
+        [mismatch("2026-10-01T12:00:00+00:00")], drift_confirmation_checks=3, feed_lag_hours=24
+    )
+    assert transition["status"] == "drifted"
+
+
 def test_a_transient_balance_mismatch_clears_without_any_transition(database):
     database.record_health([snapshot()])
     candidate = {
@@ -842,3 +877,41 @@ def test_link_tables_from_the_first_plaid_builds_gain_the_previous_provider_colu
     assert link["previous_provider"] == ""
     database.update_bank_link("acct-1", previous_provider="simpleFin", previous_external_id="sf-1")
     assert database.get_bank_link("acct-1")["previous_external_id"] == "sf-1"
+
+
+def test_a_resumed_or_repointed_mapping_is_delivered_from_the_start_again(database):
+    database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1",
+                               "external_account_id": "plaid-1", "last_import_at": 5.0})
+    database.update_bank_link("acct-1", last_error="boom")
+    assert database.get_bank_link("acct-1")["last_import_at"] == 5.0, "other edits keep it"
+    database.update_bank_link("acct-1", enabled=False)
+    assert database.get_bank_link("acct-1")["last_import_at"] == 5.0, "pausing keeps it"
+    database.update_bank_link("acct-1", enabled=True)
+    assert database.get_bank_link("acct-1")["last_import_at"] is None
+    database.update_bank_link("acct-1", last_import_at=6.0)
+    database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1",
+                               "external_account_id": "plaid-1", "cutover_date": "2026-09-02"})
+    assert database.get_bank_link("acct-1")["last_import_at"] == 6.0, "same account, still enabled"
+    database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1",
+                               "external_account_id": "plaid-2"})
+    assert database.get_bank_link("acct-1")["last_import_at"] is None
+
+
+def test_item_tables_from_the_first_plaid_builds_gain_the_refresh_flag(data_dir):
+    path = data_dir / "clerk.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "CREATE TABLE plaid_items (item_id TEXT PRIMARY KEY, environment TEXT NOT NULL DEFAULT 'sandbox', "
+            "institution_id TEXT NOT NULL DEFAULT '', institution_name TEXT NOT NULL DEFAULT '', "
+            "access_token TEXT NOT NULL, cursor TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'ok', "
+            "last_error TEXT NOT NULL DEFAULT '', last_refresh_at REAL, last_sync_at REAL, "
+            "last_successful_update TEXT NOT NULL DEFAULT '', created_at REAL NOT NULL, updated_at REAL NOT NULL)"
+        )
+        connection.execute(
+            "INSERT INTO plaid_items(item_id, access_token, created_at, updated_at) VALUES ('item-1', 'a', 1, 1)"
+        )
+    database = Database(path)
+    database.initialize()
+    assert database.get_plaid_item("item-1")["refresh_supported"] == 1
+    database.update_plaid_item("item-1", refresh_supported=0)
+    assert database.get_plaid_item("item-1")["refresh_supported"] == 0

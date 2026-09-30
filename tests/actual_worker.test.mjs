@@ -15,6 +15,7 @@ class Query {
   filter() { return this; }
   select() { return this; }
   groupBy() { return this; }
+  options(opts) { this.tableOptions = opts; return this; }
 }
 
 test('the worker and npm lock stay on the same exact official API release', async () => {
@@ -403,9 +404,10 @@ test('deleting transactions reports which ids were already gone', async () => {
 });
 
 test('account transactions are read in Clerk\'s shape', async () => {
+  const queries = [];
   const api = {
     q: () => new Query(),
-    aqlQuery: async () => ({ data: [{ id: 't', date: '2026-09-10', amount_cents: -100, payee_name: 'Shop', imported_description: 'SHOP 1', imported_id: 'sf-9', notes: '', category_id: null, cleared: 1, reconciled: 0, transfer_id: null, is_parent: 0, is_child: 0, starting_balance_flag: 0 }] }),
+    aqlQuery: async query => (queries.push(query), { data: [{ id: 't', date: '2026-09-10', amount_cents: -100, payee_name: 'Shop', imported_description: 'SHOP 1', imported_id: 'sf-9', notes: '', category_id: null, cleared: 1, reconciled: 0, transfer_id: null, is_parent: 0, is_child: 0, starting_balance_flag: 0 }] }),
   };
   const service = new ActualService(api);
   service.initialized = true;
@@ -413,6 +415,8 @@ test('account transactions are read in Clerk\'s shape', async () => {
     id: 't', date: '2026-09-10', amount_cents: -100, payee_name: 'Shop', imported_description: 'SHOP 1', imported_id: 'sf-9', notes: '',
     category_id: null, cleared: true, reconciled: false, is_transfer: false, is_parent: false, is_child: false, is_starting_balance: false,
   }]);
+  // Split parents carry the provider id, and the default view hides them.
+  assert.deepEqual(queries[0].tableOptions, { splits: 'all' });
   await assert.rejects(() => service.accountTransactions({}), /account id/);
 });
 

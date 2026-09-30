@@ -336,8 +336,11 @@ class UpdateLinkRequest(BaseModel):
         if value is None:
             return None
         value = value.strip()
-        if value:
-            datetime.date.fromisoformat(value)
+        if not value:
+            # A stored mapping always has a date; a blank one would read as
+            # "today" on every run and let the cutover creep forward.
+            return None
+        datetime.date.fromisoformat(value)
         return value
 
 

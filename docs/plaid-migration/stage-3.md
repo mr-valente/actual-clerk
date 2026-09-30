@@ -13,7 +13,10 @@ For every Item with at least one enabled mapping:
    to `plaid_refresh_wait_seconds`, stopping as soon as the Item reports a
    newer successful (or failed) transactions update. Clerk cannot receive
    Plaid's webhook, so the poll stands in for it. A refresh Plaid declines is
-   reported and the stream is read anyway; a login error stops the Item.
+   reported and the stream is read anyway; a login error stops the Item. A
+   bank that does not offer on-demand refresh at all
+   (`PRODUCTS_NOT_SUPPORTED`, e.g. Capital One) is remembered on the Item
+   (`refresh_supported = 0`) and not asked again.
 2. **Read.** `/transactions/sync` from the stored cursor to the end,
    restarting from the original cursor on
    `TRANSACTIONS_SYNC_MUTATION_DURING_PAGINATION` (three times, then a

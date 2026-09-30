@@ -592,3 +592,59 @@ def test_a_connection_that_stopped_answering_still_reaches_its_accounts_by_link(
     assert by_name["Card"].status == "error"
     assert by_name["Card"].detail == "Login required"
     assert by_name["Other"].status == "ok"
+
+
+# ------------------------------------------------------- Clerk's delivery
+
+
+def plaid_pair(**account):
+    local = actual_account(
+        "Checking", sync_source="plaid", external_id="acc-1", managed_by_clerk=True,
+        connection_id="item-1", **account,
+    )
+    return local
+
+
+def test_a_delivery_that_keeps_failing_is_a_connection_error():
+    reading = remote_account("Checking", id="acc-1", provider="plaid", connection_id="item-1")
+    failing = plaid_pair(
+        delivery_error="Actual refused 1 imported row(s)",
+        last_delivery=NOW - datetime.timedelta(hours=5),
+    )
+    [result] = evaluate([failing], [reading], providers={"plaid": True})
+    assert result.status == "error"
+    assert "could not deliver Plaid's transactions into Actual" in result.detail
+    # One failed hourly run is left to the next one.
+    passing = plaid_pair(
+        delivery_error="Plaid API_ERROR", last_delivery=NOW - datetime.timedelta(hours=1)
+    )
+    [result] = evaluate([passing], [reading], providers={"plaid": True})
+    assert result.status == "ok"
+
+
+def test_a_missing_provider_balance_is_not_read_as_zero():
+    reading = remote_account("Checking", id="acc-1", provider="plaid", balance_cents=None)
+    [result] = evaluate([plaid_pair()], [reading], providers={"plaid": True})
+    assert result.status == "ok"
+    assert result.drift_cents is None
+    assert any("reports no balance" in signal for signal in result.signals)
+
+
+def test_a_bank_running_ahead_of_its_feed_says_so():
+    reading = remote_account(
+        "Checking", id="acc-1", provider="plaid", balance_cents=100000 + 528607,
+        feed_read_at=NOW - datetime.timedelta(minutes=20),
+    )
+    [result] = evaluate([plaid_pair()], [reading], providers={"plaid": True})
+    assert result.status == "drifted"
+    assert result.feed_current is True
+    assert "5,286.07 more" in result.detail
+    assert "delivery from Plaid is working and up to date" in result.detail
+    # Clerk's last delivery long ago: nothing can be said about who is behind.
+    stale = remote_account(
+        "Checking", id="acc-1", provider="plaid", balance_cents=100000 + 528607,
+        feed_read_at=NOW - datetime.timedelta(hours=6),
+    )
+    [result] = evaluate([plaid_pair()], [stale], providers={"plaid": True})
+    assert result.feed_current is False
+    assert "missing on one side" in result.detail

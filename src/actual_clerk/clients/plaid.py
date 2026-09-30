@@ -435,6 +435,14 @@ def health_payload(
                 }
             )
         balance_date = info.get("last_successful_update")
+        # Set only by a sync that read the Item's stream to the end and
+        # delivered every mapped account; health uses it to tell a bank
+        # running ahead of its own feed from Clerk falling behind.
+        feed_read_at = (
+            datetime.datetime.fromtimestamp(float(stored["last_sync_at"]), datetime.UTC)
+            if stored.get("last_sync_at")
+            else None
+        )
         for account in entry.get("accounts") or []:
             accounts.append(
                 {
@@ -443,11 +451,12 @@ def health_payload(
                     "name": account["name"],
                     "org_name": institution,
                     "connection_id": item_id,
-                    "balance_cents": account.get("balance_cents") or 0,
+                    "balance_cents": account.get("balance_cents"),
                     "available_cents": account.get("available_cents"),
                     "balance_date": account.get("balance_updated") or balance_date,
                     "last_transaction_date": None,
                     "currency": account.get("currency", "USD"),
+                    "feed_read_at": feed_read_at,
                 }
             )
     return {"accounts": accounts, "errors": errors}

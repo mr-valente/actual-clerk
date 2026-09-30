@@ -710,8 +710,11 @@ export class ActualService {
       if (start) filter.date.$gte = start;
       if (end) filter.date.$lte = end;
     }
+    // Every row, split parents included: the parent is the one that carries a
+    // provider's imported_id, and the default view leaves parents out.
     const rows = await this._query(this.api.q('transactions')
       .filter(filter)
+      .options({ splits: 'all' })
       .select([
         'id',
         'date',
@@ -891,7 +894,10 @@ export class ActualService {
   async deleteTransactions(params) {
     const ids = [...new Set((params.transactionIds || []).map(cleanString).filter(Boolean))];
     if (!ids.length) return { deleted: [], missing: [] };
-    const rows = await this._query(this.api.q('transactions').filter({ id: { $oneof: ids } }).select(['id']));
+    const rows = await this._query(this.api.q('transactions')
+      .filter({ id: { $oneof: ids } })
+      .options({ splits: 'all' })
+      .select(['id']));
     const present = new Set(rows.map(row => cleanString(row.id)));
     const deleted = ids.filter(id => present.has(id));
     if (deleted.length) {
@@ -912,6 +918,7 @@ export class ActualService {
     if (!ids.length) return { applied: [], skipped: [] };
     const rows = await this._query(this.api.q('transactions')
       .filter({ id: { $oneof: ids } })
+      .options({ splits: 'all' })
       .select(['id', 'imported_id', 'cleared', 'date', 'amount']));
     const existing = new Map(rows.map(row => [cleanString(row.id), row]));
     const planned = [];
