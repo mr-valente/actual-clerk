@@ -311,6 +311,9 @@ CREATE TABLE IF NOT EXISTS anticipated_charges (
     -- Set once the phone's day has been written onto the matched bank row,
     -- so a date the person later changes in Actual is left as they put it.
     date_carried INTEGER NOT NULL DEFAULT 0,
+    -- Rows this charge was settled against and then reopened from, comma
+    -- separated: the person said it is not them, so they are never matched again.
+    rejected_transaction_ids TEXT NOT NULL DEFAULT '',
     resolved_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -549,6 +552,7 @@ class Database:
             "category_source": "TEXT NOT NULL DEFAULT ''",
             "category_confidence": "REAL NOT NULL DEFAULT 0",
             "date_carried": "INTEGER NOT NULL DEFAULT 0",
+            "rejected_transaction_ids": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in additions.items():
             if columns and column not in columns:
@@ -2572,7 +2576,13 @@ class Database:
         now = time.time()
         with self.connect() as connection:
             cursor = connection.execute(
-                "UPDATE anticipated_charges SET status='open', matched_transaction_id='', "
+                "UPDATE anticipated_charges SET status='open', "
+                # A row it was settled against is one it is not: never again.
+                "rejected_transaction_ids=CASE WHEN matched_transaction_id='' "
+                "THEN rejected_transaction_ids WHEN rejected_transaction_ids='' "
+                "THEN matched_transaction_id "
+                "ELSE rejected_transaction_ids || ',' || matched_transaction_id END, "
+                "matched_transaction_id='', "
                 "matched_payee='', matched_date='', match_reason='', date_carried=0, "
                 "resolved_at=NULL, updated_at=? "
                 "WHERE id=? AND status IN ('matched','expired','dismissed')",
@@ -2592,7 +2602,8 @@ class Database:
     def matched_charge_dates(self, *, uncarried_only: bool = False) -> list[dict[str, Any]]:
         """Settled charges with the bank row they settled and the day the phone saw."""
         query = (
-            "SELECT id, actual_account_id, matched_transaction_id, noticed_date, date_carried "
+            "SELECT id, actual_account_id, matched_transaction_id, noticed_date, matched_date, "
+            "date_carried "
             "FROM anticipated_charges WHERE status='matched' AND matched_transaction_id != ''"
         )
         if uncarried_only:

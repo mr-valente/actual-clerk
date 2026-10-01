@@ -157,6 +157,19 @@ def test_the_same_merchant_wins_over_a_nearer_date():
     assert matches[0].reason == "amount and merchant"
 
 
+def test_a_row_the_person_rejected_is_never_matched_again():
+    rejected = AnticipatedCharge("c1", "acct", -1200, datetime.date(2026, 9, 30), "7 eleven", frozenset({"t-wrong"}))
+    matches = match_charges(
+        [rejected],
+        [
+            CandidateTransaction("t-wrong", "acct", -1200, datetime.date(2026, 10, 1), "7 eleven"),
+            CandidateTransaction("t-right", "acct", -1200, datetime.date(2026, 10, 3), "7 eleven"),
+        ],
+        window_days=10,
+    )
+    assert [match.transaction_id for match in matches] == ["t-right"]
+
+
 def test_two_identical_coffees_settle_one_each():
     charges = [charge("c1", cents=-450), charge("c2", cents=-450, noticed=TODAY + datetime.timedelta(days=1))]
     rows = [candidate("t1", cents=-450), candidate("t2", cents=-450, date=TODAY + datetime.timedelta(days=1))]
@@ -399,6 +412,13 @@ def test_resolving_is_once_and_reopening_restores(database, settings):
     assert database.reopen_anticipated_charge(row["id"]) is True
     assert database.get_anticipated_charge(row["id"])["status"] == "open"
     assert database.matched_transaction_ids() == set()
+    # The row it was wrongly settled against is remembered as not this charge.
+    database.resolve_anticipated_charge(row["id"], "matched", matched_transaction_id="t2")
+    database.reopen_anticipated_charge(row["id"])
+    assert database.get_anticipated_charge(row["id"])["rejected_transaction_ids"] == "t1,t2"
+    database.resolve_anticipated_charge(row["id"], "dismissed")
+    database.reopen_anticipated_charge(row["id"])
+    assert database.get_anticipated_charge(row["id"])["rejected_transaction_ids"] == "t1,t2"
 
 
 # ----------------------------------------------------------------- reconcile
@@ -486,7 +506,8 @@ def test_a_settled_charge_s_row_is_dated_once_on_the_day_the_phone_saw(database,
     )
     anticipated.reconcile(database, snap, settings, today=TODAY)
     updates, finished = anticipated.date_corrections(database, snap)
-    assert updates == [{"charge_id": row["id"], "transaction_id": "t-bb", "date": datetime.date(2026, 8, 19)}]
+    assert updates == [{"charge_id": row["id"], "transaction_id": "t-bb", "date": datetime.date(2026, 8, 19),
+                        "from_date": datetime.date(2026, 8, 21)}]
     assert finished == [already["id"]]
     database.mark_dates_carried([row["id"], *finished])
     assert anticipated.date_corrections(database, snap) == ([], [])

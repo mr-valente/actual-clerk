@@ -110,7 +110,9 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
 
 Every step is visible. The Connections page lists the phone sources, what is
 waiting for the bank, and what recently settled; a charge can be dismissed by
-hand, and a wrong match reopened. The only change this feature makes in
+hand, and a wrong match reopened: the charge counts again, is never matched
+to that row again, and the row goes back to the bank's date unless you have
+dated it yourself since. The only change this feature makes in
 Actual is the date of a row a charge settled, as above.
 
 ## Setting it up

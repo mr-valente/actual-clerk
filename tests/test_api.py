@@ -1745,3 +1745,38 @@ async def test_reports_are_read_from_the_last_snapshot(client):
     assert stored["months"][0]["status"] == "settling"
     assert stored["total_remaining_cents"] == 1200
     assert stored["stale"] is not None
+
+
+async def test_reopening_a_wrong_match_puts_the_bank_s_date_back(client, gateway):
+    database = client.database
+    src = database.upsert_notification_source({
+        "device_id": "phone-1", "device_name": "Pixel", "package_name": "com.konylabs.capitalone",
+        "app_label": "Capital One", "actual_account_id": "acct-card", "account_name": "Venture",
+    })
+    charge, _ = database.add_anticipated_charge({
+        "source_id": src["id"], "actual_account_id": "acct-card", "notification_key": "k1", "kind": "charge",
+        "amount_cents": -1200, "merchant": "7-Eleven", "merchant_key": "7 eleven", "title": "", "text": "",
+        "noticed_at": 1.0, "noticed_date": "2026-09-30", "status": "open",
+    })
+    database.resolve_anticipated_charge(charge["id"], "matched", matched_transaction_id="row-x",
+                                        matched_date="2026-10-03", match_reason="amount and date")
+    database.mark_dates_carried([charge["id"]])
+    written: list[dict[str, Any]] = []
+
+    async def redate_transactions(updates):
+        written.extend(updates)
+        return {"applied": [], "skipped": []}
+
+    gateway.redate_transactions = redate_transactions
+    response = await client.post(f"/api/anticipated/charges/{charge['id']}/reopen")
+    assert response.status_code == 200
+    assert written == [{"transaction_id": "row-x", "date": "2026-10-03", "from_date": "2026-09-30"}]
+    reopened = database.get_anticipated_charge(charge["id"])
+    assert reopened["status"] == "open" and reopened["date_carried"] == 0
+
+    # A charge whose date was never carried leaves its row alone.
+    database.resolve_anticipated_charge(charge["id"], "matched", matched_transaction_id="row-x",
+                                        matched_date="2026-10-03")
+    written.clear()
+    await client.post(f"/api/anticipated/charges/{charge['id']}/reopen")
+    assert written == []

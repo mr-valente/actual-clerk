@@ -260,9 +260,32 @@ def date_corrections(
             finished.append(row["id"])
             continue
         updates.append(
-            {"charge_id": row["id"], "transaction_id": item["id"], "date": noticed}
+            {
+                "charge_id": row["id"],
+                "transaction_id": item["id"],
+                "date": noticed,
+                "from_date": item.get("date"),
+            }
         )
     return updates, finished
+
+
+def date_restoration(charge: dict[str, Any]) -> dict[str, Any] | None:
+    """What putting a settled row back on the bank's date takes, when this charge moved it."""
+
+    if (
+        charge.get("status") != MATCHED
+        or not charge.get("date_carried")
+        or not charge.get("matched_transaction_id")
+        or not charge.get("matched_date")
+        or charge.get("matched_date") == charge.get("noticed_date")
+    ):
+        return None
+    return {
+        "transaction_id": charge["matched_transaction_id"],
+        "date": charge["matched_date"],
+        "from_date": charge["noticed_date"],
+    }
 
 
 def classify(
@@ -669,4 +692,5 @@ def _as_charge(row: dict[str, Any]) -> AnticipatedCharge:
         amount_cents=int(row.get("amount_cents", 0)),
         noticed_date=noticed,
         merchant_key=str(row.get("merchant_key") or ""),
+        rejected=frozenset(filter(None, str(row.get("rejected_transaction_ids") or "").split(","))),
     )

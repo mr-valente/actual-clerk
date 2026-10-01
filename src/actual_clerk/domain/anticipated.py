@@ -166,6 +166,8 @@ class AnticipatedCharge:
     amount_cents: int
     noticed_date: datetime.date
     merchant_key: str = ""
+    # Rows the person has said this charge is not, by reopening a match.
+    rejected: frozenset[str] = frozenset()
 
 
 @dataclass(frozen=True)
@@ -220,7 +222,9 @@ def match_charges(
         candidates = [
             transaction
             for transaction in by_account.get((charge.account_id, charge.amount_cents), [])
-            if transaction.id not in used and earliest <= transaction.date <= latest
+            if transaction.id not in used
+            and transaction.id not in charge.rejected
+            and earliest <= transaction.date <= latest
         ]
         if not candidates:
             continue

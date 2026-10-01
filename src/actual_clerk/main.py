@@ -2099,10 +2099,19 @@ async def anticipated_dismiss(charge_id: str, request: Request) -> dict[str, Any
 async def anticipated_reopen(charge_id: str, request: Request) -> dict[str, Any]:
     """Count a settled or dismissed anticipation again, for a match that was wrong."""
     database = _database(request)
-    if not database.get_anticipated_charge(charge_id):
+    charge = database.get_anticipated_charge(charge_id)
+    if not charge:
         raise HTTPException(status_code=404, detail="Anticipated charge not found")
+    restore = anticipated.date_restoration(charge)
     if not database.reopen_anticipated_charge(charge_id):
         raise HTTPException(status_code=409, detail="This charge is already open, or was never read")
+    if restore:
+        # The row was dated on the phone's day because of this match. Put the
+        # bank's date back, unless someone has dated it by hand since.
+        try:
+            await _gateway(request).redate_transactions([restore])
+        except ActualGatewayError as exc:
+            log.warning("Could not restore the bank's date after reopening a charge: %s", exc)
     with contextlib.suppress(Exception):
         await _jobs(request).refresh_now()
     return {"status": anticipated.OPEN}

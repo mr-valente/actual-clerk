@@ -983,6 +983,8 @@ export class ActualService {
       else if (row.reconciled) reason = 'reconciled';
       else if (row.is_child) reason = 'split_child';
       else if (isoDate(row.date) === date) reason = 'no_change';
+      // Someone dated it by hand since: theirs stands.
+      else if (update.from_date && isoDate(row.date) !== isoDate(update.from_date)) reason = 'changed';
       if (reason) {
         skipped.push({ id, reason });
         continue;

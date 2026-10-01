@@ -589,8 +589,12 @@ class ActualGateway:
         payload = []
         for item in updates:
             row = {"transaction_id": str(item["transaction_id"]), "date": item["date"]}
-            if isinstance(row["date"], datetime.date):
-                row["date"] = row["date"].isoformat()
+            # Only move a row still on this date, so a date set by hand stands.
+            if item.get("from_date"):
+                row["from_date"] = item["from_date"]
+            for key in ("date", "from_date"):
+                if isinstance(row.get(key), datetime.date):
+                    row[key] = row[key].isoformat()
             payload.append(row)
         return await self._call("redateTransactions", {"updates": payload})
 

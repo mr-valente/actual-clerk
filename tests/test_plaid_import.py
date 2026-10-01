@@ -222,6 +222,9 @@ def test_a_row_is_dated_on_the_day_of_purchase_not_the_day_it_posted():
     assert convert(late)["date"] == datetime.date(2026, 9, 30)
     # A bank that gives no authorisation date leaves the posting date.
     assert convert(plaid_txn("t", 1, "2026-10-02", authorized_date=None))["date"] == datetime.date(2026, 10, 2)
+    # Pay that posts on the 1st is the 1st's income, whatever the bank authorised.
+    paycheck = plaid_txn("t-pay", -2643.04, "2026-10-01", authorized_date="2026-09-30")
+    assert convert(paycheck)["date"] == datetime.date(2026, 10, 1)
     # Credited on the 30th, "authorised" on the 1st: it still happened on the 30th.
     dividend = plaid_txn("t-div", -23.84, "2026-09-30", authorized_date="2026-10-01")
     assert transaction_date(dividend) == datetime.date(2026, 9, 30)

@@ -1216,7 +1216,7 @@ async def test_a_settled_phone_charge_dates_its_bank_row_and_counts_in_its_month
     )
     overview = await manager.refresh_now()
     assert manager.gateway.redated == [
-        {"charge_id": row["id"], "transaction_id": "txn-ebay", "date": noticed}
+        {"charge_id": row["id"], "transaction_id": "txn-ebay", "date": noticed, "from_date": posted}
     ]
     assert overview["anticipated_summary"]["redated"] == 1
     assert database.get_anticipated_charge(row["id"])["date_carried"] == 1

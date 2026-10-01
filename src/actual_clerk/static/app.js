@@ -44,6 +44,7 @@ const state = {
   health: null,
   plaid: null,
   reports: null,
+  reportsFingerprint: "",
   activityView: "all",
   activityFingerprint: "",
   decisionSearch: "",
@@ -410,7 +411,7 @@ async function renderRoute({ quiet = false, poll = false } = {}) {
       try { state.health = await api("/api/health"); } catch { /* keep the last answer */ }
     }
     if (state.route === "overview") await renderOverview();
-    if (state.route === "reports") await renderReports();
+    if (state.route === "reports") await renderReports({ poll });
     if (state.route === "intelligence") await renderIntelligence({ poll });
     if (state.route === "accounts") await renderAccounts();
     if (state.route === "activity") await renderActivity();
@@ -501,7 +502,10 @@ const MONTH_STATUS = {
 function monthStatusChip(item) {
   const [kind, label] = MONTH_STATUS[item.status] || ["muted", titleCase(item.status)];
   const title = item.status === "settling"
-    ? `Late charges can still post until ${shortDate(item.settles_on)}${item.anticipated_count ? `, and ${item.anticipated_count} phone charge${item.anticipated_count === 1 ? " is" : "s are"} still waiting on the bank` : ""}.`
+    ? [
+      state.reports?.today && state.reports.today > item.settles_on ? "" : `Late charges can still post until ${shortDate(item.settles_on)}.`,
+      item.anticipated_count ? `${item.anticipated_count} phone charge${item.anticipated_count === 1 ? " is" : "s are"} still waiting on the bank.` : "",
+    ].filter(Boolean).join(" ")
     : item.status === "in_progress" ? `Day ${item.day_of_month} of ${item.days_in_month}.` : "Every charge for this month has posted.";
   return `<span class="status-chip ${kind}" title="${escapeHtml(title)}">${label}</span>`;
 }
@@ -525,7 +529,8 @@ function wholeMoney(cents) {
 
 function monthsChart(months, available = 720) {
   const values = months.map((item) => item.remaining_cents);
-  const step = niceStep(Math.max(1, Math.max(0, ...values) - Math.min(0, ...values)));
+  // At least $100 a step, so a month with nothing in it still has an axis.
+  const step = niceStep(Math.max(40000, Math.max(0, ...values) - Math.min(0, ...values)));
   const top = Math.max(step, Math.ceil(Math.max(0, ...values) / step) * step);
   const bottom = Math.min(0, Math.floor(Math.min(0, ...values) / step) * step);
   const height = 240;
@@ -620,9 +625,12 @@ function closingHero(item, report) {
   const waiting = item.anticipated_count
     ? ` ${item.anticipated_count} phone charge${item.anticipated_count === 1 ? " from " + named + " is" : "s from " + named + " are"} still waiting on the bank.`
     : "";
+  const pastWeek = report.today && report.today > item.settles_on;
   const status = item.status === "final"
     ? "This month is final."
-    : `Settling until ${shortDate(item.settles_on)}: a ${named} purchase the bank posts late still lands here.${waiting}`;
+    : pastWeek
+      ? `Settling until the bank posts what is still waiting.${waiting} Once it has, the month is final.`
+      : `Settling until ${shortDate(item.settles_on)}: a ${named} purchase the bank posts late still lands here.${waiting}`;
   const closed = report.months.filter((month) => month.status !== "in_progress");
   const total = report.total_remaining_cents || 0;
   return `<section class="hero">
@@ -672,10 +680,15 @@ window.addEventListener("resize", () => {
   }, 150);
 });
 
-async function renderReports() {
+async function renderReports({ poll = false } = {}) {
   try { state.reports = await api("/api/reports"); }
   catch (error) { if (!state.reports) throw error; }
   const report = state.reports || {};
+  // A poll that brings the same figures leaves the page alone, so an open
+  // tooltip or a focused column is not swept away every few seconds.
+  const fingerprint = JSON.stringify([report.months, report.total_remaining_cents]);
+  if (poll && fingerprint === state.reportsFingerprint && content.querySelector(".month-chart")) return;
+  state.reportsFingerprint = fingerprint;
   const months = report.months || [];
   const ended = months.filter((item) => item.status !== "in_progress");
   if (!months.length) {

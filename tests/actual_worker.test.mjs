@@ -398,6 +398,7 @@ test('re-dating moves only rows that exist, are not reconciled, and change', asy
       { id: 'agreed', date: '2026-10-02', reconciled: 1, is_child: 0 },
       { id: 'child', date: '2026-10-02', reconciled: 0, is_child: 1 },
       { id: 'same', date: '2026-09-30', reconciled: 0, is_child: 0 },
+      { id: 'byhand', date: '2026-10-05', reconciled: 0, is_child: 0 },
     ] }),
     batchBudgetUpdates: async callback => { await callback(); },
     updateTransaction: async (id, fields) => { written.push({ id, fields }); },
@@ -411,6 +412,7 @@ test('re-dating moves only rows that exist, are not reconciled, and change', asy
     { transaction_id: 'child', date: '2026-09-30' },
     { transaction_id: 'same', date: '2026-09-30' },
     { transaction_id: 'gone', date: '2026-09-30' },
+    { transaction_id: 'byhand', date: '2026-09-30', from_date: '2026-10-02' },
   ] });
   assert.deepEqual(written, [{ id: 'posted', fields: { date: '2026-09-30' } }]);
   assert.deepEqual(result.applied, [{ id: 'posted', date: '2026-09-30', previous_date: '2026-10-02' }]);
@@ -419,6 +421,7 @@ test('re-dating moves only rows that exist, are not reconciled, and change', asy
     { id: 'child', reason: 'split_child' },
     { id: 'same', reason: 'no_change' },
     { id: 'gone', reason: 'deleted' },
+    { id: 'byhand', reason: 'changed' },
   ]);
   assert.equal(syncs, 1);
   assert.deepEqual(await service.dispatch('redateTransactions', {}), { applied: [], skipped: [] });
