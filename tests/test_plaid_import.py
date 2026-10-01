@@ -16,6 +16,7 @@ from actual_clerk.domain.plaid_import import (
     retidy,
     short_payee,
     starting_balance_cents,
+    transaction_date,
 )
 
 CUTOVER = datetime.date(2026, 9, 1)
@@ -212,6 +213,44 @@ def test_a_pending_to_posted_swap_adopts_the_existing_row():
         "amount_cents": -475,
         "date": datetime.date(2026, 9, 5),
     }
+
+
+def test_a_row_is_dated_on_the_day_of_purchase_not_the_day_it_posted():
+    # Bought on the last evening of September, posted on October 2.
+    late = plaid_txn("t-late", 63.38, "2026-10-02", authorized_date="2026-09-30")
+    assert transaction_date(late) == datetime.date(2026, 9, 30)
+    assert convert(late)["date"] == datetime.date(2026, 9, 30)
+    # A bank that gives no authorisation date leaves the posting date.
+    assert convert(plaid_txn("t", 1, "2026-10-02", authorized_date=None))["date"] == datetime.date(2026, 10, 2)
+
+
+def test_posting_does_not_move_a_pending_row_into_the_next_month():
+    existing = [row("row-p", -6338, "2026-09-30", imported_id="t-pending")]
+    result = plan(
+        added=[plaid_txn("t-posted", 63.38, "2026-10-02", authorized_date="2026-09-30",
+                         pending_transaction_id="t-pending")],
+        removed=[{"transaction_id": "t-pending", "account_id": "acc-1"}],
+        existing=existing,
+    )
+    [adoption] = result.adoptions
+    assert "date" not in adoption
+    assert adoption["cleared"] is True
+
+
+def test_a_row_the_phone_dated_keeps_its_date():
+    existing = [row("row-1", -6338, "2026-09-30", imported_id="t1")]
+    modified = [plaid_txn("t1", 63.38, "2026-10-02", authorized_date="2026-10-01")]
+    assert plan(modified=modified, existing=existing).adoptions[0]["date"] == datetime.date(2026, 10, 1)
+    pinned = plan(modified=modified, existing=existing, pinned_dates={"row-1"})
+    [adoption] = pinned.adoptions
+    assert "date" not in adoption and adoption["cleared"] is True
+
+
+def test_the_cutover_still_reads_the_posting_date():
+    # Made before the cutover but posted after it: the previous provider never
+    # saw it posted, so Plaid delivers it, dated on the day it was made.
+    result = plan(added=[plaid_txn("t1", 4.5, "2026-09-02", authorized_date="2026-08-31")])
+    assert [item["date"] for item in result.imports] == [datetime.date(2026, 8, 31)]
 
 
 def test_a_reversed_pending_charge_is_deleted_but_a_cleared_one_is_kept():

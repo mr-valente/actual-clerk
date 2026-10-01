@@ -70,6 +70,17 @@ class StubGateway:
         self.tags.append(list(catalog))
         return [entry["tag"] for entry in catalog]
 
+    async def redate_transactions(self, updates):
+        self.redated = [dict(item) for item in updates]
+        if self.apply_error is not None:
+            raise self.apply_error
+        return {
+            "applied": [
+                {"id": item["transaction_id"], "date": item["date"].isoformat()} for item in updates
+            ],
+            "skipped": [],
+        }
+
 
 def budget_snapshot(extra_transactions=()):
     # Deliberately irregular visits: this fixture is about filing, and a
@@ -1192,3 +1203,40 @@ async def test_startup_queues_the_phone_job_for_charges_nobody_placed(manager, d
         assert any(job["kind"] == "phone" for job in database.list_jobs())
     finally:
         await manager.stop()
+
+
+async def test_a_settled_phone_charge_dates_its_bank_row_and_counts_in_its_month(
+    manager, database, settings_manager
+):
+    row = phone_charge(database, settings_manager, text="Your purchase for $63.38 at eBay was approved.")
+    noticed = datetime.date.fromisoformat(row["noticed_date"])
+    posted = noticed + datetime.timedelta(days=2)
+    manager.gateway.snap = budget_snapshot(
+        [transaction(posted, -6338, payee="eBay", transaction_id="txn-ebay")]
+    )
+    overview = await manager.refresh_now()
+    assert manager.gateway.redated == [
+        {"charge_id": row["id"], "transaction_id": "txn-ebay", "date": noticed}
+    ]
+    assert overview["anticipated_summary"]["redated"] == 1
+    assert database.get_anticipated_charge(row["id"])["date_carried"] == 1
+    # Carried once: a later read does not write again.
+    manager.gateway.redated = []
+    await manager.refresh_now()
+    assert manager.gateway.redated == []
+    reports = database.get_snapshot(processing.REPORTS_SNAPSHOT)
+    assert "months" in reports
+
+
+async def test_a_failed_date_write_is_tried_again_on_the_next_read(manager, database, settings_manager):
+    row = phone_charge(database, settings_manager, text="Your purchase for $63.38 at eBay was approved.")
+    posted = datetime.date.fromisoformat(row["noticed_date"]) + datetime.timedelta(days=1)
+    manager.gateway.snap = budget_snapshot(
+        [transaction(posted, -6338, payee="eBay", transaction_id="txn-ebay")]
+    )
+    manager.gateway.apply_error = ActualGatewayError("Actual is away")
+    await manager.refresh_now()
+    assert database.get_anticipated_charge(row["id"])["date_carried"] == 0
+    manager.gateway.apply_error = None
+    await manager.refresh_now()
+    assert database.get_anticipated_charge(row["id"])["date_carried"] == 1

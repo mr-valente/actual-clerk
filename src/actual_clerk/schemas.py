@@ -351,6 +351,13 @@ class RetidyImportsRequest(BaseModel):
     dry_run: bool = True
 
 
+class RedateImportsRequest(BaseModel):
+    """Date rows already in Actual on the day the purchase was made."""
+
+    # Reports by default: the run moves dates in Actual.
+    dry_run: bool = True
+
+
 # --------------------------------------------------------------- migration
 
 

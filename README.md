@@ -57,6 +57,8 @@ On Actual's Tracking Budget this needs no configuration in Clerk at all: budget 
 
 Unspent budget carries forward to its own category for up to a year, so a variable bill absorbs its own swings and an annual charge budgeted a twelfth at a time is covered when it finally lands — instead of blowing a hole in that month.
 
+A purchase counts in the month you made it, not the month the bank posted it: rows from Plaid are dated by the card's authorisation date, and a charge your phone saw is dated by the phone. **Reports** shows every month since you started budgeting — what it had to spend, what it spent, what was saved or overspent — with a chart of the trend. A month that has just ended is marked *settling* for a week (or while a phone charge from it is still waiting on the bank), because late-posting purchases still land in it; after that it is *final*.
+
 A refund settles against the month that paid for the purchase. Return something you bought this month and the two cancel; when the purchase belongs to a month already reported, that report stands and the money comes back as yours to spend now — never as spending pushed below zero, which is how a budget ends up claiming you have more than a whole month left.
 
 ### Counts a card charge the moment it happens

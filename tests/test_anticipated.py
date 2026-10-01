@@ -212,6 +212,37 @@ def test_anticipated_charges_count_as_spent_without_touching_free_money():
     assert result.remaining_cents == 220000 - 11500
 
 
+def test_an_anticipated_charge_counts_in_the_month_it_was_made():
+    # Bought on the last evening of July; the bank has not posted it by the
+    # 21st of August. It was July's money, so August starts untouched by it.
+    result = build_budget_report(
+        today=TODAY,
+        categories=CATEGORIES,
+        budgeted={"rent": 180000},
+        transactions=[TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc")],
+        anticipated=[
+            AnticipatedInfo("july", -6338, date=datetime.date(2026, 7, 31)),
+            AnticipatedInfo("bill", -10000, category_id="rent", date=datetime.date(2026, 7, 30)),
+            AnticipatedInfo("august", -1200, date=datetime.date(2026, 8, 20)),
+        ],
+    )
+    assert result.anticipated_cents == 1200
+    assert result.anticipated_count == 1
+    assert result.committed_spent_cents == 0
+    assert result.spent_cents == 1200
+    july = build_budget_report(
+        today=datetime.date(2026, 7, 31),
+        categories=CATEGORIES,
+        budgeted={"rent": 180000},
+        transactions=[],
+        anticipated=[
+            AnticipatedInfo("july", -6338, date=datetime.date(2026, 7, 31)),
+            AnticipatedInfo("august", -1200, date=datetime.date(2026, 8, 20)),
+        ],
+    )
+    assert july.anticipated_cents == 6338
+
+
 def test_a_categorized_anticipation_is_charged_to_its_own_category():
     result = build_budget_report(
         today=TODAY,
@@ -414,6 +445,54 @@ def test_reconcile_leaves_an_unmatched_charge_open_and_counting(database, settin
     assert summary["open"][0]["counts"] is True
     report = budget_report(snap, settings, today=TODAY, anticipated=summary["open"])
     assert report["anticipated_cents"] == 1234
+
+
+def test_a_phone_charge_from_last_month_does_not_count_in_this_one(database, settings):
+    src = source(database)
+    # 23:27 Eastern on July 31 is already August 1 in UTC.
+    late = datetime.datetime(2026, 8, 1, 3, 27, tzinfo=datetime.UTC)
+    settings.timezone = "America/New_York"
+    anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(late.timestamp() * 1000),
+        title="", text="A charge of $63.38 at eBay was approved.",
+    )
+    snap = snapshot(accounts=[account("Card", account_id="acct-card")], transactions=[])
+    summary = anticipated.reconcile(database, snap, settings, today=datetime.date(2026, 8, 1))
+    assert summary["open"][0]["noticed_date"] == "2026-07-31"
+    report = budget_report(snap, settings, today=datetime.date(2026, 8, 1), anticipated=summary["open"])
+    assert report["anticipated_cents"] == 0
+    assert report["spent_cents"] == 0
+    july = budget_report(snap, settings, today=datetime.date(2026, 7, 31), anticipated=summary["open"])
+    assert july["anticipated_cents"] == 6338
+
+
+def test_a_settled_charge_s_row_is_dated_once_on_the_day_the_phone_saw(database, settings):
+    src = source(database)
+    noticed = datetime.datetime(2026, 8, 19, 15, tzinfo=datetime.UTC)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(noticed.timestamp() * 1000),
+        title="", text="A charge of $12.34 at BLUE BOTTLE was approved.",
+    )
+    already, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(noticed.timestamp() * 1000) + 1,
+        title="", text="A charge of $5.00 at TEA was approved.",
+    )
+    snap = snapshot(
+        accounts=[account("Card", account_id="acct-card")],
+        transactions=[
+            transaction(datetime.date(2026, 8, 21), -1234, payee="Blue Bottle", account_id="acct-card", transaction_id="t-bb"),
+            transaction(datetime.date(2026, 8, 19), -500, payee="Tea", account_id="acct-card", transaction_id="t-tea"),
+        ],
+    )
+    anticipated.reconcile(database, snap, settings, today=TODAY)
+    updates, finished = anticipated.date_corrections(database, snap)
+    assert updates == [{"charge_id": row["id"], "transaction_id": "t-bb", "date": datetime.date(2026, 8, 19)}]
+    assert finished == [already["id"]]
+    database.mark_dates_carried([row["id"], *finished])
+    assert anticipated.date_corrections(database, snap) == ([], [])
+    # Reopening a charge lets its next settlement date its row again.
+    database.reopen_anticipated_charge(row["id"])
+    assert database.get_anticipated_charge(row["id"])["date_carried"] == 0
 
 
 def test_reconcile_does_nothing_when_the_feature_is_off(database, settings):

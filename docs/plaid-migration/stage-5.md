@@ -241,6 +241,25 @@ and keeping both providers, which Clerk supports indefinitely.
   ```
 
   Payees the pass leaves with no transactions and no rules are deleted.
+- **Early imports dated on the posting day.** Rows imported before Clerk
+  read Plaid's `authorized_date` (October 2026) carry the day the bank
+  posted them, which put a purchase made on a month's last evening into the
+  next month. One pass dates them on the day of purchase: the phone's day
+  for a row a phone charge settled, Plaid's authorisation date for a row
+  Plaid delivered, and the same for a SimpleFIN-era row paired with Plaid's
+  copy (same account and amount, posted within a day). Reconciled rows are
+  never moved. It reads Plaid's history from the start without touching any
+  cursor, and reports by default:
+
+  ```bash
+  curl -s -X POST http://shiro:30031/api/plaid/redate \
+    -H 'content-type: application/json' -d '{}'                    # preview
+  curl -s -X POST http://shiro:30031/api/plaid/redate \
+    -H 'content-type: application/json' -d '{"dry_run": false}'    # apply
+  ```
+
+  `changes_month` in the preview counts the rows that move to another
+  month. Applying queues a sync so the Overview and Reports follow.
 - **Not exercised outside the sandbox** before this runbook: OAuth pop-ups
   with real banks, and Plaid's real posting behaviour for pending swaps. The
   planner and engine tests cover both; the first week's Activity log is the

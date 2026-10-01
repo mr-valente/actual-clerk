@@ -1697,3 +1697,51 @@ async def test_retidying_early_plaid_imports_is_a_dry_run_unless_asked(client, g
     assert applied["applied"] == [{"id": "row-div"}]
     assert written == [{"transaction_id": "row-div", "payee_name": "Oak Knoll School",
                         "notes": "OAK KNOLL SCHOOL TYPE: PAYROLL"}]
+
+
+async def test_redating_is_a_dry_run_unless_asked_and_rereads_the_budget_after(client, gateway):
+    database = client.database
+    src = database.upsert_notification_source({
+        "device_id": "phone-1", "device_name": "Pixel", "package_name": "com.konylabs.capitalone",
+        "app_label": "Capital One", "actual_account_id": "acct-card", "account_name": "Venture",
+    })
+    charge, _ = database.add_anticipated_charge({
+        "source_id": src["id"], "actual_account_id": "acct-card", "notification_key": "k1", "kind": "charge",
+        "amount_cents": -6338, "merchant": "eBay", "merchant_key": "ebay", "title": "", "text": "",
+        "noticed_at": 1.0, "noticed_date": "2026-09-30", "status": "open",
+    })
+    database.resolve_anticipated_charge(charge["id"], "matched", matched_transaction_id="row-ebay")
+    written: list[dict[str, Any]] = []
+
+    async def account_transactions(account_id, *, start=None, end=None):
+        return [{"id": "row-ebay", "date": datetime.date(2026, 10, 2), "amount_cents": -6338,
+                 "payee_name": "eBay", "imported_id": ""}] if account_id == "acct-card" else []
+
+    async def redate_transactions(updates):
+        written.extend(updates)
+        return {"applied": [{"id": item["transaction_id"], "date": item["date"]} for item in updates], "skipped": []}
+
+    gateway.account_transactions = account_transactions
+    gateway.redate_transactions = redate_transactions
+    preview = (await client.post("/api/plaid/redate", json={})).json()
+    assert preview["dry_run"] is True
+    assert [(c["date_before"], c["date"], c["source"], c["changes_month"]) for c in preview["changes"]] == [
+        ("2026-10-02", "2026-09-30", "phone", True)
+    ]
+    assert written == []
+    assert not any(job["kind"] == "sync" for job in database.list_jobs())
+    applied = (await client.post("/api/plaid/redate", json={"dry_run": False})).json()
+    assert written == [{"transaction_id": "row-ebay", "date": "2026-09-30"}]
+    assert applied["applied"] == [{"id": "row-ebay", "date": "2026-09-30"}]
+    assert any(job["kind"] == "sync" and job["trigger"] == "redate" for job in database.list_jobs())
+
+
+async def test_reports_are_read_from_the_last_snapshot(client):
+    empty = (await client.get("/api/reports")).json()
+    assert empty["months"] == [] and empty["stale"] is None
+    client.database.set_snapshot("reports", {"months": [{"month": "2026-09", "status": "settling"}],
+                                             "total_remaining_cents": 1200})
+    stored = (await client.get("/api/reports")).json()
+    assert stored["months"][0]["status"] == "settling"
+    assert stored["total_remaining_cents"] == 1200
+    assert stored["stale"] is not None

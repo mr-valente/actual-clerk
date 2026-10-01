@@ -43,6 +43,7 @@ const state = {
   settings: null,
   health: null,
   plaid: null,
+  reports: null,
   activityView: "all",
   activityFingerprint: "",
   decisionSearch: "",
@@ -53,6 +54,7 @@ const state = {
 
 const pageMeta = {
   overview: ["Budget", "Overview"],
+  reports: ["How each month went", "Reports"],
   intelligence: ["What Clerk knows", "Intelligence"],
   accounts: ["Bank sync", "Connections"],
   activity: ["History", "Activity"],
@@ -408,6 +410,7 @@ async function renderRoute({ quiet = false, poll = false } = {}) {
       try { state.health = await api("/api/health"); } catch { /* keep the last answer */ }
     }
     if (state.route === "overview") await renderOverview();
+    if (state.route === "reports") await renderReports();
     if (state.route === "intelligence") await renderIntelligence({ poll });
     if (state.route === "accounts") await renderAccounts();
     if (state.route === "activity") await renderActivity();
@@ -478,6 +481,223 @@ async function renderOverview() {
         </article>
       </div>
     </section>`;
+}
+
+// ------------------------------------------------------------------ reports
+
+function monthName(key, { short = false, year: withYear = true } = {}) {
+  const [year, month] = String(key).split("-").map(Number);
+  if (!year || !month) return escapeHtml(key);
+  const options = short ? { month: "short" } : withYear ? { month: "long", year: "numeric" } : { month: "long" };
+  return new Intl.DateTimeFormat(undefined, options).format(new Date(year, month - 1, 1));
+}
+
+const MONTH_STATUS = {
+  final: ["ok", "Final"],
+  settling: ["warning", "Settling"],
+  in_progress: ["running", "In progress"],
+};
+
+function monthStatusChip(item) {
+  const [kind, label] = MONTH_STATUS[item.status] || ["muted", titleCase(item.status)];
+  const title = item.status === "settling"
+    ? `Late charges can still post until ${shortDate(item.settles_on)}${item.anticipated_count ? `, and ${item.anticipated_count} phone charge${item.anticipated_count === 1 ? " is" : "s are"} still waiting on the bank` : ""}.`
+    : item.status === "in_progress" ? `Day ${item.day_of_month} of ${item.days_in_month}.` : "Every charge for this month has posted.";
+  return `<span class="status-chip ${kind}" title="${escapeHtml(title)}">${label}</span>`;
+}
+
+function leftOverLabel(cents) {
+  return cents < 0 ? `${money(-cents)} over` : `${money(cents)} saved`;
+}
+
+function niceStep(span) {
+  const raw = span / 4;
+  const power = 10 ** Math.floor(Math.log10(raw || 1));
+  return [1, 2, 2.5, 5, 10].map((factor) => factor * power).find((step) => step >= raw) || power * 10;
+}
+
+// One column per month from a zero baseline: up is money left over, down is
+// past the free money. A month that is not final yet is drawn lighter.
+function wholeMoney(cents) {
+  try { return new Intl.NumberFormat(undefined, { style: "currency", currency: currency(), maximumFractionDigits: 0 }).format(Math.round(cents / 100)); }
+  catch { return `${Math.round(cents / 100)} ${currency()}`; }
+}
+
+function monthsChart(months, available = 720) {
+  const values = months.map((item) => item.remaining_cents);
+  const step = niceStep(Math.max(1, Math.max(0, ...values) - Math.min(0, ...values)));
+  const top = Math.max(step, Math.ceil(Math.max(0, ...values) / step) * step);
+  const bottom = Math.min(0, Math.floor(Math.min(0, ...values) / step) * step);
+  const height = 240;
+  const pad = { top: 24, bottom: 34, left: 64, right: 12 };
+  // Drawn at the panel's own width, so text is never scaled with the drawing.
+  const slot = Math.max(44, Math.min(160, (available - pad.left - pad.right) / Math.max(1, months.length)));
+  const width = pad.left + pad.right + months.length * slot;
+  const plot = height - pad.top - pad.bottom;
+  const y = (cents) => pad.top + ((top - cents) / (top - bottom)) * plot;
+  const zero = y(0);
+  const ticks = [];
+  for (let value = bottom; value <= top + 1; value += step) ticks.push(value);
+  const barWidth = 24;
+  const labelEvery = months.length > 8 ? months.length : 1;
+  const bars = months.map((item, index) => {
+    const value = item.remaining_cents;
+    const x = pad.left + index * slot + (slot - barWidth) / 2;
+    const end = y(value);
+    const length = Math.abs(end - zero);
+    const r = Math.min(4, length);
+    const up = value >= 0;
+    // Rounded at the data end, square on the baseline.
+    const path = length < 0.5
+      ? `M${x},${zero - 0.5}h${barWidth}v1h${-barWidth}z`
+      : up
+        ? `M${x},${zero}V${end + r}Q${x},${end} ${x + r},${end}H${x + barWidth - r}Q${x + barWidth},${end} ${x + barWidth},${end + r}V${zero}Z`
+        : `M${x},${zero}V${end - r}Q${x},${end} ${x + r},${end}H${x + barWidth - r}Q${x + barWidth},${end} ${x + barWidth},${end - r}V${zero}Z`;
+    const showLabel = index === months.length - 1 || index % labelEvery === 0 || months.length <= 8;
+    const labelY = up ? end - 7 : end + 14;
+    return `<g class="month-bar ${up ? "saved" : "over"} ${item.status}" tabindex="0" data-index="${index}" role="img" aria-label="${escapeHtml(`${monthName(item.month)}: ${leftOverLabel(value)}, ${MONTH_STATUS[item.status]?.[1] || item.status}`)}">
+      <rect class="hit" x="${pad.left + index * slot + 4}" y="${pad.top}" width="${slot - 8}" height="${plot}" />
+      <path d="${path}" />
+      ${showLabel ? `<text class="bar-value" x="${x + barWidth / 2}" y="${labelY}" text-anchor="middle">${escapeHtml(wholeMoney(value))}</text>` : ""}
+      <text class="axis-label" x="${x + barWidth / 2}" y="${height - pad.bottom + 18}" text-anchor="middle">${escapeHtml(monthName(item.month, { short: true }))}</text>
+    </g>`;
+  }).join("");
+  const grid = ticks.map((value) => `<g class="tick ${value === 0 ? "zero" : ""}"><line x1="${pad.left}" x2="${width - pad.right}" y1="${y(value)}" y2="${y(value)}" /><text x="${pad.left - 8}" y="${y(value) + 3}" text-anchor="end">${escapeHtml(wholeMoney(value))}</text></g>`).join("");
+  return `<div class="month-chart">
+    <svg viewBox="0 0 ${width} ${height}" width="${width}" height="${height}" role="group" aria-label="Money left over or overspent each month">${grid}${bars}</svg>
+    <div class="chart-tip" role="tooltip" hidden></div>
+  </div>`;
+}
+
+function wireMonthsChart(months) {
+  const chart = content.querySelector(".month-chart");
+  if (!chart) return;
+  const tip = chart.querySelector(".chart-tip");
+  const show = (group) => {
+    const item = months[Number(group.dataset.index)];
+    if (!item) return;
+    tip.replaceChildren();
+    const value = document.createElement("strong");
+    value.textContent = leftOverLabel(item.remaining_cents);
+    const title = document.createElement("span");
+    title.textContent = `${monthName(item.month)} · ${MONTH_STATUS[item.status]?.[1] || item.status}`;
+    const detail = document.createElement("small");
+    detail.textContent = `${money(item.spent_cents)} spent of ${money(item.available_cents)}`;
+    tip.append(value, title, detail);
+    tip.hidden = false;
+    // Above the column's top, which for an overspent month is the zero line.
+    const box = group.querySelector("path").getBoundingClientRect();
+    const frame = chart.getBoundingClientRect();
+    const left = Math.min(Math.max(box.left - frame.left + box.width / 2, 75), frame.width - 75);
+    tip.style.left = `${left}px`;
+    tip.style.top = `${box.top - frame.top - 10}px`;
+  };
+  const hide = () => { tip.hidden = true; };
+  chart.querySelectorAll(".month-bar").forEach((group) => {
+    group.addEventListener("pointerenter", () => show(group));
+    group.addEventListener("focus", () => show(group));
+    group.addEventListener("pointerleave", hide);
+    group.addEventListener("blur", hide);
+  });
+}
+
+function monthRow(item) {
+  const left = item.remaining_cents;
+  return `<tr>
+    <th scope="row">${escapeHtml(monthName(item.month))}</th>
+    <td>${monthStatusChip(item)}</td>
+    <td class="money">${money(item.available_cents)}</td>
+    <td class="money">${money(item.spent_cents)}</td>
+    <td class="money ${left < 0 ? "negative" : "positive"}">${escapeHtml(leftOverLabel(left))}</td>
+    <td class="money">${item.available_cents > 0 ? percent(item.remaining_percent) : "—"}</td>
+  </tr>`;
+}
+
+function closingHero(item, report) {
+  const left = item.remaining_cents;
+  const over = left < 0;
+  const named = monthName(item.month, { year: false });
+  const waiting = item.anticipated_count
+    ? ` ${item.anticipated_count} phone charge${item.anticipated_count === 1 ? " from " + named + " is" : "s from " + named + " are"} still waiting on the bank.`
+    : "";
+  const status = item.status === "final"
+    ? "This month is final."
+    : `Settling until ${shortDate(item.settles_on)}: a ${named} purchase the bank posts late still lands here.${waiting}`;
+  const closed = report.months.filter((month) => month.status !== "in_progress");
+  const total = report.total_remaining_cents || 0;
+  return `<section class="hero">
+    <div class="hero-top">
+      <div class="hero-headline">
+        <p class="eyebrow">${escapeHtml(monthName(item.month))} · ${monthStatusChip(item)}</p>
+        <div class="hero-amount ${over ? "spent" : ""}">
+          <strong>${money(Math.abs(left))}</strong>
+          <span class="pct">${over ? `${percent(Math.abs(item.remaining_percent))} over budget` : `${percent(item.remaining_percent)} saved`}</span>
+        </div>
+        <p class="hero-sub">${over
+          ? `You spent ${money(item.spent_cents)} against ${money(item.available_cents)} of free money, ${money(-left)} more than the month had.`
+          : `You spent ${money(item.spent_cents)} of ${money(item.available_cents)} in free money and kept ${money(left)}.`} ${escapeHtml(status)}</p>
+      </div>
+      <div class="hero-side">
+        <div class="hero-chip"><span>${closed.length > 1 ? `Across ${closed.length} months` : "So far"}</span><strong class="${total < 0 ? "negative" : "positive"} money">${escapeHtml(leftOverLabel(total))}</strong></div>
+        <div class="hero-chip"><span>Months under budget</span><strong>${report.months_under || 0} of ${closed.length}</strong></div>
+      </div>
+    </div>
+    <div class="hero-foot">
+      <div><span>Expected income</span><strong class="money">${money(item.expected_income_cents)}</strong></div>
+      <div><span>Committed (budgeted)</span><strong class="money">${money(item.committed_cents)}</strong></div>
+      <div><span>Free money</span><strong class="money">${money(item.available_cents)}</strong></div>
+      <div><span>Discretionary spent</span><strong class="money">${money(item.discretionary_spent_cents)}</strong></div>
+      <div><span>Committed overspend</span><strong class="money ${item.committed_overspend_cents ? "negative" : ""}">${money(item.committed_overspend_cents)}</strong></div>
+      ${item.uncategorized_count ? `<div><span>Uncategorized</span><strong class="money">${money(item.uncategorized_cents)} · ${item.uncategorized_count}</strong></div>` : ""}
+    </div>
+  </section>`;
+}
+
+function chartWidth() {
+  // The panel spans the content column less its own padding.
+  const style = getComputedStyle(content);
+  const inner = content.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+  return Math.max(280, inner - (window.innerWidth <= 760 ? 20 : 40));
+}
+
+let reportsResize = null;
+window.addEventListener("resize", () => {
+  if (state.route !== "reports" || !state.reports) return;
+  clearTimeout(reportsResize);
+  reportsResize = setTimeout(() => {
+    const slot = content.querySelector(".month-chart-slot");
+    if (!slot) return;
+    slot.innerHTML = monthsChart(state.reports.months || [], chartWidth());
+    wireMonthsChart(state.reports.months || []);
+  }, 150);
+});
+
+async function renderReports() {
+  try { state.reports = await api("/api/reports"); }
+  catch (error) { if (!state.reports) throw error; }
+  const report = state.reports || {};
+  const months = report.months || [];
+  const ended = months.filter((item) => item.status !== "in_progress");
+  if (!months.length) {
+    content.innerHTML = `<div class="panel">${emptyState("▥", "No months to report yet", "Clerk reports on every month that has a budget in Actual, once a sync has read it. Run a sync, or set this month's budget in Actual.")}</div>`;
+    return;
+  }
+  const latest = ended[ended.length - 1];
+  content.innerHTML = `
+    ${latest ? closingHero(latest, report) : ""}
+    <article class="panel">
+      <header class="panel-head"><div><h2>Left over each month</h2><p>Free money minus what was spent: above the line you saved it, below it you went over. Lighter columns can still change.</p></div></header>
+      <div class="chart-legend"><span><i class="saved"></i>Saved</span><span><i class="over"></i>Overspent</span><span><i class="pending"></i>Settling or in progress</span></div>
+      <div class="month-chart-slot">${monthsChart(months, chartWidth())}</div>
+    </article>
+    <article class="panel">
+      <header class="panel-head"><div><h2>Every month</h2><p>Each month is counted as it stood on its last day. A purchase belongs to the day you made it, so one made on the 30th that posts on the 2nd still counts in the month it was made.</p></div></header>
+      <div class="table-scroll"><table class="month-table">
+        <thead><tr><th scope="col">Month</th><th scope="col">Status</th><th scope="col">Free money</th><th scope="col">Spent</th><th scope="col">Left over</th><th scope="col">Share left</th></tr></thead>
+        <tbody>${[...months].reverse().map(monthRow).join("")}</tbody>
+      </table></div>
+    </article>`;
+  wireMonthsChart(months);
 }
 
 // Who decided, in words a person uses.
@@ -1111,7 +1331,7 @@ function anticipatedChargeRow(item, { sources = [], aliases = null } = {}) {
   const outcome = item.status === "matched"
     ? `Posted as ${escapeHtml(item.matched_payee || "a transaction")} on ${shortDate(item.matched_date)} (${escapeHtml(item.match_reason || "")})`
     : item.status === "open"
-      ? `Waiting for the bank · counts as spent${item.kind === "credit" ? " (a credit, so not counted)" : ""}`
+      ? `Waiting for the bank · ${item.kind === "credit" ? "a credit, so not counted" : chargeMonthNote(item)}`
       : item.status === "expired"
         ? "Nothing matching arrived, so it stopped counting"
         : item.status === "dismissed" ? "Dismissed by hand" : escapeHtml((item.text || "").slice(0, 110));
@@ -1132,12 +1352,30 @@ function anticipatedChargeRow(item, { sources = [], aliases = null } = {}) {
   </article>`;
 }
 
+// A phone charge counts in the month it was made, which on the first days of
+// a month is often the one that just ended.
+function chargeMonth(item) { return String(item.noticed_date || "").slice(0, 7); }
+
+function chargeMonthNote(item) {
+  const month = chargeMonth(item);
+  if (!month || month === budget().month) return "counts as spent this month";
+  return `counts in ${monthName(month, { year: false })}`;
+}
+
 function anticipatedOverviewPanel(open) {
   const counted = open.filter((item) => item.counts);
   if (!open.length) return "";
-  const total = counted.reduce((sum, item) => sum - item.amount_cents, 0);
+  const thisMonth = counted.filter((item) => !chargeMonth(item) || chargeMonth(item) === budget().month);
+  const total = thisMonth.reduce((sum, item) => sum - item.amount_cents, 0);
+  const earlier = counted.length - thisMonth.length;
+  const earlierTotal = counted.reduce((sum, item) => sum - item.amount_cents, 0) - total;
   return `<article class="panel anticipated-panel">
-    <header class="panel-head"><div><h2>Anticipated charges</h2><p>${counted.length} charge${counted.length === 1 ? "" : "s"} your phone has seen, ${money(total)} counted as spent until the bank posts ${counted.length === 1 ? "it" : "them"}. Nothing here is written into Actual.</p></div><a href="#accounts" class="panel-link">Phone sources</a></header>
+    <header class="panel-head"><div><h2>Anticipated charges</h2><p>${[
+      `${counted.length} charge${counted.length === 1 ? "" : "s"} your phone has seen, waiting for the bank.`,
+      thisMonth.length ? `${money(total)} counts as spent this month.` : "",
+      earlier ? `${money(earlierTotal)} was spent before this month and counts in the month it was made.` : "",
+      "Nothing here is written into Actual.",
+    ].filter(Boolean).join(" ")}</p></div><a href="#accounts" class="panel-link">Phone sources</a></header>
     <div class="status-list">${open.map((item) => anticipatedChargeRow(item)).join("")}</div>
   </article>`;
 }

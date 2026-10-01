@@ -76,8 +76,12 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
    category is discretionary, because nothing yet says where it will land and
    the conservative reading of a charge is that it competes for free money.
    Free money itself is untouched, so it still equals Actual's Projected
-   Savings. The Overview, the morning report, and the phone all show the
-   figure.
+   Savings. A charge counts in the month the phone saw it, in Clerk's time
+   zone: a purchase at 11 pm on the 30th is that month's spending, even
+   though the bank posts it on the 2nd, so a new month starts untouched by
+   the last evening of the old one. The Overview, the morning report, and
+   the phone all show the figure; Reports shows each earlier month with its
+   own charges.
 6. **Settles it.** Every time the overview is rebuilt (after a sync, a filing
    run, a connection check, the morning report, or a manual refresh), each open
    charge is compared with the transactions Actual holds: same account, exactly
@@ -87,6 +91,12 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
    then a bank-imported row over a hand-entered one. Each transaction settles
    at most one charge, and earlier notifications choose first, so two
    identical coffees on one morning settle one each.
+
+   The settled row is then **dated on the day the phone saw the purchase**,
+   once: the bank's date is when it got round to posting it, and across a
+   month's end that decides which month the money counts in. A reconciled row
+   is left alone, a date you later change in Actual is not changed back, and
+   a Plaid update to the row never moves it again.
 6. **Learns from the settlement.** When the notification's merchant and the
    posted payee differ ("Valve" on the phone, "Steam" on the statement), the
    pair is remembered as an alias; a taught alias is never overwritten by a
@@ -100,8 +110,8 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
 
 Every step is visible. The Connections page lists the phone sources, what is
 waiting for the bank, and what recently settled; a charge can be dismissed by
-hand, and a wrong match reopened. Nothing in Actual ever changes because of
-this feature.
+hand, and a wrong match reopened. The only change this feature makes in
+Actual is the date of a row a charge settled, as above.
 
 ## Setting it up
 
@@ -175,9 +185,9 @@ itself once access is granted.
 
 ## What it is not
 
-- **Not a bank feed.** Anticipated charges never create, modify, or delete a
-  transaction in Actual. They exist so the budget is honest between the card
-  and the bank.
+- **Not a bank feed.** Anticipated charges never create or delete a
+  transaction in Actual, and change only the date of the row one settles.
+  They exist so the budget is honest between the card and the bank.
 - **Not the categoriser of record.** The charge's category decides which
   budget line the anticipation draws on today; Actual only ever holds the
   bank's row, filed by the ordinary cascade or with the answer you gave

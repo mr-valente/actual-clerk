@@ -75,6 +75,10 @@ class AnticipatedInfo:
     # Provisional, from memory or taught: decides which budget line the charge
     # draws on before the bank's row exists. Empty means "nobody knows yet".
     category_id: str = ""
+    # The day the phone saw it, in the budget's time zone: the day the money
+    # was spent, and so the month it counts in. Unknown counts in the month
+    # being reported.
+    date: datetime.date | None = None
 
     @property
     def spend_cents(self) -> int:
@@ -344,8 +348,16 @@ def build_budget_report(
     # An anticipated charge is charged the way the bank's row will be once it
     # exists: to its provisional category, or to the uncategorized discretionary
     # lump when nothing yet says where it belongs. It is deliberately not an
-    # uncategorized *transaction*: there is nothing in Actual to file.
-    anticipated_open = [item for item in anticipated if not item.off_budget and item.spend_cents > 0]
+    # uncategorized *transaction*: there is nothing in Actual to file. Like a
+    # transaction, it belongs to the month it was made in: a purchase on the
+    # last evening of a month that the bank posts on the 1st is that month's.
+    anticipated_open = [
+        item
+        for item in anticipated
+        if not item.off_budget
+        and item.spend_cents > 0
+        and (item.date is None or start <= item.date <= end)
+    ]
     anticipated_cents = sum(item.spend_cents for item in anticipated_open)
     anticipated_committed = 0
     anticipated_uncategorized = 0

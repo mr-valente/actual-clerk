@@ -18,6 +18,13 @@ public import will not:
   row's amount or date, so a ``modified`` transaction that still matches by
   id is settled directly.
 
+A row is dated on the day the purchase was made, not the day the bank posted
+it: Plaid's ``authorized_date`` when it has one, its ``date`` otherwise. The
+two differ by a few days for most card charges, and across a month's end
+that difference decides which month's budget the money comes out of. The
+posting ``date`` is still what the cutover and adoption windows measure,
+since that is the date the previous provider's rows carry.
+
 Everything here is pure: dictionaries in, a plan out, nothing touched.
 """
 
@@ -56,6 +63,16 @@ def _date(value: Any) -> datetime.date | None:
         return datetime.date.fromisoformat(str(value)[:10])
     except ValueError:
         return None
+
+
+def transaction_date(transaction: dict[str, Any]) -> datetime.date | None:
+    """The day the purchase was made, as far as Plaid knows it.
+
+    Plaid's ``date`` is the posting date once a transaction posts, and its
+    ``authorized_date`` is the day the card was used. The latter is the one a
+    person means by "when I bought it"; not every bank supplies it.
+    """
+    return _date(transaction.get("authorized_date")) or _date(transaction.get("date"))
 
 
 def looks_like_plaid_id(value: str) -> bool:
@@ -162,7 +179,7 @@ def payee_for(transaction: dict[str, Any]) -> str:
 
 def convert(transaction: dict[str, Any]) -> dict[str, Any]:
     """One Plaid transaction as an Actual import row."""
-    date = _date(transaction.get("date"))
+    date = transaction_date(transaction)
     if date is None:
         raise PlaidTransactionError("A Plaid transaction without a date cannot be imported")
     name = _clean(transaction.get("name"))
@@ -262,12 +279,16 @@ def plan_account(
     removed: list[dict[str, Any]],
     existing: list[dict[str, Any]],
     adopt_window_days: int = 14,
+    pinned_dates: set[str] | frozenset[str] = frozenset(),
 ) -> AccountPlan:
     """Decide imports, adoptions, and deletions for one account.
 
     ``existing`` is the account's current Actual rows (id, date, amount_cents,
     imported_id, cleared, reconciled, is_parent, is_child, is_starting_balance); the
     caller reads them from a window around the cutover and forward.
+    ``pinned_dates`` holds the ids of rows whose date came from somewhere
+    better than the bank -- the phone saw the purchase happen -- and is
+    never moved by a later change from Plaid.
     """
 
     plan = AccountPlan(actual_account_id, external_account_id)
@@ -325,7 +346,9 @@ def plan_account(
             plan.imports.append(convert(transaction))
             continue
         claimed.add(row["id"])
-        settled = _settlement(row, transaction, transaction_id, date)
+        settled = _settlement(
+            row, transaction, transaction_id, keep_date=row["id"] in pinned_dates
+        )
         if settled or reason != "settled":
             plan.adoptions.append(
                 {
@@ -378,13 +401,18 @@ def _adopt_foreign(
 
 
 def _settlement(
-    row: dict[str, Any], transaction: dict[str, Any], transaction_id: str, date: datetime.date
+    row: dict[str, Any],
+    transaction: dict[str, Any],
+    transaction_id: str,
+    *,
+    keep_date: bool = False,
 ) -> dict[str, Any]:
     """The fields on an existing row that the Plaid transaction changes.
 
-    The date is one of them: a posted transaction usually lands a day or
-    more after the pending one Actual already holds, and Actual's import
-    would never move it. A reconciled row only ever takes the id.
+    The date is one of them when the bank corrects the day of the purchase;
+    a pending row and its posted successor share an authorisation date, so
+    posting alone no longer moves a row into the next month. A reconciled
+    row only ever takes the id, and a row the phone dated keeps its date.
     """
     fields: dict[str, Any] = {}
     if (row.get("imported_id") or "") != transaction_id:
@@ -403,7 +431,8 @@ def _settlement(
     # the user's to change.
     if row.get("amount_cents") != amount and not row.get("is_parent"):
         fields["amount_cents"] = amount
-    if row.get("date") != date:
+    date = transaction_date(transaction)
+    if date is not None and not keep_date and row.get("date") != date:
         fields["date"] = date
     return fields
 

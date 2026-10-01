@@ -53,6 +53,7 @@ from actual_clerk.reporting import (
     apply_bank_links,
     budget_report,
     freshness,
+    monthly_reports,
     to_actual_accounts,
     to_remote_accounts,
     to_simplefin_accounts,
@@ -62,6 +63,8 @@ log = logging.getLogger(__name__)
 
 SCHEDULER_TICK_SECONDS = 20
 OVERVIEW_SNAPSHOT = "overview"
+# How each month went, rebuilt alongside the overview from the same read.
+REPORTS_SNAPSHOT = "reports"
 # How long after its scheduled time a morning digest is still a morning digest.
 # A container that was down until the evening should wait for tomorrow rather
 # than wish its owner good morning at eleven at night.
@@ -1257,6 +1260,9 @@ class JobManager:
         # count whatever is still outstanding as spent. This is the one place
         # every path to a fresh overview passes through.
         anticipations = anticipated.reconcile(self.database, snapshot, settings, today=today)
+        redated = await self._carry_phone_dates(snapshot)
+        if redated:
+            anticipations["redated"] = redated
         if anticipations.get("asking") and settings.categorization_enabled:
             # Reviews opened for new charges wait on the model's suggestion.
             self._enqueue_nowait("phone", trigger="asking")
@@ -1323,7 +1329,38 @@ class JobManager:
         else:
             overview["health"] = self.database.health_snapshots()
         self.database.set_snapshot(OVERVIEW_SNAPSHOT, overview)
+        self.database.set_snapshot(
+            REPORTS_SNAPSHOT,
+            monthly_reports(snapshot, settings, today=today, anticipated=anticipations["open"]),
+        )
         return overview
+
+    async def _carry_phone_dates(self, snapshot: dict[str, Any]) -> int:
+        """Date each bank row a phone charge settled on the day the phone saw.
+
+        The snapshot is corrected in place, so the report built from it counts
+        the money in the month it was spent without waiting for another read.
+        """
+        updates, finished = anticipated.date_corrections(self.database, snapshot)
+        moved: dict[str, str] = {}
+        if updates:
+            try:
+                result = await self.gateway.redate_transactions(updates)
+            except ActualGatewayError as exc:
+                # Tried again on the next read; the budget still counts the
+                # row, only in the month the bank dated it.
+                log.warning("Could not date settled phone charges on their bank rows: %s", exc)
+                self.database.mark_dates_carried(finished)
+                return 0
+            moved = {str(entry["id"]): str(entry["date"]) for entry in result.get("applied") or []}
+            for item in snapshot.get("transactions") or []:
+                if item.get("id") in moved:
+                    item["date"] = datetime.date.fromisoformat(moved[item["id"]])
+            finished.extend(update["charge_id"] for update in updates)
+            if moved:
+                log.info("Dated %d bank row(s) on the day the phone saw the purchase", len(moved))
+        self.database.mark_dates_carried(finished)
+        return len(moved)
 
     async def refresh_now(self) -> dict[str, Any]:
         """Read the budget and rebuild the overview outside the job queue."""
@@ -1374,6 +1411,10 @@ def _describe(kind: str, result: dict[str, Any]) -> str:
             parts.append(f"{result['reviews_resolved']} review(s) resolved")
         if (result.get("anticipated") or {}).get("matched"):
             parts.append(f"{result['anticipated']['matched']} anticipated charge(s) settled")
+        if (result.get("anticipated") or {}).get("redated"):
+            parts.append(
+                f"{result['anticipated']['redated']} bank row(s) dated on the day your phone saw them"
+            )
         return ", ".join(parts)
     if kind == "categorize":
         description = (

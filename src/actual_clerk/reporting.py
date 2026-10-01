@@ -18,6 +18,7 @@ from actual_clerk.domain.budget import (
     TransactionInfo,
     build_budget_report,
     month_bounds,
+    month_key,
 )
 from actual_clerk.domain.health import (
     SIMPLEFIN,
@@ -218,9 +219,17 @@ def to_anticipated_infos(
                 off_budget=bool(account.get("off_budget")),
                 merchant=str(charge.get("merchant") or ""),
                 category_id=str(charge.get("category_id") or ""),
+                date=_charge_date(charge),
             )
         )
     return infos
+
+
+def _charge_date(charge: dict[str, Any]) -> datetime.date | None:
+    try:
+        return datetime.date.fromisoformat(str(charge.get("noticed_date") or ""))
+    except ValueError:
+        return None
 
 
 def budget_report(
@@ -246,6 +255,117 @@ def budget_report(
         anticipated=to_anticipated_infos(snapshot, anticipated),
     )
     return report.as_dict()
+
+
+# How long after a month ends its figures may still move. A purchase made on
+# the last evening posts a few days later, dated on the day it was made, and
+# lands back in the month that has just closed. After this the month is final.
+SETTLE_DAYS = 7
+# What the month list shows for each category it lists.
+REPORT_TOP_CATEGORIES = 5
+
+
+def monthly_reports(
+    snapshot: dict[str, Any],
+    settings: Settings,
+    *,
+    today: datetime.date,
+    anticipated: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any]:
+    """How each month went: what it had to spend, what it spent, what was left.
+
+    Every month is worked out exactly as the Overview works out the current
+    one, as it stood on its last day: that month's budgets, its own income,
+    its own spending, and any phone charge made in it that the bank has not
+    posted yet. A month counts once it has a budget in Actual and the whole
+    of it is inside the history Clerk reads; months before budgeting began
+    would otherwise read as income with nothing set aside.
+
+    A month that has ended is *settling* for `SETTLE_DAYS`, or for as long as
+    a phone charge made in it is still waiting on the bank, and *final* after
+    that. The current month is *in progress*.
+    """
+
+    budgeted_history = snapshot.get("budgeted_history") or {}
+    history_start = snapshot.get("history_start") or datetime.date.min
+    if isinstance(history_start, str):
+        history_start = datetime.date.fromisoformat(history_start[:10])
+    categories = to_category_infos(snapshot)
+    transactions = to_transaction_infos(snapshot, start=datetime.date.min, end=datetime.date.max)
+    charges = to_anticipated_infos(snapshot, anticipated)
+    current = month_key(today)
+    months = []
+    for key in sorted(budgeted_history):
+        if key > current or not any(value > 0 for value in budgeted_history[key].values()):
+            continue
+        year, month = (int(part) for part in key.split("-"))
+        start, end = month_bounds(datetime.date(year, month, 1))
+        if start < history_start:
+            continue
+        in_progress = key == current
+        report = build_budget_report(
+            today=today if in_progress else end,
+            categories=categories,
+            budgeted=budgeted_history[key],
+            transactions=[item for item in transactions if item.date <= end],
+            income_history=[
+                entry for entry in snapshot.get("income_history") or [] if entry[0] <= end
+            ],
+            budgeted_history=budgeted_history,
+            committed_groups=settings.committed_groups,
+            income_override_cents=settings.monthly_income_override_cents,
+            income_lookback_months=settings.income_lookback_months,
+            anticipated=charges,
+        )
+        if not report.configured:
+            continue
+        settles_on = end + datetime.timedelta(days=SETTLE_DAYS)
+        if in_progress:
+            status = "in_progress"
+        elif today <= settles_on or report.anticipated_count:
+            status = "settling"
+        else:
+            status = "final"
+        months.append(
+            {
+                "month": key,
+                "status": status,
+                "settles_on": settles_on.isoformat(),
+                "day_of_month": report.day_of_month,
+                "days_in_month": report.days_in_month,
+                "income_basis": report.income_basis,
+                "expected_income_cents": report.expected_income_cents,
+                "income_received_cents": report.income_received_cents,
+                "committed_cents": report.committed_cents,
+                "committed_spent_cents": report.committed_spent_cents,
+                "committed_overspend_cents": report.committed_overspend_cents,
+                "free_cents": report.free_cents,
+                "returned_cents": report.returned_cents,
+                "available_cents": report.available_cents,
+                "discretionary_spent_cents": report.discretionary_spent_cents,
+                "spent_cents": report.spent_cents,
+                "remaining_cents": report.remaining_cents,
+                "remaining_percent": report.remaining_percent,
+                "spent_percent": report.spent_percent,
+                "uncategorized_cents": report.uncategorized_cents,
+                "uncategorized_count": report.uncategorized_count
+                + report.anticipated_uncategorized_count,
+                "anticipated_cents": report.anticipated_cents,
+                "anticipated_count": report.anticipated_count,
+                "top_categories": report.top_categories[:REPORT_TOP_CATEGORIES],
+            }
+        )
+    closed = [item for item in months if item["status"] != "in_progress"]
+    return {
+        "months": months,
+        "today": today.isoformat(),
+        "currency": settings.budget_currency,
+        "settle_days": SETTLE_DAYS,
+        # What every ended month left over, added up: saved when positive.
+        "total_remaining_cents": sum(item["remaining_cents"] for item in closed),
+        "months_under": sum(1 for item in closed if item["remaining_cents"] >= 0),
+        "months_over": sum(1 for item in closed if item["remaining_cents"] < 0),
+    }
 
 
 def freshness(

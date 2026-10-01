@@ -32,8 +32,8 @@ from actual_clerk.diagnostics import build_report
 from actual_clerk.domain.intelligence import canonical_key
 from actual_clerk.domain.merchants import merchant_label, normalize_merchant
 from actual_clerk.plaid_links import describe, public_item, read_items
-from actual_clerk.plaid_sync import PlaidSyncEngine, retidy_imports
-from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
+from actual_clerk.plaid_sync import PlaidSyncEngine, redate_imports, retidy_imports
+from actual_clerk.processing import OVERVIEW_SNAPSHOT, REPORTS_SNAPSHOT, JobManager, ProcessingError
 from actual_clerk.schemas import (
     ActualRulesRequest,
     BulkResolveRequest,
@@ -51,6 +51,7 @@ from actual_clerk.schemas import (
     MigrateToPlaidRequest,
     MigrateToSimpleFinRequest,
     MonitoringRequest,
+    RedateImportsRequest,
     RegisterSourceRequest,
     ResolveDecisionRequest,
     ResolveProposalRequest,
@@ -323,6 +324,18 @@ async def overview(request: Request) -> dict[str, Any]:
         "currency": settings.budget_currency,
         "apply_mode": settings.apply_mode,
         "sync_enabled": settings.sync_enabled,
+        "stale": _snapshot_age(snapshot),
+    }
+
+
+@app.get("/api/reports")
+async def reports(request: Request) -> dict[str, Any]:
+    """How each month went, as of the last read of the budget."""
+    snapshot = _database(request).get_snapshot(REPORTS_SNAPSHOT) or {}
+    return {
+        "months": [],
+        "currency": _settings_manager(request).get().budget_currency,
+        **snapshot,
         "stale": _snapshot_age(snapshot),
     }
 
@@ -1378,6 +1391,21 @@ async def plaid_retidy(payload: RetidyImportsRequest, request: Request) -> dict[
         today=datetime.now(settings.zone).date(),
         apply=not payload.dry_run,
     )
+
+
+@app.post("/api/plaid/redate")
+async def plaid_redate(payload: RedateImportsRequest, request: Request) -> dict[str, Any]:
+    """Date rows imported before Clerk read authorisation dates on the day of purchase."""
+    result = await redate_imports(
+        _database(request),
+        _gateway(request),
+        _settings_manager(request).get(),
+        apply=not payload.dry_run,
+    )
+    if result.get("applied"):
+        # The months the money counts in have changed.
+        await _jobs(request).enqueue("sync", trigger="redate")
+    return result
 
 
 @app.post("/api/plaid/links", status_code=status.HTTP_201_CREATED)

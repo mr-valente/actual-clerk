@@ -36,9 +36,12 @@ from actual_clerk.db import Database
 from actual_clerk.domain.plaid_import import (
     AccountPlan,
     PlaidTransactionError,
+    looks_like_plaid_id,
+    plaid_amount_to_cents,
     plan_account,
     retidy,
     starting_balance_cents,
+    transaction_date,
 )
 
 log = logging.getLogger(__name__)
@@ -363,6 +366,8 @@ class PlaidSyncEngine:
             removed=stream["removed"],
             existing=existing,
             adopt_window_days=self.settings.plaid_adopt_window_days,
+            # A row a phone charge settled carries the day the phone saw.
+            pinned_dates=self.database.matched_transaction_ids(),
         )
         by_id = {row["id"]: row for row in existing}
         matched_by_actual = 0
@@ -431,6 +436,8 @@ class PlaidSyncEngine:
             removed=stream["removed"],
             existing=existing,
             adopt_window_days=self.settings.plaid_adopt_window_days,
+            # A row a phone charge settled carries the day the phone saw.
+            pinned_dates=self.database.matched_transaction_ids(),
         )
         # Withdrawn pending rows the setting says to leave alone. They count
         # as kept, but are reported apart from the cleared ones the planner
@@ -584,6 +591,200 @@ async def retidy_imports(
             )
         )
     return result
+
+
+# How far a row the previous provider imported may sit from Plaid's posting
+# date and still be the same transaction, and how long before posting a card
+# can have been used. Only used to pair rows that share no id.
+REDATE_PAIR_DAYS = 1
+REDATE_MAX_LEAD_DAYS = 10
+
+
+async def redate_imports(
+    database: Database,
+    gateway: ActualGateway,
+    settings: Settings,
+    *,
+    apply: bool,
+    client: PlaidClient | None = None,
+) -> dict[str, Any]:
+    """Date rows already in Actual on the day the purchase was made.
+
+    A one-off for the rows imported before Clerk read Plaid's
+    ``authorized_date``: those carry the day the bank posted them, which put
+    a purchase on the last evening of a month into the next one. Each row
+    takes, in order of preference:
+
+    - the day the phone saw it, when a phone charge settled against it;
+    - Plaid's authorisation date, for a row Plaid delivered (matched by id);
+    - the same, for a row the previous provider imported, paired with Plaid's
+      copy of the transaction by account, amount, and a posting date within
+      a day.
+
+    Plaid's history is read from the start, which leaves every cursor alone.
+    Reconciled rows are never moved. Without ``apply`` it only reports what
+    it would change.
+    """
+
+    phone = {
+        str(row["matched_transaction_id"]): row
+        for row in database.matched_charge_dates()
+    }
+    links = database.list_bank_links(provider="plaid")
+    by_item: dict[str, list[dict[str, Any]]] = {}
+    for link in links:
+        by_item.setdefault(link["item_id"], []).append(link)
+    histories: dict[str, dict[str, Any]] = {}
+    owned = client is None
+    if by_item:
+        client = client or PlaidClient(settings)
+        try:
+            for item in database.list_plaid_items():
+                if item["item_id"] in by_item:
+                    histories[item["item_id"]] = await read_stream(client, item["access_token"], "")
+        finally:
+            if owned:
+                await client.close()
+
+    changes: list[dict[str, Any]] = []
+    seen_rows: set[str] = set()
+
+    def propose(row: dict[str, Any], account: str, date: datetime.date, source: str) -> None:
+        seen_rows.add(row["id"])
+        if row.get("reconciled") or row["date"] == date:
+            return
+        changes.append(
+            {
+                "transaction_id": row["id"],
+                "account": account,
+                "payee_name": row.get("payee_name") or "",
+                "amount_cents": row.get("amount_cents", 0),
+                "date_before": row["date"].isoformat(),
+                "date": date.isoformat(),
+                "source": source,
+                "changes_month": row["date"].strftime("%Y-%m") != date.strftime("%Y-%m"),
+            }
+        )
+
+    def phone_date(row_id: str) -> datetime.date | None:
+        entry = phone.get(row_id)
+        try:
+            return datetime.date.fromisoformat(str(entry["noticed_date"])) if entry else None
+        except ValueError:
+            return None
+
+    for item_id, links_for_item in by_item.items():
+        history = histories.get(item_id)
+        if history is None:
+            continue
+        withdrawn = {str(entry.get("transaction_id") or "") for entry in history["removed"]}
+        for link in links_for_item:
+            account_id = link["actual_account_id"]
+            label = link.get("external_name") or account_id
+            feed = {
+                str(txn.get("transaction_id") or ""): txn
+                for txn in [*history["added"], *history["modified"]]
+                if txn.get("account_id") == link["external_account_id"]
+                and str(txn.get("transaction_id") or "") not in withdrawn
+            }
+            dates = [
+                day
+                for txn in feed.values()
+                for day in (transaction_date(txn), _posted(txn))
+                if day is not None
+            ]
+            if not dates:
+                continue
+            start = min(dates) - datetime.timedelta(days=REDATE_MAX_LEAD_DAYS)
+            rows = [
+                row
+                for row in await gateway.account_transactions(account_id, start=start)
+                if not row.get("is_child") and not row.get("is_starting_balance")
+            ]
+            held = {row.get("imported_id") for row in rows if row.get("imported_id")}
+            # Plaid's copies of transactions the previous provider imported:
+            # nothing in Actual carries their id.
+            unclaimed = [txn for transaction_id, txn in feed.items() if transaction_id not in held]
+            for row in rows:
+                pinned = phone_date(row["id"])
+                if pinned is not None:
+                    propose(row, label, pinned, "phone")
+                    continue
+                imported_id = str(row.get("imported_id") or "")
+                if imported_id in feed:
+                    day = transaction_date(feed[imported_id])
+                    if day is not None:
+                        propose(row, label, day, "plaid")
+                    continue
+                if not imported_id or looks_like_plaid_id(imported_id):
+                    continue
+                pair = _pair(row, unclaimed)
+                if pair is None:
+                    continue
+                unclaimed.remove(pair)
+                day = transaction_date(pair)
+                if day is not None and 0 <= (row["date"] - day).days <= REDATE_MAX_LEAD_DAYS:
+                    propose(row, label, day, "paired")
+
+    # Phone charges on an account Plaid does not feed.
+    leftover: dict[str, list[str]] = {}
+    for row_id, entry in phone.items():
+        if row_id not in seen_rows and entry.get("actual_account_id"):
+            leftover.setdefault(entry["actual_account_id"], []).append(row_id)
+    for account_id, row_ids in leftover.items():
+        days = [day for row_id in row_ids if (day := phone_date(row_id)) is not None]
+        if not days:
+            continue
+        start = min(days) - datetime.timedelta(days=31)
+        for row in await gateway.account_transactions(account_id, start=start):
+            if row["id"] in row_ids and not row.get("is_child"):
+                propose(row, account_id, phone_date(row["id"]) or row["date"], "phone")
+
+    counts = {
+        source: sum(1 for change in changes if change["source"] == source)
+        for source in ("phone", "plaid", "paired")
+    }
+    result: dict[str, Any] = {
+        "dry_run": not apply,
+        "counts": counts,
+        "changes_month": sum(1 for change in changes if change["changes_month"]),
+        "changes": changes,
+    }
+    if apply:
+        if changes:
+            result.update(
+                await gateway.redate_transactions(
+                    [{"transaction_id": change["transaction_id"], "date": change["date"]} for change in changes]
+                )
+            )
+        # Every settled phone charge now has its day on its row, or a row
+        # that cannot take it; the overview need not try again.
+        database.mark_dates_carried([entry["id"] for entry in phone.values()])
+    return result
+
+
+def _posted(transaction: dict[str, Any]) -> datetime.date | None:
+    try:
+        return datetime.date.fromisoformat(str(transaction.get("date") or "")[:10])
+    except ValueError:
+        return None
+
+
+def _pair(row: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """Plaid's copy of a row another provider imported: same money, posted the same day or so."""
+    best: tuple[int, dict[str, Any]] | None = None
+    for txn in candidates:
+        try:
+            amount = plaid_amount_to_cents(txn.get("amount"))
+        except PlaidTransactionError:
+            continue
+        posted = _posted(txn)
+        if amount != row.get("amount_cents") or posted is None:
+            continue
+        distance = abs((row["date"] - posted).days)
+        if distance <= REDATE_PAIR_DAYS and (best is None or distance < best[0]):
+            best = (distance, txn)
+    return best[1] if best else None
 
 
 def _tally(counts: dict[str, int], plan: AccountPlan, opening: int | None) -> None:

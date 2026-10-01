@@ -10,7 +10,7 @@ import pytest
 from actual_clerk.clients.actual import ActualGatewayError
 from actual_clerk.clients.plaid import PlaidError
 from actual_clerk.config import Settings
-from actual_clerk.plaid_sync import PlaidSyncEngine, read_stream, retidy_imports
+from actual_clerk.plaid_sync import PlaidSyncEngine, read_stream, redate_imports, retidy_imports
 
 TODAY = datetime.date(2026, 9, 12)
 
@@ -97,6 +97,10 @@ class StubGateway:
         self.retidied = list(updates)
         return {"applied": [{"id": item["transaction_id"]} for item in updates], "skipped": [],
                 "payees_created": [], "payees_deleted": []}
+
+    async def redate_transactions(self, updates):
+        self.redated = list(updates)
+        return {"applied": [{"id": item["transaction_id"], "date": item["date"]} for item in updates], "skipped": []}
 
     async def snapshot(self, *, today=None, transaction_ids=()):
         return {"categories": self.categories, "accounts": [], "transactions": []}
@@ -474,3 +478,57 @@ async def test_early_imports_are_retidied_only_when_asked(linked):
     applied = await retidy_imports(linked, gateway, today=TODAY, apply=True)
     assert applied["applied"] == [{"id": "row-div"}]
     assert gateway.retidied == [{"transaction_id": "row-div", "payee_name": "Dividend", "notes": f"{line} #clerk"}]
+
+
+async def test_existing_rows_are_redated_on_the_day_of_purchase_only_when_asked(linked):
+    plaid_a = "A" * 30
+    plaid_b = "B" * 30
+    plaid_c = "C" * 30
+    client = FakePlaid([{"added": [
+        # Delivered by Plaid, posted the day after it was made, across a month end.
+        plaid_txn(plaid_a, 12.0, "2026-09-01", authorized_date="2026-08-31"),
+        # Delivered by Plaid; the phone saw it a day before the bank's authorisation date.
+        plaid_txn(plaid_b, 63.38, "2026-09-03", authorized_date="2026-09-02"),
+        # Plaid's copy of a row SimpleFIN imported on the posting date.
+        plaid_txn(plaid_c, 25.0, "2026-08-29", authorized_date="2026-08-27"),
+        # No authorisation date: nothing better than what is there.
+        plaid_txn("D" * 30, 9.0, "2026-09-04"),
+    ]}])
+    gateway = StubGateway({"acct-chk": [
+        {"id": "row-a", "date": datetime.date(2026, 9, 1), "amount_cents": -1200, "imported_id": plaid_a, "payee_name": "Cafe"},
+        {"id": "row-b", "date": datetime.date(2026, 9, 3), "amount_cents": -6338, "imported_id": plaid_b, "payee_name": "eBay"},
+        {"id": "row-c", "date": datetime.date(2026, 8, 29), "amount_cents": -2500, "imported_id": "sf-123", "payee_name": "Shop"},
+        {"id": "row-d", "date": datetime.date(2026, 9, 4), "amount_cents": -900, "imported_id": "D" * 30, "payee_name": "Fee"},
+        {"id": "row-r", "date": datetime.date(2026, 9, 1), "amount_cents": -2500, "imported_id": "sf-999",
+         "payee_name": "Agreed", "reconciled": True},
+    ]})
+    src = linked.upsert_notification_source({
+        "device_id": "phone-1", "device_name": "Pixel", "package_name": "com.konylabs.capitalone",
+        "app_label": "Capital One", "actual_account_id": "acct-chk", "account_name": "Checking",
+    })
+    charge, _ = linked.add_anticipated_charge({
+        "source_id": src["id"], "actual_account_id": "acct-chk", "notification_key": "k1", "kind": "charge",
+        "amount_cents": -6338, "merchant": "eBay", "merchant_key": "ebay", "title": "", "text": "",
+        "noticed_at": 1.0, "noticed_date": "2026-09-01", "status": "open",
+    })
+    linked.resolve_anticipated_charge(charge["id"], "matched", matched_transaction_id="row-b")
+
+    preview = await redate_imports(linked, gateway, settings(), apply=False, client=client)
+    assert preview["dry_run"] is True
+    changes = {change["transaction_id"]: change for change in preview["changes"]}
+    assert {key: (value["date"], value["source"]) for key, value in changes.items()} == {
+        "row-a": ("2026-08-31", "plaid"),
+        "row-b": ("2026-09-01", "phone"),
+        "row-c": ("2026-08-27", "paired"),
+    }
+    assert changes["row-a"]["changes_month"] is True
+    assert preview["changes_month"] == 1
+    assert preview["counts"] == {"phone": 1, "plaid": 1, "paired": 1}
+    assert not hasattr(gateway, "redated"), "a dry run writes nothing"
+    assert linked.get_anticipated_charge(charge["id"])["date_carried"] == 0
+    assert ("sync", "") in client.calls and linked.get_plaid_item("item-1")["cursor"] == ""
+
+    applied = await redate_imports(linked, gateway, settings(), apply=True, client=client)
+    assert sorted(item["transaction_id"] for item in gateway.redated) == ["row-a", "row-b", "row-c"]
+    assert len(applied["applied"]) == 3
+    assert linked.get_anticipated_charge(charge["id"])["date_carried"] == 1

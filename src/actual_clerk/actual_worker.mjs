@@ -959,6 +959,45 @@ export class ActualService {
     };
   }
 
+  async redateTransactions(params) {
+    // Move rows to the day the purchase was made. A reconciled row stays as
+    // the statement agreed it, and a split child follows its parent, which
+    // Actual re-dates along with it.
+    const updates = params.updates || [];
+    const ids = [...new Set(updates.map(update => cleanString(update.transaction_id)).filter(Boolean))];
+    if (!ids.length) return { applied: [], skipped: [] };
+    const rows = await this._query(this.api.q('transactions')
+      .filter({ id: { $oneof: ids } })
+      .options({ splits: 'all' })
+      .select(['id', 'date', 'reconciled', 'is_child']));
+    const existing = new Map(rows.map(row => [cleanString(row.id), row]));
+    const planned = [];
+    const skipped = [];
+    for (const update of updates) {
+      const id = cleanString(update.transaction_id);
+      const date = isoDate(update.date);
+      if (!date) throw new Error(`A new date is required for transaction ${id}`);
+      const row = existing.get(id);
+      let reason = '';
+      if (!row) reason = 'deleted';
+      else if (row.reconciled) reason = 'reconciled';
+      else if (row.is_child) reason = 'split_child';
+      else if (isoDate(row.date) === date) reason = 'no_change';
+      if (reason) {
+        skipped.push({ id, reason });
+        continue;
+      }
+      planned.push({ id, date, previous_date: isoDate(row.date) });
+    }
+    if (planned.length) {
+      await this.api.batchBudgetUpdates(async () => {
+        for (const update of planned) await this.api.updateTransaction(update.id, { date: update.date });
+      });
+      await this.api.sync();
+    }
+    return { applied: planned, skipped };
+  }
+
   async retidyTransactions(params) {
     // Rename an imported row's payee and/or fill its notes. A payee is found
     // by name as Actual's import would (ignoring case) or created; one the
@@ -1093,6 +1132,7 @@ export class ActualService {
       deleteTransactions: () => this.deleteTransactions(params),
       adoptImportedIds: () => this.adoptImportedIds(params),
       retidyTransactions: () => this.retidyTransactions(params),
+      redateTransactions: () => this.redateTransactions(params),
     };
     if (!methods[method]) throw new Error(`Unknown Actual worker method: ${method}`);
     if (method !== 'initialize' && !this.initialized) throw new Error('The Actual API worker is not initialized');

@@ -388,6 +388,43 @@ test('adopting a new imported id only touches rows that exist and change', async
   assert.equal(syncs, 1);
 });
 
+test('re-dating moves only rows that exist, are not reconciled, and change', async () => {
+  const written = [];
+  let syncs = 0;
+  const api = {
+    q: () => new Query(),
+    aqlQuery: async () => ({ data: [
+      { id: 'posted', date: '2026-10-02', reconciled: 0, is_child: 0 },
+      { id: 'agreed', date: '2026-10-02', reconciled: 1, is_child: 0 },
+      { id: 'child', date: '2026-10-02', reconciled: 0, is_child: 1 },
+      { id: 'same', date: '2026-09-30', reconciled: 0, is_child: 0 },
+    ] }),
+    batchBudgetUpdates: async callback => { await callback(); },
+    updateTransaction: async (id, fields) => { written.push({ id, fields }); },
+    sync: async () => { syncs += 1; },
+  };
+  const service = new ActualService(api);
+  service.initialized = true;
+  const result = await service.dispatch('redateTransactions', { updates: [
+    { transaction_id: 'posted', date: '2026-09-30' },
+    { transaction_id: 'agreed', date: '2026-09-30' },
+    { transaction_id: 'child', date: '2026-09-30' },
+    { transaction_id: 'same', date: '2026-09-30' },
+    { transaction_id: 'gone', date: '2026-09-30' },
+  ] });
+  assert.deepEqual(written, [{ id: 'posted', fields: { date: '2026-09-30' } }]);
+  assert.deepEqual(result.applied, [{ id: 'posted', date: '2026-09-30', previous_date: '2026-10-02' }]);
+  assert.deepEqual(result.skipped, [
+    { id: 'agreed', reason: 'reconciled' },
+    { id: 'child', reason: 'split_child' },
+    { id: 'same', reason: 'no_change' },
+    { id: 'gone', reason: 'deleted' },
+  ]);
+  assert.equal(syncs, 1);
+  assert.deepEqual(await service.dispatch('redateTransactions', {}), { applied: [], skipped: [] });
+  await assert.rejects(() => service.redateTransactions({ updates: [{ transaction_id: 'posted' }] }), /new date/);
+});
+
 test('retidying renames payees, fills notes, and deletes only payees left unused', async () => {
   const written = [];
   const created = [];

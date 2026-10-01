@@ -23,6 +23,10 @@
   --green: #147d64;
   --green-ink: #0c6b58;
   --green-soft: #c6f7e2;
+  /* Saved vs overspent in the Reports chart: a blue/red pair checked for
+     colour-blind separation against this theme's panel. */
+  --chart-saved: #1980d4;
+  --chart-over: #cf1124;
   --topbar: rgba(232, 236, 240, .88);
   --glass: rgba(255, 255, 255, .6);
   --input: #ffffff;
@@ -67,6 +71,8 @@
   --green: #65d6ad;
   --green-ink: #8eedc7;
   --green-soft: #0f3730;
+  --chart-saved: #3d91e0;
+  --chart-over: #e2505c;
   --topbar: rgba(8, 8, 17, .9);
   --glass: rgba(30, 34, 50, .7);
   --input: #0f1019;
@@ -106,6 +112,8 @@
     --green: #65d6ad;
     --green-ink: #8eedc7;
     --green-soft: #0f3730;
+  --chart-saved: #3d91e0;
+  --chart-over: #e2505c;
     --topbar: rgba(8, 8, 17, .9);
     --glass: rgba(30, 34, 50, .7);
     --input: #0f1019;
@@ -571,6 +579,44 @@ a.status-chip:hover { text-decoration: underline; }
   :root:not([data-motion="full"]) .progress-track.indeterminate i { width: 100%; transform: none; opacity: .55; }
 }
 
+/* ----------------------------------------------------------- reports */
+.chart-legend { padding: 14px 20px 0; display: flex; gap: 16px; flex-wrap: wrap; color: var(--ink-soft); font-size: 10px; }
+.chart-legend span { display: inline-flex; align-items: center; gap: 6px; }
+.chart-legend i { width: 10px; height: 10px; border-radius: 2px; background: var(--chart-saved); }
+.chart-legend i.over { background: var(--chart-over); }
+.chart-legend i.pending { background: var(--chart-saved); opacity: .45; }
+.month-chart { position: relative; padding: 8px 20px 18px; }
+.month-chart svg { display: block; max-width: 100%; height: auto; overflow: visible; }
+.month-chart .tick line { stroke: var(--line-soft); stroke-width: 1; }
+.month-chart .tick.zero line { stroke: var(--ink-faint); }
+.month-chart .tick text, .month-chart .axis-label { fill: var(--ink-faint); font-size: 10px; font-variant-numeric: tabular-nums; }
+.month-chart .bar-value { fill: var(--ink-soft); font-size: 10px; font-weight: 700; }
+.month-bar path { fill: var(--chart-saved); transition: opacity .15s ease; }
+.month-bar.over path { fill: var(--chart-over); }
+.month-bar.settling path, .month-bar.in_progress path { opacity: .45; }
+.month-bar .hit { fill: transparent; }
+.month-bar:hover .hit, .month-bar:focus .hit { fill: var(--hover); }
+.month-bar:focus { outline: none; }
+.month-bar:focus-visible .hit { stroke: var(--accent); stroke-width: 1.5; }
+.chart-tip { position: absolute; transform: translate(-50%, -100%); pointer-events: none; padding: 8px 11px; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-strong); box-shadow: var(--shadow-sm); display: grid; gap: 2px; min-width: 140px; z-index: 2; }
+.chart-tip[hidden] { display: none; }
+.chart-tip strong { font-size: 13px; color: var(--ink); }
+.chart-tip span { font-size: 10px; color: var(--ink-soft); }
+.chart-tip small { font-size: 10px; color: var(--ink-faint); }
+.table-scroll { overflow-x: auto; }
+.month-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.month-table th, .month-table td { padding: 11px 20px; text-align: left; border-bottom: 1px solid var(--line-soft); white-space: nowrap; }
+.month-table thead th { color: var(--ink-faint); font-size: 9px; font-weight: 700; letter-spacing: .07em; text-transform: uppercase; }
+.month-table tbody th { font-weight: 600; }
+.month-table td.money { text-align: right; font-variant-numeric: tabular-nums; }
+.month-table thead th:nth-child(n+3) { text-align: right; }
+.month-table tbody tr:last-child > * { border-bottom: 0; }
+.hero-headline .eyebrow .status-chip { display: inline-block; margin-left: 4px; vertical-align: 1px; }
+@media (forced-colors: active) {
+  .month-bar path { fill: CanvasText; }
+  .month-bar.over path { fill: Highlight; }
+}
+
 @media (max-width: 1180px) {
   .metrics { grid-template-columns: 1fr 1fr; }
   .overview-grid { grid-template-columns: 1fr; }
@@ -602,6 +648,8 @@ a.status-chip:hover { text-decoration: underline; }
   .hero-side { grid-auto-flow: row; }
   .hero-chip { min-width: 0; width: 100%; }
   .panel-head { padding: 14px 15px; }
+  .month-chart { padding: 8px 10px 14px; }
+  .month-table th, .month-table td { padding: 10px 12px; }
   .row-head { display: none; }
   .data-row { grid-template-columns: minmax(0, 1fr) auto !important; padding: 12px 15px; gap: 8px; }
   .data-row > *:nth-child(n+3) { display: none; }

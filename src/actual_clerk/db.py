@@ -308,6 +308,9 @@ CREATE TABLE IF NOT EXISTS anticipated_charges (
     matched_payee TEXT NOT NULL DEFAULT '',
     matched_date TEXT NOT NULL DEFAULT '',
     match_reason TEXT NOT NULL DEFAULT '',
+    -- Set once the phone's day has been written onto the matched bank row,
+    -- so a date the person later changes in Actual is left as they put it.
+    date_carried INTEGER NOT NULL DEFAULT 0,
     resolved_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -545,6 +548,7 @@ class Database:
             "category_name": "TEXT NOT NULL DEFAULT ''",
             "category_source": "TEXT NOT NULL DEFAULT ''",
             "category_confidence": "REAL NOT NULL DEFAULT 0",
+            "date_carried": "INTEGER NOT NULL DEFAULT 0",
         }
         for column, definition in additions.items():
             if columns and column not in columns:
@@ -2569,7 +2573,8 @@ class Database:
         with self.connect() as connection:
             cursor = connection.execute(
                 "UPDATE anticipated_charges SET status='open', matched_transaction_id='', "
-                "matched_payee='', matched_date='', match_reason='', resolved_at=NULL, updated_at=? "
+                "matched_payee='', matched_date='', match_reason='', date_carried=0, "
+                "resolved_at=NULL, updated_at=? "
                 "WHERE id=? AND status IN ('matched','expired','dismissed')",
                 (now, charge_id),
             )
@@ -2583,6 +2588,30 @@ class Database:
                 "WHERE status='matched' AND matched_transaction_id != ''"
             ).fetchall()
         return {row["matched_transaction_id"] for row in rows}
+
+    def matched_charge_dates(self, *, uncarried_only: bool = False) -> list[dict[str, Any]]:
+        """Settled charges with the bank row they settled and the day the phone saw."""
+        query = (
+            "SELECT id, actual_account_id, matched_transaction_id, noticed_date, date_carried "
+            "FROM anticipated_charges WHERE status='matched' AND matched_transaction_id != ''"
+        )
+        if uncarried_only:
+            query += " AND date_carried=0"
+        with self.connect() as connection:
+            rows = connection.execute(query + " ORDER BY noticed_at").fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_dates_carried(self, charge_ids: Sequence[str]) -> int:
+        ids = [str(item) for item in charge_ids if item]
+        if not ids:
+            return 0
+        with self.connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE anticipated_charges SET date_carried=1, updated_at=? "
+                f"WHERE id IN ({','.join('?' for _ in ids)})",
+                (time.time(), *ids),
+            )
+        return cursor.rowcount
 
     def delete_anticipated_charge(self, charge_id: str) -> bool:
         with self.connect() as connection:

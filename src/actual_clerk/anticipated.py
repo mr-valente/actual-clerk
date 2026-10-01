@@ -231,6 +231,40 @@ def reconcile(
     return summary
 
 
+def date_corrections(
+    database: Database, snapshot: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Bank rows a phone charge settled that do not yet carry the phone's day.
+
+    The phone saw the purchase happen; the bank's date is when it got round
+    to posting it, and across a month's end that decides which month the
+    money counts in. Each settled charge's date is carried onto its row
+    once. Returns the rows to move (with the charge each belongs to) and the
+    charges that need nothing written: already on the right day, or their
+    row is gone.
+    """
+
+    waiting = database.matched_charge_dates(uncarried_only=True)
+    if not waiting:
+        return [], []
+    items = {str(item.get("id") or ""): item for item in snapshot.get("transactions") or []}
+    updates: list[dict[str, Any]] = []
+    finished: list[str] = []
+    for row in waiting:
+        item = items.get(str(row["matched_transaction_id"]))
+        try:
+            noticed = datetime.date.fromisoformat(str(row.get("noticed_date") or ""))
+        except ValueError:
+            noticed = None
+        if item is None or noticed is None or item.get("date") == noticed:
+            finished.append(row["id"])
+            continue
+        updates.append(
+            {"charge_id": row["id"], "transaction_id": item["id"], "date": noticed}
+        )
+    return updates, finished
+
+
 def classify(
     database: Database,
     snapshot: dict[str, Any],

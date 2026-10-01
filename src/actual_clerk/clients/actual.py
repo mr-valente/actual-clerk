@@ -582,6 +582,18 @@ class ActualGateway:
             payload.append(row)
         return await self._call("adoptImportedIds", {"updates": payload})
 
+    async def redate_transactions(self, updates: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """Move rows to a new date; reconciled rows and split children are left alone."""
+        if not updates:
+            return {"applied": [], "skipped": []}
+        payload = []
+        for item in updates:
+            row = {"transaction_id": str(item["transaction_id"]), "date": item["date"]}
+            if isinstance(row["date"], datetime.date):
+                row["date"] = row["date"].isoformat()
+            payload.append(row)
+        return await self._call("redateTransactions", {"updates": payload})
+
     async def retidy_transactions(self, updates: Sequence[dict[str, Any]]) -> dict[str, Any]:
         """Rename imported rows' payees and fill their notes; drop payees left unused."""
         if not updates:

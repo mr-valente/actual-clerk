@@ -5,6 +5,7 @@ import datetime
 from actual_clerk.reporting import (
     budget_report,
     freshness,
+    monthly_reports,
     to_actual_accounts,
     to_simplefin_accounts,
 )
@@ -183,3 +184,73 @@ def test_remote_accounts_carry_their_provider():
     [reading] = to_remote_accounts({"accounts": [{"id": "p", "name": "Card", "provider": "x"}]})
     assert reading.provider == "x"
     assert to_simplefin_accounts({"accounts": [{"id": "s", "name": "C"}]})[0].provider == "simpleFin"
+
+
+# ------------------------------------------------------------------ reports
+
+
+def _reports_snapshot():
+    return snapshot(
+        transactions=[
+            # July: before budgeting began in Actual, so not a reported month.
+            transaction(datetime.date(2026, 7, 1), 400000, payee="Employer", category_id="cat-paycheck"),
+            transaction(datetime.date(2026, 7, 5), -50000, payee="Shop", category_id="cat-groceries"),
+            # August: 4,000 in, 1,800 of bills, 300 spent -> 1,900 left.
+            transaction(datetime.date(2026, 8, 1), 400000, payee="Employer", category_id="cat-paycheck"),
+            transaction(datetime.date(2026, 8, 2), -180000, payee="Landlord", category_id="cat-rent"),
+            transaction(datetime.date(2026, 8, 31), -30000, payee="Shop", category_id="cat-groceries"),
+            # September: 2,500 spent against 2,200 free -> 300 over.
+            transaction(datetime.date(2026, 9, 1), 400000, payee="Employer", category_id="cat-paycheck"),
+            transaction(datetime.date(2026, 9, 2), -180000, payee="Landlord", category_id="cat-rent"),
+            transaction(datetime.date(2026, 9, 20), -250000, payee="Shop", category_id="cat-groceries"),
+            # October so far.
+            transaction(datetime.date(2026, 10, 1), 400000, payee="Employer", category_id="cat-paycheck"),
+            transaction(datetime.date(2026, 10, 1), -1000, payee="Cafe", category_id="cat-dining"),
+        ],
+        budgeted_history={
+            "2026-07": {},
+            "2026-08": {"cat-rent": 180000},
+            "2026-09": {"cat-rent": 180000},
+            "2026-10": {"cat-rent": 180000},
+        },
+    )
+
+
+def test_each_budgeted_month_is_reported_as_it_stood_on_its_last_day(settings):
+    snap = _reports_snapshot()
+    result = monthly_reports(snap, settings, today=datetime.date(2026, 10, 1))
+    months = {item["month"]: item for item in result["months"]}
+    assert list(months) == ["2026-08", "2026-09", "2026-10"]
+    august, september, october = months["2026-08"], months["2026-09"], months["2026-10"]
+    assert (august["available_cents"], august["spent_cents"], august["remaining_cents"]) == (220000, 30000, 190000)
+    assert august["status"] == "final"
+    assert august["day_of_month"] == 31
+    assert september["remaining_cents"] == -30000
+    assert september["status"] == "settling"
+    assert september["settles_on"] == "2026-10-07"
+    assert october["status"] == "in_progress"
+    assert october["spent_cents"] == 1000
+    # Only months that have ended add up.
+    assert result["total_remaining_cents"] == 160000
+    assert (result["months_under"], result["months_over"]) == (1, 1)
+
+
+def test_a_month_settles_after_a_week_unless_a_phone_charge_is_still_waiting(settings):
+    snap = _reports_snapshot()
+    snap["accounts"].append(account("Card", account_id="acct-card"))
+    later = datetime.date(2026, 10, 9)
+    assert {m["month"]: m["status"] for m in monthly_reports(snap, settings, today=later)["months"]}["2026-09"] == "final"
+    waiting = [{"id": "c1", "status": "open", "actual_account_id": "acct-card", "amount_cents": -6338,
+                "noticed_date": "2026-09-30", "merchant": "eBay"}]
+    months = {m["month"]: m for m in monthly_reports(snap, settings, today=later, anticipated=waiting)["months"]}
+    assert months["2026-09"]["status"] == "settling"
+    assert months["2026-09"]["anticipated_cents"] == 6338
+    assert months["2026-09"]["remaining_cents"] == -30000 - 6338
+    assert months["2026-10"]["anticipated_cents"] == 0
+
+
+def test_a_month_only_partly_inside_the_history_is_left_out(settings):
+    snap = _reports_snapshot()
+    snap["history_start"] = datetime.date(2026, 8, 15)
+    months = [m["month"] for m in monthly_reports(snap, settings, today=datetime.date(2026, 10, 1))["months"]]
+    assert months == ["2026-09", "2026-10"]
