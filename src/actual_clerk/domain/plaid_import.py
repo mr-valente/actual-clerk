@@ -70,9 +70,16 @@ def transaction_date(transaction: dict[str, Any]) -> datetime.date | None:
 
     Plaid's ``date`` is the posting date once a transaction posts, and its
     ``authorized_date`` is the day the card was used. The latter is the one a
-    person means by "when I bought it"; not every bank supplies it.
+    person means by "when I bought it"; not every bank supplies it. Nothing
+    happens after it posts, so an authorisation date later than the posting
+    date (a dividend credited on the 30th that Plaid "authorises" on the 1st)
+    is a bank quirk and the posting date stands.
     """
-    return _date(transaction.get("authorized_date")) or _date(transaction.get("date"))
+    authorized = _date(transaction.get("authorized_date"))
+    posted = _date(transaction.get("date"))
+    if authorized is None or posted is None:
+        return authorized or posted
+    return min(authorized, posted)
 
 
 def looks_like_plaid_id(value: str) -> bool:
