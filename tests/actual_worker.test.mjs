@@ -388,6 +388,83 @@ test('adopting a new imported id only touches rows that exist and change', async
   assert.equal(syncs, 1);
 });
 
+test('retidying renames payees, fills notes, and deletes only payees left unused', async () => {
+  const written = [];
+  const created = [];
+  const deletedPayees = [];
+  let syncs = 0;
+  class WhereQuery extends Query {
+    filter(where) { this.where = where; return this; }
+  }
+  const api = {
+    q: () => new WhereQuery(),
+    aqlQuery: async query => {
+      if (query.where.id) {
+        return { data: [
+          { id: 'div', payee: 'p-line', notes: '#clerk' },
+          { id: 'pay', payee: 'p-payroll', notes: '' },
+          { id: 'same', payee: 'p-dividend', notes: 'already' },
+        ] };
+      }
+      // p-payroll still has another transaction; p-line has none left.
+      return { data: query.where.payee === 'p-payroll' ? [{ id: 'other' }] : [] };
+    },
+    getPayees: async () => [
+      { id: 'p-line', name: 'Dividends Apy Earned 1.07%', transfer_acct: null },
+      { id: 'p-payroll', name: 'Oak Knoll School Type: Payroll', transfer_acct: null },
+      { id: 'p-dividend', name: 'dividend', transfer_acct: null },
+      { id: 'p-acct', name: 'Oak Knoll School', transfer_acct: 'acct-9' },
+    ],
+    createPayee: async payee => { created.push(payee); return 'p-new'; },
+    getRules: async () => [],
+    deletePayee: async id => { deletedPayees.push(id); },
+    batchBudgetUpdates: async callback => { await callback(); },
+    updateTransaction: async (id, fields) => { written.push({ id, fields }); },
+    sync: async () => { syncs += 1; },
+  };
+  const service = new ActualService(api);
+  service.initialized = true;
+  const result = await service.dispatch('retidyTransactions', { updates: [
+    { transaction_id: 'div', payee_name: 'Dividend', notes: 'DIVIDENDS APY Earned 1.07% #clerk' },
+    { transaction_id: 'pay', payee_name: 'Oak Knoll School' },
+    { transaction_id: 'same', payee_name: 'Dividend', notes: 'already' },
+    { transaction_id: 'gone', payee_name: 'Dividend' },
+  ] });
+  // An existing payee is reused whatever its case; a transfer payee is never a match.
+  assert.deepEqual(created, [{ name: 'Oak Knoll School' }]);
+  assert.deepEqual(written, [
+    { id: 'div', fields: { payee: 'p-dividend', notes: 'DIVIDENDS APY Earned 1.07% #clerk' } },
+    { id: 'pay', fields: { payee: 'p-new' } },
+  ]);
+  assert.deepEqual(result.skipped, [{ id: 'gone', reason: 'deleted' }, { id: 'same', reason: 'no_change' }]);
+  assert.deepEqual(deletedPayees, ['p-line']);
+  assert.deepEqual(result.payees_deleted, [{ id: 'p-line', name: 'Dividends Apy Earned 1.07%' }]);
+  assert.equal(syncs, 1);
+  assert.deepEqual(await service.dispatch('retidyTransactions', {}), { applied: [], skipped: [], payees_created: [], payees_deleted: [] });
+});
+
+test('a payee a rule still names is kept after a retidy', async () => {
+  const deletedPayees = [];
+  class WhereQuery extends Query {
+    filter(where) { this.where = where; return this; }
+  }
+  const api = {
+    q: () => new WhereQuery(),
+    aqlQuery: async query => ({ data: query.where.id ? [{ id: 'div', payee: 'p-line', notes: '' }] : [] }),
+    getPayees: async () => [{ id: 'p-line', name: 'Line', transfer_acct: null }, { id: 'p-dividend', name: 'Dividend', transfer_acct: null }],
+    getRules: async () => [{ id: 'r1', conditions: [{ field: 'payee', op: 'is', value: 'p-line' }], actions: [] }],
+    deletePayee: async id => { deletedPayees.push(id); },
+    batchBudgetUpdates: async callback => { await callback(); },
+    updateTransaction: async () => {},
+    sync: async () => {},
+  };
+  const service = new ActualService(api);
+  service.initialized = true;
+  const result = await service.retidyTransactions({ updates: [{ transaction_id: 'div', payee_name: 'Dividend' }] });
+  assert.deepEqual(result.applied, [{ id: 'div', fields: { payee: 'p-dividend' } }]);
+  assert.deepEqual(deletedPayees, []);
+});
+
 test('deleting transactions reports which ids were already gone', async () => {
   const deleted = [];
   const api = {

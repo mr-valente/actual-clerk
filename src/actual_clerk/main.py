@@ -32,7 +32,7 @@ from actual_clerk.diagnostics import build_report
 from actual_clerk.domain.intelligence import canonical_key
 from actual_clerk.domain.merchants import merchant_label, normalize_merchant
 from actual_clerk.plaid_links import describe, public_item, read_items
-from actual_clerk.plaid_sync import PlaidSyncEngine
+from actual_clerk.plaid_sync import PlaidSyncEngine, retidy_imports
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, ProcessingError
 from actual_clerk.schemas import (
     ActualRulesRequest,
@@ -54,6 +54,7 @@ from actual_clerk.schemas import (
     RegisterSourceRequest,
     ResolveDecisionRequest,
     ResolveProposalRequest,
+    RetidyImportsRequest,
     SandboxItemRequest,
     ServerTokenRequest,
     SettingsPatch,
@@ -1365,6 +1366,18 @@ async def plaid_sandbox_reset_login(item_id: str, request: Request) -> dict[str,
         await client.close()
     await _jobs(request).enqueue("health", trigger="manual")
     return {"reset": True}
+
+
+@app.post("/api/plaid/retidy")
+async def plaid_retidy(payload: RetidyImportsRequest, request: Request) -> dict[str, Any]:
+    """Give early Plaid imports the payee and notes a new import would get."""
+    settings = _settings_manager(request).get()
+    return await retidy_imports(
+        _database(request),
+        _gateway(request),
+        today=datetime.now(settings.zone).date(),
+        apply=not payload.dry_run,
+    )
 
 
 @app.post("/api/plaid/links", status_code=status.HTTP_201_CREATED)

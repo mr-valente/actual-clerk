@@ -10,7 +10,7 @@ import pytest
 from actual_clerk.clients.actual import ActualGatewayError
 from actual_clerk.clients.plaid import PlaidError
 from actual_clerk.config import Settings
-from actual_clerk.plaid_sync import PlaidSyncEngine, read_stream
+from actual_clerk.plaid_sync import PlaidSyncEngine, read_stream, retidy_imports
 
 TODAY = datetime.date(2026, 9, 12)
 
@@ -92,6 +92,11 @@ class StubGateway:
     async def import_transactions(self, account_id, transactions, *, dry_run=False):
         self.imports.append((account_id, list(transactions)))
         return {"added": [f"new-{i}" for i in range(len(transactions))], "updated": [], "errors": self.import_errors}
+
+    async def retidy_transactions(self, updates):
+        self.retidied = list(updates)
+        return {"applied": [{"id": item["transaction_id"]} for item in updates], "skipped": [],
+                "payees_created": [], "payees_deleted": []}
 
     async def snapshot(self, *, today=None, transaction_ids=()):
         return {"categories": self.categories, "accounts": [], "transactions": []}
@@ -442,3 +447,30 @@ async def test_preview_reads_the_whole_stream_without_writing(linked):
     assert gateway.adoptions == [] and gateway.deletions == []
     assert all(rows == [] or True for _, rows in gateway.imports)
     assert linked.get_plaid_item("item-1")["cursor"] == "", "a preview never moves the cursor"
+
+
+async def test_early_imports_are_retidied_only_when_asked(linked):
+    line = "DIVIDENDS APY Earned 1.07% 07/01/26 to 09/30/26"
+    plaid_id = "lE31jJ5RgqSyGmk8jvvBfwzzzGowozhLN9B3P"
+    gateway = StubGateway({"acct-chk": [
+        {"id": "row-div", "date": datetime.date(2026, 9, 30), "amount_cents": 2384, "imported_id": plaid_id,
+         "payee_name": "Dividends Apy Earned 1.07% 07/01/26 to 09/30/26", "imported_description": line,
+         "notes": "#clerk"},
+        {"id": "row-sf", "date": datetime.date(2026, 9, 2), "amount_cents": -450, "imported_id": "TRN-sf",
+         "payee_name": "Shop", "imported_description": "SHOP 12", "notes": ""},
+        {"id": "row-done", "date": datetime.date(2026, 9, 29), "amount_cents": -335, "imported_id": plaid_id[::-1],
+         "payee_name": "The Home Depot", "imported_description": "THE HOME DEPOT #0901",
+         "notes": "THE HOME DEPOT #0901 #clerk"},
+    ]})
+    preview = await retidy_imports(linked, gateway, today=TODAY, apply=False)
+    assert preview["dry_run"] is True
+    assert [change["transaction_id"] for change in preview["changes"]] == ["row-div"]
+    change = preview["changes"][0]
+    assert change["payee_before"] == "Dividends Apy Earned 1.07% 07/01/26 to 09/30/26"
+    assert change["payee_name"] == "Dividend"
+    assert change["notes"] == f"{line} #clerk"
+    assert not hasattr(gateway, "retidied"), "a dry run writes nothing"
+
+    applied = await retidy_imports(linked, gateway, today=TODAY, apply=True)
+    assert applied["applied"] == [{"id": "row-div"}]
+    assert gateway.retidied == [{"transaction_id": "row-div", "payee_name": "Dividend", "notes": f"{line} #clerk"}]

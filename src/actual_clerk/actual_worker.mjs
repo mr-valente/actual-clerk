@@ -959,6 +959,81 @@ export class ActualService {
     };
   }
 
+  async retidyTransactions(params) {
+    // Rename an imported row's payee and/or fill its notes. A payee is found
+    // by name as Actual's import would (ignoring case) or created; one the
+    // renames leave with no transactions and no rules is deleted, so the old
+    // bank-line payees do not linger in the payee list.
+    const updates = params.updates || [];
+    const ids = [...new Set(updates.map(update => cleanString(update.transaction_id)).filter(Boolean))];
+    if (!ids.length) return { applied: [], skipped: [], payees_created: [], payees_deleted: [] };
+    const rows = await this._query(this.api.q('transactions')
+      .filter({ id: { $oneof: ids } })
+      .options({ splits: 'all' })
+      .select(['id', 'payee', 'notes']));
+    const existing = new Map(rows.map(row => [cleanString(row.id), row]));
+    const payees = (await this.api.getPayees()).filter(payee => !payee.transfer_acct);
+    const byName = new Map(payees.map(payee => [cleanString(payee.name).toLocaleLowerCase(), cleanString(payee.id)]));
+    const planned = [];
+    const skipped = [];
+    const wanted = new Set();
+    for (const update of updates) {
+      const id = cleanString(update.transaction_id);
+      const row = existing.get(id);
+      if (!row) {
+        skipped.push({ id, reason: 'deleted' });
+        continue;
+      }
+      const name = cleanString(update.payee_name).trim();
+      if (name && !byName.has(name.toLocaleLowerCase())) wanted.add(name);
+      planned.push({ id, row, name, notes: update.notes == null ? null : cleanString(update.notes) });
+    }
+    const created = [];
+    const applied = [];
+    const released = new Set();
+    for (const name of wanted) {
+      const payeeId = cleanString(await this.api.createPayee({ name }));
+      byName.set(name.toLocaleLowerCase(), payeeId);
+      created.push({ id: payeeId, name });
+    }
+    await this.api.batchBudgetUpdates(async () => {
+      for (const update of planned) {
+        const fields = {};
+        if (update.name) {
+          const payeeId = byName.get(update.name.toLocaleLowerCase());
+          if (payeeId && payeeId !== cleanString(update.row.payee)) {
+            fields.payee = payeeId;
+            if (update.row.payee) released.add(cleanString(update.row.payee));
+          }
+        }
+        if (update.notes != null && update.notes !== cleanString(update.row.notes)) fields.notes = update.notes;
+        if (!Object.keys(fields).length) {
+          skipped.push({ id: update.id, reason: 'no_change' });
+          continue;
+        }
+        await this.api.updateTransaction(update.id, fields);
+        applied.push({ id: update.id, fields });
+      }
+    });
+    const deleted = [];
+    if (released.size) {
+      const ruleText = JSON.stringify(await this.api.getRules());
+      for (const payeeId of released) {
+        if (ruleText.includes(payeeId)) continue;
+        const uses = await this._query(this.api.q('transactions')
+          .filter({ payee: payeeId })
+          .options({ splits: 'all' })
+          .select(['id']));
+        if (uses.length) continue;
+        const payee = payees.find(item => cleanString(item.id) === payeeId);
+        await this.api.deletePayee(payeeId);
+        deleted.push({ id: payeeId, name: cleanString(payee?.name) });
+      }
+    }
+    if (created.length || applied.length || deleted.length) await this.api.sync();
+    return { applied, skipped, payees_created: created, payees_deleted: deleted };
+  }
+
   async diagnostics() {
     const preferenceRows = await this._query(this.api.q('preferences').filter({ id: 'budgetType' }).select(['id', 'value']));
     const budgetType = preferenceRows[0]?.value ?? null;
@@ -1017,6 +1092,7 @@ export class ActualService {
       importTransactions: () => this.importTransactions(params),
       deleteTransactions: () => this.deleteTransactions(params),
       adoptImportedIds: () => this.adoptImportedIds(params),
+      retidyTransactions: () => this.retidyTransactions(params),
     };
     if (!methods[method]) throw new Error(`Unknown Actual worker method: ${method}`);
     if (method !== 'initialize' && !this.initialized) throw new Error('The Actual API worker is not initialized');

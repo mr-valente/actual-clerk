@@ -581,3 +581,9 @@ class ActualGateway:
                 row["date"] = row["date"].isoformat()
             payload.append(row)
         return await self._call("adoptImportedIds", {"updates": payload})
+
+    async def retidy_transactions(self, updates: Sequence[dict[str, Any]]) -> dict[str, Any]:
+        """Rename imported rows' payees and fill their notes; drop payees left unused."""
+        if not updates:
+            return {"applied": [], "skipped": [], "payees_created": [], "payees_deleted": []}
+        return await self._call("retidyTransactions", {"updates": [dict(item) for item in updates]})

@@ -167,7 +167,10 @@ Then leave it for two or three days. What to look for:
 - **Payee names** may differ from SimpleFIN's: Plaid supplies a cleaned
   merchant name as the payee and keeps the bank's raw text as the imported
   payee, which is what merchant memory keys on. Expect a few Review items
-  the first week while memory catches up on the new spellings.
+  the first week while memory catches up on the new spellings. Where Plaid
+  finds no merchant (dividends, payroll, transfers) the payee is a named
+  counterparty or the start of the bank line ("Dividend", "Oak Knoll
+  School"), and the full line goes in the notes, as SimpleFIN had it.
 - **Capital One** specifically: the phone app's anticipated charges settle
   against whichever feed posts the row, so nothing changes there.
 
@@ -225,6 +228,19 @@ and keeping both providers, which Clerk supports indefinitely.
     -d '{"item_id": "<item id from GET /api/plaid/items>", "account_selection": true}'
   ```
 
+- **Early imports with bank-line payees.** Rows Clerk delivered before
+  the payee/notes fix (late September 2026) carry the whole bank line as
+  the payee and empty notes. One pass brings them in line; it reports by
+  default and renames only payees that still echo the bank line:
+
+  ```bash
+  curl -s -X POST http://shiro:30031/api/plaid/retidy \
+    -H 'content-type: application/json' -d '{}'                    # preview
+  curl -s -X POST http://shiro:30031/api/plaid/retidy \
+    -H 'content-type: application/json' -d '{"dry_run": false}'    # apply
+  ```
+
+  Payees the pass leaves with no transactions and no rules are deleted.
 - **Not exercised outside the sandbox** before this runbook: OAuth pop-ups
   with real banks, and Plaid's real posting behaviour for pending swaps. The
   planner and engine tests cover both; the first week's Activity log is the

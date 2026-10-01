@@ -10,8 +10,11 @@ from actual_clerk.domain.plaid_import import (
     PlaidTransactionError,
     convert,
     looks_like_plaid_id,
+    payee_for,
     plaid_amount_to_cents,
     plan_account,
+    retidy,
+    short_payee,
     starting_balance_cents,
 )
 
@@ -73,15 +76,103 @@ def test_conversion_keeps_the_bank_text_for_merchant_memory():
         "amount_cents": -450,
         "payee_name": "Blue Bottle Coffee",
         "imported_payee": "SQ *BLUE BOTTLE 4471",
+        "notes": "SQ *BLUE BOTTLE 4471",
         "imported_id": "t1",
         "cleared": True,
     }
     pending = convert(plaid_txn("t2", 4.5, "2026-09-03", pending=True, merchant_name=None))
     assert pending["cleared"] is False
-    assert pending["payee_name"] == "SQ *BLUE BOTTLE"
+    assert pending["payee_name"] == "Sq *Blue Bottle"
     assert pending["imported_payee"] == "SQ *BLUE BOTTLE"
+    assert pending["notes"] == "SQ *BLUE BOTTLE"
     with pytest.raises(PlaidTransactionError):
         convert(plaid_txn("t3", 1, None))
+
+
+def test_a_line_without_a_merchant_gets_a_short_payee_and_keeps_the_line_in_notes():
+    dividend = convert(plaid_txn(
+        "t1", -23.84, "2026-09-30", merchant_name=None,
+        name="Dividends Apy Earned 1.07% 07/01/26 to 09/30/26",
+        original_description="DIVIDENDS APY Earned 1.07% 07/01/26 to 09/30/26",
+    ))
+    assert dividend["payee_name"] == "Dividend"
+    assert dividend["notes"] == "DIVIDENDS APY Earned 1.07% 07/01/26 to 09/30/26"
+    payroll = convert(plaid_txn(
+        "t2", -5286.07, "2026-09-30", merchant_name=None,
+        name="Oak Knoll School Type: Payroll Co: Oak Knoll School",
+    ))
+    assert payroll["payee_name"] == "Oak Knoll School"
+    assert payroll["notes"] == "Oak Knoll School Type: Payroll Co: Oak Knoll School"
+    assert convert(plaid_txn("t3", 1, "2026-09-30", merchant_name=None, name=""))["payee_name"] == "Unknown"
+    assert convert(plaid_txn("t3", 1, "2026-09-30", merchant_name=None, name=""))["notes"] is None
+
+
+def test_a_named_counterparty_beats_the_bank_line_but_not_a_payment_terminal():
+    base = {"merchant_name": None, "name": "Ach Deposit 991 Acme Payroll"}
+    assert payee_for({**base, "counterparties": [
+        {"name": "Square", "type": "payment_terminal", "confidence_level": "VERY_HIGH"},
+        {"name": "Venmo", "type": "payment_app", "confidence_level": "HIGH"},
+        {"name": "Acme Corp", "type": "income_source", "confidence_level": "HIGH"},
+    ]}) == "Acme Corp"
+    assert payee_for({**base, "counterparties": [
+        {"name": "Square", "type": "payment_terminal", "confidence_level": "VERY_HIGH"},
+        {"name": "Acme Corp", "type": "income_source", "confidence_level": "LOW"},
+    ]}) == "Ach Deposit"
+    assert payee_for({**base, "merchant_name": "Acme", "counterparties": [
+        {"name": "Acme Corp", "type": "income_source"},
+    ]}) == "Acme"
+
+
+@pytest.mark.parametrize(
+    ("line", "payee"),
+    [
+        ("OAK KNOLL SCHOOL TYPE: PAYROLL  CO: OAK KNOLL SCHOOL", "Oak Knoll School"),
+        ("INTEREST CHARGE:PURCHASES", "Interest Charge"),
+        ("KINGS ##3634", "Kings"),
+        ("ELECTRONIC BALANCE TRANSFER R1232829", "Electronic Balance Transfer"),
+        ("TRADER JOE'S #604", "Trader Joe's"),
+        ("Check 1234", "Check"),
+        ("7-ELEVEN 36883", "7-Eleven"),
+        ("12 34", "12 34"),
+        ("", ""),
+    ],
+)
+def test_a_short_payee_keeps_who_the_line_names(line, payee):
+    assert short_payee(line) == payee
+
+
+def early_import(**extra):
+    return {
+        "id": "r1", "date": datetime.date(2026, 9, 30), "amount_cents": 2384,
+        "imported_id": PLAID_ID,
+        "payee_name": "Dividends Apy Earned 1.07% 07/01/26 to 09/30/26",
+        "imported_description": "DIVIDENDS APY Earned 1.07% 07/01/26 to 09/30/26",
+        "notes": "#clerk",
+        **extra,
+    }
+
+
+def test_an_early_import_is_retidied_like_a_new_one():
+    assert retidy(early_import()) == {
+        "payee_name": "Dividend",
+        "notes": "DIVIDENDS APY Earned 1.07% 07/01/26 to 09/30/26 #clerk",
+    }
+    # A merchant payee is right already; only the notes are filled.
+    assert retidy(early_import(payee_name="Trader Joe's", imported_description="TRADER JOE S #604", notes="")) == {
+        "notes": "TRADER JOE S #604",
+    }
+
+
+def test_retidy_leaves_the_users_own_words_and_other_providers_alone():
+    # Renamed by the user (or an Actual rule): the payee no longer echoes the bank line.
+    assert "payee_name" not in retidy(early_import(payee_name="Credit Union Dividend"))
+    # Notes the user wrote are kept, and so are notes already filled.
+    assert "notes" not in retidy(early_import(notes="quarterly #clerk"))
+    assert retidy(early_import(payee_name="Dividend", notes="DIVIDENDS APY Earned 1.07% 07/01/26 to 09/30/26")) == {}
+    assert retidy(early_import(imported_id="TRN-0886b2ec-bbed-4c38-8f2b-f66a5dcd43e0")) == {}
+    assert retidy(early_import(is_child=True)) == {}
+    assert retidy(early_import(imported_description="")) == {}
+    assert "payee_name" not in retidy(early_import(is_transfer=True))
 
 
 def test_plaid_ids_are_recognised_and_other_providers_are_not():

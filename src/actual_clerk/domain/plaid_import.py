@@ -62,23 +62,163 @@ def looks_like_plaid_id(value: str) -> bool:
     return bool(value) and bool(PLAID_ID.match(value))
 
 
+def _clean(value: Any) -> str:
+    return " ".join(str(value or "").split())
+
+
+# Counterparty kinds that can stand in for a payee, best first. A payment
+# terminal (Square, Toast) names the rail the money went through, not who it
+# went to.
+_COUNTERPARTY_RANK = {
+    "merchant": 0,
+    "marketplace": 1,
+    "income_source": 2,
+    "financial_institution": 3,
+    "payment_app": 4,
+}
+
+# Bank lines whose wording carries no payee at all, and the name SimpleFIN
+# gave them. Matched on the first word.
+_KNOWN_LINES = (("dividend", "Dividend"),)
+
+# ACH detail fields banks append after the originator's name:
+# `OAK KNOLL SCHOOL TYPE: PAYROLL CO: OAK KNOLL SCHOOL`.
+_FIELD_LABEL = re.compile(
+    r"\s+(?:type|co|name|id|ind ?id|indn|ref|des|desc|entry|trace|sec)\s*:", re.IGNORECASE
+)
+
+_WORD = re.compile(r"[A-Za-z][A-Za-z']*")
+
+
+def short_payee(description: str) -> str:
+    """A payee-sized name from a bank line that Plaid could not match to a merchant.
+
+    The full line still goes into the notes, so this keeps only the part that
+    names someone: the originator before any ACH detail fields, and the words
+    before the first one carrying a number (a store id, a rate, a date).
+    """
+
+    text = _clean(description)
+    if not text:
+        return ""
+    known = _known_line(text)
+    if known:
+        return known
+    head = _FIELD_LABEL.split(text, maxsplit=1)[0].split(":", 1)[0]
+    tokens = head.split()
+    if not tokens:
+        return text
+    kept = tokens[:1]
+    for token in tokens[1:]:
+        if any(character.isdigit() for character in token):
+            break
+        kept.append(token)
+    short = " ".join(kept).strip(" -*#/.,")
+    if len(short) < 3:
+        return text
+    return _WORD.sub(lambda word: word.group(0).capitalize(), short) if short.isupper() else short
+
+
+def _known_line(text: str) -> str:
+    first = text.split()[0].casefold() if text else ""
+    return next((label for prefix, label in _KNOWN_LINES if first.startswith(prefix)), "")
+
+
+def _counterparty(transaction: dict[str, Any]) -> str:
+    best: tuple[int, str] | None = None
+    for entry in transaction.get("counterparties") or []:
+        if not isinstance(entry, dict):
+            continue
+        name = _clean(entry.get("name"))
+        rank = _COUNTERPARTY_RANK.get(str(entry.get("type") or ""))
+        if not name or rank is None:
+            continue
+        if str(entry.get("confidence_level") or "").upper() == "LOW":
+            continue
+        if best is None or rank < best[0]:
+            best = (rank, name)
+    return best[1] if best else ""
+
+
+def payee_for(transaction: dict[str, Any]) -> str:
+    """Plaid's merchant when it found one, otherwise who the bank line names.
+
+    Plaid leaves ``merchant_name`` empty for anything that is not a shop:
+    dividends, payroll, transfers, fees. Its ``name`` is then the whole bank
+    line, which reads as a note, not a payee.
+    """
+
+    merchant = _clean(transaction.get("merchant_name"))
+    if merchant:
+        return merchant
+    description = _clean(transaction.get("name")) or _clean(transaction.get("original_description"))
+    return (
+        _known_line(description)
+        or _counterparty(transaction)
+        or short_payee(description)
+        or "Unknown"
+    )
+
+
 def convert(transaction: dict[str, Any]) -> dict[str, Any]:
     """One Plaid transaction as an Actual import row."""
     date = _date(transaction.get("date"))
     if date is None:
         raise PlaidTransactionError("A Plaid transaction without a date cannot be imported")
-    name = str(transaction.get("name") or "").strip()
-    merchant = str(transaction.get("merchant_name") or "").strip()
-    original = str(transaction.get("original_description") or "").strip()
+    name = _clean(transaction.get("name"))
+    merchant = _clean(transaction.get("merchant_name"))
+    original = _clean(transaction.get("original_description"))
     return {
         "date": date,
         "amount_cents": plaid_amount_to_cents(transaction.get("amount")),
-        "payee_name": merchant or name or "Unknown",
+        "payee_name": payee_for(transaction),
         # What the bank actually printed: Clerk's merchant memory keys on this.
         "imported_payee": original or name or merchant,
+        # The bank line in full, where SimpleFIN put it. Actual keeps a
+        # matched row's own notes, so a phone charge's are not overwritten.
+        "notes": original or name or None,
         "imported_id": str(transaction.get("transaction_id") or ""),
         "cleared": not bool(transaction.get("pending")),
     }
+
+
+_LETTERS_AND_DIGITS = re.compile(r"[^0-9a-z]+")
+_TAG = re.compile(r"#[^\s#]+")
+
+
+def _same_line(left: str, right: str) -> bool:
+    left = _LETTERS_AND_DIGITS.sub("", left.casefold())
+    return bool(left) and left == _LETTERS_AND_DIGITS.sub("", right.casefold())
+
+
+def retidy(row: dict[str, Any]) -> dict[str, str]:
+    """What a row imported before ``payee_for`` existed needs to read like a new one.
+
+    Those imports took Plaid's whole bank line as the payee whenever it found
+    no merchant, and left the notes empty. ``row`` is one of the gateway's
+    account rows; the answer holds ``payee_name`` and/or ``notes``, or is
+    empty when the row is fine as it is. A payee the user (or an Actual rule)
+    renamed no longer matches the bank line and is left alone, and so are
+    notes that hold anything besides tags.
+    """
+
+    if row.get("is_child") or row.get("is_starting_balance"):
+        return {}
+    if not looks_like_plaid_id(str(row.get("imported_id") or "")):
+        return {}
+    imported = _clean(row.get("imported_description"))
+    if not imported:
+        return {}
+    changes: dict[str, str] = {}
+    payee = _clean(row.get("payee_name"))
+    if not row.get("is_transfer") and _same_line(payee, imported):
+        short = short_payee(payee)
+        if short and short != payee:
+            changes["payee_name"] = short
+    notes = str(row.get("notes") or "").strip()
+    if not _TAG.sub("", notes).strip():
+        changes["notes"] = f"{imported} {notes}".strip()
+    return changes
 
 
 @dataclass

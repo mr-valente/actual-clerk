@@ -37,6 +37,7 @@ from actual_clerk.domain.plaid_import import (
     AccountPlan,
     PlaidTransactionError,
     plan_account,
+    retidy,
     starting_balance_cents,
 )
 
@@ -536,6 +537,53 @@ class PlaidSyncEngine:
                 self._starting_balance_category = category["id"]
                 break
         return self._starting_balance_category
+
+
+async def retidy_imports(
+    database: Database, gateway: ActualGateway, *, today: datetime.date, apply: bool
+) -> dict[str, Any]:
+    """Give rows imported before ``payee_for`` the payee and notes a new import gets.
+
+    A one-off for the first weeks of Plaid: those imports used Plaid's whole
+    bank line as the payee when it found no merchant and left the notes
+    empty. Without ``apply`` it only reports what it would change.
+    """
+
+    changes: list[dict[str, Any]] = []
+    for link in database.list_bank_links(provider="plaid"):
+        account_id = link["actual_account_id"]
+        # Rows adopted around the cutover carry Plaid ids too.
+        start = _cutover(link, today) - datetime.timedelta(days=31)
+        for row in await gateway.account_transactions(account_id, start=start):
+            update = retidy(row)
+            if not update:
+                continue
+            changes.append(
+                {
+                    "transaction_id": row["id"],
+                    "account": link.get("external_name") or account_id,
+                    "date": row["date"].isoformat(),
+                    "amount_cents": row.get("amount_cents", 0),
+                    "payee_before": row.get("payee_name") or "",
+                    "notes_before": row.get("notes") or "",
+                    **update,
+                }
+            )
+    result: dict[str, Any] = {"dry_run": not apply, "changes": changes}
+    if apply and changes:
+        result.update(
+            await gateway.retidy_transactions(
+                [
+                    {
+                        key: change[key]
+                        for key in ("transaction_id", "payee_name", "notes")
+                        if key in change
+                    }
+                    for change in changes
+                ]
+            )
+        )
+    return result
 
 
 def _tally(counts: dict[str, int], plan: AccountPlan, opening: int | None) -> None:

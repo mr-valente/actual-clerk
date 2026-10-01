@@ -344,6 +344,13 @@ class UpdateLinkRequest(BaseModel):
         return value
 
 
+class RetidyImportsRequest(BaseModel):
+    """Bring early Plaid imports' payees and notes in line with new ones."""
+
+    # Reports by default: the run renames payees in Actual.
+    dry_run: bool = True
+
+
 # --------------------------------------------------------------- migration
 
 

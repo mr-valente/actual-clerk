@@ -1665,3 +1665,35 @@ async def test_the_server_simplefin_token_can_be_stored_and_removed(client, feed
     removed = await client.delete("/api/simplefin/server-token")
     assert removed.json()["configured"] is False
     assert feeds.secrets[-2:] == [("simplefin_token", None), ("simplefin_accessKey", None)]
+
+
+async def test_retidying_early_plaid_imports_is_a_dry_run_unless_asked(client, gateway):
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    client.database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1",
+                                      "external_account_id": "plaid-chk", "external_name": "Checking",
+                                      "cutover_date": "2026-09-24"})
+    row = {"id": "row-div", "date": datetime.date(2026, 9, 30), "amount_cents": 2384,
+           "imported_id": "lE31jJ5RgqSyGmk8jvvBfwzzzGowozhLN9B3P",
+           "payee_name": "Oak Knoll School Type: Payroll", "imported_description": "OAK KNOLL SCHOOL TYPE: PAYROLL",
+           "notes": ""}
+    written: list[dict[str, Any]] = []
+
+    async def account_transactions(account_id, *, start=None, end=None):
+        return [dict(row)] if account_id == "acct-1" else []
+
+    async def retidy_transactions(updates):
+        written.extend(updates)
+        return {"applied": [{"id": item["transaction_id"]} for item in updates], "skipped": [],
+                "payees_created": [], "payees_deleted": []}
+
+    gateway.account_transactions = account_transactions
+    gateway.retidy_transactions = retidy_transactions
+    preview = (await client.post("/api/plaid/retidy", json={})).json()
+    assert preview["dry_run"] is True
+    assert preview["changes"][0]["payee_name"] == "Oak Knoll School"
+    assert preview["changes"][0]["account"] == "Checking"
+    assert written == []
+    applied = (await client.post("/api/plaid/retidy", json={"dry_run": False})).json()
+    assert applied["applied"] == [{"id": "row-div"}]
+    assert written == [{"transaction_id": "row-div", "payee_name": "Oak Knoll School",
+                        "notes": "OAK KNOLL SCHOOL TYPE: PAYROLL"}]
