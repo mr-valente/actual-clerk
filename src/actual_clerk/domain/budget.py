@@ -553,6 +553,25 @@ def build_budget_report(
     )
 
 
+def grade_day(spent_cents: int, allowance_cents: int, *, good_day_percent: int) -> str:
+    """Green, yellow, or red for one day's spending against its allowance.
+
+    A day that kept at least `good_day_percent` of its allowance is a good one:
+    held for the rest of the month, it ends with money to spare. A day that
+    spent more than the allowance is over; anything between is roughly level.
+    An allowance of nothing -- free money already gone -- makes any spending
+    red, and a day with nothing spent is green whatever the allowance was.
+    """
+
+    if spent_cents <= 0:
+        return "green"
+    if spent_cents > allowance_cents:
+        return "red"
+    if spent_cents * 100 <= allowance_cents * (100 - good_day_percent):
+        return "green"
+    return "yellow"
+
+
 def format_money(cents: int, currency: str = "USD") -> str:
     """A compact, unambiguous money string for notifications and the UI."""
     symbol = {"USD": "$", "EUR": "€", "GBP": "£", "CAD": "$", "AUD": "$"}.get(

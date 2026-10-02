@@ -8,6 +8,7 @@ from actual_clerk.domain.budget import (
     average_monthly_income,
     build_budget_report,
     format_money,
+    grade_day,
     month_bounds,
 )
 
@@ -702,3 +703,24 @@ def test_a_hidden_category_is_still_a_real_category():
     )
     assert result.uncategorized_cents == 0
     assert [line["category_id"] for line in result.top_categories] == ["old"]
+
+
+def test_a_day_is_graded_against_its_allowance():
+    # Kept at least 15% of the allowance: on course to finish with money spare.
+    def grade(spent, allowance, percent=15):
+        return grade_day(spent, allowance, good_day_percent=percent)
+
+    assert grade(8500, 10000) == "green"
+    assert grade(0, 10000) == "green"
+    # Close to all of it: on course to finish level.
+    assert grade(8501, 10000) == "yellow"
+    assert grade(10000, 10000) == "yellow"
+    assert grade(10001, 10000) == "red"
+    # Nothing left to spend: any spending is over, none is fine.
+    assert grade(1, 0) == "red"
+    assert grade(0, 0) == "green"
+    # The line between green and yellow is the person's to draw.
+    assert grade(8500, 10000, percent=25) == "yellow"
+    assert grade(7500, 10000, percent=25) == "green"
+    # At zero, anything up to the whole allowance is green.
+    assert grade(10000, 10000, percent=0) == "green"

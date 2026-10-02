@@ -8,6 +8,7 @@ from actual_clerk.reporting import (
     monthly_reports,
     to_actual_accounts,
     to_simplefin_accounts,
+    yesterday_allowance,
 )
 
 from .factories import account, snapshot, transaction
@@ -254,3 +255,72 @@ def test_a_month_only_partly_inside_the_history_is_left_out(settings):
     snap["history_start"] = datetime.date(2026, 8, 15)
     months = [m["month"] for m in monthly_reports(snap, settings, today=datetime.date(2026, 10, 1))["months"]]
     assert months == ["2026-09", "2026-10"]
+
+
+def _august(*spending):
+    return snapshot(
+        transactions=[
+            transaction(datetime.date(2026, 8, 1), 400000, payee="Employer", category_id="cat-paycheck"),
+            transaction(datetime.date(2026, 8, 2), -180000, payee="Landlord", category_id="cat-rent"),
+            transaction(datetime.date(2026, 8, 9), -4500, payee="Cafe", category_id="cat-dining"),
+            *spending,
+        ],
+        budgeted={"cat-rent": 180000},
+        budgeted_history={"2026-08": {"cat-rent": 180000}},
+    )
+
+
+def test_yesterday_is_measured_against_the_allowance_it_started_with(settings):
+    snap = _august(
+        transaction(datetime.date(2026, 8, 20), -1500, payee="Cafe", category_id="cat-dining"),
+        transaction(datetime.date(2026, 8, 20), -12000, payee="Market", category_id="cat-groceries"),
+        # Today's spending belongs to today's grade, tomorrow.
+        transaction(datetime.date(2026, 8, 21), -9999, payee="Shop", category_id="cat-dining"),
+    )
+    result = budget_report(snap, settings, today=TODAY)["yesterday"]
+    # 2,155.00 left at the start of the 20th, over the 12 days from it to the 31st.
+    assert result["date"] == "2026-08-20"
+    assert result["allowance_cents"] == 215500 // 12
+    assert result["spent_cents"] == 13500
+    assert result["grade"] == "green"
+
+
+def test_a_phone_charge_from_yesterday_counts_against_it(settings):
+    snap = _august(
+        transaction(datetime.date(2026, 8, 20), -13500, payee="Market", category_id="cat-groceries"),
+    )
+    snap["accounts"].append(account("Card", account_id="acct-card"))
+    waiting = [{"id": "c1", "status": "open", "actual_account_id": "acct-card",
+                "amount_cents": -3000, "noticed_date": "2026-08-20", "merchant": "eBay"}]
+    result = yesterday_allowance(snap, settings, today=TODAY, anticipated=waiting)
+    assert result["spent_cents"] == 16500
+    assert result["grade"] == "yellow"
+    # 92% of the allowance is green for someone content to keep 5% of it.
+    settings.digest_good_day_percent = 5
+    result = yesterday_allowance(snap, settings, today=TODAY, anticipated=waiting)
+    assert result["grade"] == "green"
+
+
+def test_any_spending_is_red_once_free_money_is_gone(settings):
+    snap = _august(
+        transaction(datetime.date(2026, 8, 10), -230000, payee="Airline", category_id="cat-dining"),
+        transaction(datetime.date(2026, 8, 20), -500, payee="Cafe", category_id="cat-coffee"),
+    )
+    result = yesterday_allowance(snap, settings, today=TODAY)
+    assert result["allowance_cents"] == 0
+    assert result["spent_cents"] == 500
+    assert result["grade"] == "red"
+
+
+def test_on_the_first_yesterday_closes_the_month_before(settings):
+    snap = _august(
+        transaction(datetime.date(2026, 8, 31), -20000, payee="Market", category_id="cat-groceries"),
+    )
+    snap["budgeted"] = {}
+    result = yesterday_allowance(snap, settings, today=datetime.date(2026, 9, 1))
+    # 2,155.00 left with only the 31st to go.
+    assert result["allowance_cents"] == 215500
+    assert result["spent_cents"] == 20000
+    assert result["grade"] == "green"
+    snap["budgeted_history"] = {}
+    assert yesterday_allowance(snap, settings, today=datetime.date(2026, 9, 1)) is None

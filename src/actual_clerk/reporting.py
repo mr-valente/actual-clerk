@@ -17,6 +17,7 @@ from actual_clerk.domain.budget import (
     CategoryInfo,
     TransactionInfo,
     build_budget_report,
+    grade_day,
     month_bounds,
     month_key,
 )
@@ -254,7 +255,80 @@ def budget_report(
         income_lookback_months=settings.income_lookback_months,
         anticipated=to_anticipated_infos(snapshot, anticipated),
     )
-    return report.as_dict()
+    result = report.as_dict()
+    result["yesterday"] = yesterday_allowance(
+        snapshot, settings, today=today, anticipated=anticipated
+    )
+    return result
+
+
+def yesterday_allowance(
+    snapshot: dict[str, Any],
+    settings: Settings,
+    *,
+    today: datetime.date,
+    anticipated: Sequence[dict[str, Any]] = (),
+) -> dict[str, Any] | None:
+    """What yesterday was safe to spend, what it spent, and how that went.
+
+    The month is worked out twice as it stood on yesterday's date: once with
+    nothing dated yesterday, which is the allowance the day started with, and
+    once with it, whose extra spending is what the day cost. Both use what is
+    known now, so a purchase the bank posted late still lands on the day it
+    was made, and a bill that ran past its budget costs the day it did.
+
+    On the 1st, yesterday closed the month before, measured against that
+    month's own budget. None when that budget is not in hand.
+    """
+
+    yesterday = today - datetime.timedelta(days=1)
+    if month_key(yesterday) == month_key(today):
+        budgeted = snapshot["budgeted"]
+    else:
+        budgeted = (snapshot.get("budgeted_history") or {}).get(month_key(yesterday))
+        if budgeted is None:
+            return None
+    categories = to_category_infos(snapshot)
+    transactions = to_transaction_infos(
+        snapshot, start=datetime.date.min, end=yesterday
+    )
+    charges = to_anticipated_infos(snapshot, anticipated)
+    income_history = [
+        entry for entry in snapshot.get("income_history") or [] if entry[0] <= yesterday
+    ]
+
+    def as_of(last: datetime.date):
+        return build_budget_report(
+            today=yesterday,
+            categories=categories,
+            budgeted=budgeted,
+            transactions=[item for item in transactions if item.date <= last],
+            income_history=income_history,
+            budgeted_history=snapshot.get("budgeted_history") or {},
+            committed_groups=settings.committed_groups,
+            income_override_cents=settings.monthly_income_override_cents,
+            income_lookback_months=settings.income_lookback_months,
+            anticipated=[
+                item for item in charges if item.date is None or item.date <= last
+            ],
+        )
+
+    before = as_of(yesterday - datetime.timedelta(days=1))
+    if not before.configured or before.available_cents <= 0:
+        # A month with nothing free to spend has no allowance to grade against.
+        return None
+    after = as_of(yesterday)
+    allowance = before.daily_safe_to_spend_cents
+    spent = after.spent_cents - before.spent_cents
+    return {
+        "date": yesterday.isoformat(),
+        "allowance_cents": allowance,
+        "spent_cents": spent,
+        "spent_percent": spent / allowance if allowance > 0 else None,
+        "grade": grade_day(
+            spent, allowance, good_day_percent=settings.digest_good_day_percent
+        ),
+    }
 
 
 # How long after a month ends its figures may still move. A purchase made on

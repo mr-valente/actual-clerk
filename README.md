@@ -159,13 +159,14 @@ Build the companion app with `scripts/build-android.sh` (Docker does the whole A
 
 In **Settings → Notifications**, enable ntfy and pick a hard-to-guess topic on [ntfy.sh](https://ntfy.sh) (or point at your own server). Subscribe to the same topic on your phone. Then, under **Settings → Morning report**, set the delivery time and time zone.
 
-The notification header is yours to name — *The Morning Report* by default — and stays the same every morning, so it is recognisable on a lock screen before a word is read. Everything the report actually says goes in the body, as a headline figure and a few short blocks, each of which can be switched off:
+The notification header is yours to name — *The Morning Report* by default — and stays the same every morning, so it is recognisable on a lock screen before a word is read. The only thing added to it is a 🟢, 🟡 or 🔴 at the end grading yesterday's spending (below). Everything the report actually says goes in the body, as a headline figure and a few short blocks, each of which can be switched off:
 
 | Block | Shows |
 | --- | --- |
-| Free money left | The headline figure and how much of the month remains |
+| Free money left | The headline figure, such as *$1,905.00 (92%) of budget remaining* |
+| Yesterday against its allowance | How much of the safe-to-spend figure yesterday started with was kept, such as *$21.58 (12%) of daily allowance saved yesterday*, or how far past it the day went. Its grade goes at the end of the header: 🟢 kept at least the share set beside the switches (15% by default), 🟡 close to all of it, 🔴 over. Once free money is gone the allowance is nothing, so any spending is red |
+| Daily allowance | What you can spend each day and still finish level, such as *$173.18 daily allowance for the 11 days left* |
 | Spent so far | What has gone out since the 1st, against what was free, naming any charges the phone has seen that the bank has not posted |
-| Safe to spend a day | What you can spend daily and still finish level |
 | Pace for the month | Whether you are ahead of or behind an even spend |
 | Projected month end | Where the month lands at the current pace (off by default) |
 | Committed overspend | Named when a bill has gone past its budget |

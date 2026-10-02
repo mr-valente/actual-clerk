@@ -40,7 +40,7 @@ def test_open_proposals_are_listed_as_waiting():
 def only(*names):
     """Every block off but the ones named, as the settings checkboxes do."""
     blocks = (
-        "headline", "spending", "safe_to_spend", "pace",
+        "headline", "spending", "yesterday", "safe_to_spend", "pace",
         "projection", "commitments", "balances", "connections", "attention",
     )
     return {name: name in names for name in blocks}
@@ -52,9 +52,9 @@ def test_a_good_month_leads_with_what_is_left():
     # holds is in the body, so the notification is recognisable at a glance.
     assert payload["title"] == "The Morning Report"
     assert payload["message"].splitlines()[0] == "Friday, 21 August"
-    assert "$1,905.00 free money left" in payload["message"]
+    assert "$1,905.00 (92%) of budget remaining" in payload["message"]
     assert "92%" in payload["message"]
-    assert "$173.18 a day" in payload["message"]
+    assert "$173.18 daily allowance for the 11 days left" in payload["message"]
     assert "under an even pace for the month" in payload["message"]
     assert payload["priority"] == 3
     assert payload["local_date"] == "2026-08-21"
@@ -120,7 +120,7 @@ def test_a_refund_is_reported_even_when_the_bills_eat_the_income():
         }
     )
     assert "No free money budgeted" not in payload["message"]
-    assert "$74.00 free money left" in payload["message"]
+    assert "$74.00 (100%) of budget remaining" in payload["message"]
 
 
 def test_money_coming_back_is_a_change_worth_reporting():
@@ -210,7 +210,7 @@ def test_every_block_can_be_switched_off():
 def test_a_block_left_out_of_the_settings_defaults_to_shown():
     """An older stored configuration must not silently empty the report."""
     payload = digest(sections={"pace": False})
-    assert "free money left" in payload["message"]
+    assert "of budget remaining" in payload["message"]
     assert "an even pace" not in payload["message"]
 
 
@@ -299,7 +299,7 @@ def test_an_unchanged_budget_with_newer_bank_data_says_why_it_is_quiet():
     assert "Nothing to report" in payload["message"]
     assert "newer bank data" in payload["message"]
     assert "no new discretionary spending" in payload["message"]
-    assert "free money left" not in payload["message"]
+    assert "of budget remaining" not in payload["message"]
     assert payload["budget_change"]["reason"] == "newer_bank_data"
 
 
@@ -329,7 +329,7 @@ def test_a_changed_budget_keeps_the_normal_morning_report():
         previous=prior_report(),
     )
     assert "Nothing to report" not in payload["message"]
-    assert "free money left" in payload["message"]
+    assert "of budget remaining" in payload["message"]
     assert payload["budget_change"]["reason"] == "budget_changed"
 
 
@@ -434,7 +434,7 @@ def test_an_overspent_month_leads_with_how_far_past_it_is():
     """A negative amount "left" is not a quantity anyone has."""
     payload = digest({"remaining_cents": -99590, "remaining_percent": -0.49})
     headline = next(line for line in payload["message"].splitlines() if "over budget" in line)
-    assert headline == "- $995.90 over budget \u00b7 49%"
+    assert headline == "- $995.90 (49%) over budget"
     assert "left" not in headline
 
 
@@ -446,3 +446,48 @@ def test_charges_the_phone_has_seen_are_named_inside_the_spending():
 
 def test_nothing_is_said_about_anticipated_charges_when_there_are_none():
     assert "your phone" not in digest()["message"]
+
+
+def _yesterday(spent, allowance, grade):
+    return {"yesterday": {"date": "2026-08-20", "spent_cents": spent,
+                          "allowance_cents": allowance, "grade": grade}}
+
+
+def test_yesterday_is_graded_on_the_header_and_told_plainly_in_the_body():
+    payload = digest(report=_yesterday(15800, 17958, "yellow"))
+    assert payload["title"] == "The Morning Report \U0001f7e1"
+    assert "- $21.58 (12%) of daily allowance saved yesterday" in payload["message"]
+    assert "\U0001f7e1" not in payload["message"]
+    # Right under the headline, then today's allowance, then the rest.
+    items = [line for line in payload["message"].splitlines() if line.startswith("- ")]
+    assert items[:4] == [
+        "- $1,905.00 (92%) of budget remaining",
+        "- $21.58 (12%) of daily allowance saved yesterday",
+        "- $173.18 daily allowance for the 11 days left",
+        "- Spent $175.00 of $2,080.00 since the 1st",
+    ]
+
+
+def test_a_day_over_its_allowance_says_by_how_much():
+    payload = digest(report=_yesterday(20000, 16000, "red"))
+    assert payload["title"] == "The Morning Report \U0001f534"
+    assert "- $40.00 (25%) over daily allowance yesterday" in payload["message"]
+    over = digest(report={"remaining_cents": -5000, **_yesterday(1200, 0, "red")})["message"]
+    assert "- $12.00 over daily allowance yesterday" in over
+
+
+def test_a_quiet_yesterday_saved_all_of_it():
+    payload = digest(report=_yesterday(0, 17958, "green"))
+    assert payload["title"] == "The Morning Report \U0001f7e2"
+    assert "- $179.58 (100%) of daily allowance saved yesterday" in payload["message"]
+    # A refund does not count as saving more than the day had.
+    refunded = digest(report=_yesterday(-3000, 17958, "green"))["message"]
+    assert "- $179.58 (100%) of daily allowance saved yesterday" in refunded
+
+
+def test_yesterday_can_be_switched_off_and_is_absent_without_figures():
+    hidden = digest(report=_yesterday(100, 17958, "green"), sections={"yesterday": False})
+    assert "yesterday" not in hidden["message"]
+    assert hidden["title"] == "The Morning Report"
+    assert "yesterday" not in digest()["message"]
+    assert digest()["title"] == "The Morning Report"

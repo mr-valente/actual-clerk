@@ -2118,14 +2118,18 @@ async function renderSettings() {
           <h4 class="field-group-title">What the report includes</h4>
           <div class="check-grid">
             ${settingCheck("digest_show_headline", "Free money left", "The headline figure and how much of the month's free money remains.", s.digest_show_headline)}
+            ${settingCheck("digest_show_yesterday", "Yesterday against its allowance", "How much of yesterday's safe-to-spend figure you kept, with a green, yellow or red mark at the end of the header: green when you kept a good share of it, yellow when you came close to all of it, red when you went over.", s.digest_show_yesterday)}
+            ${settingCheck("digest_show_safe_to_spend", "Daily allowance", "What you can spend each day and still finish the month level.", s.digest_show_safe_to_spend)}
             ${settingCheck("digest_show_spending", "Spent so far", "How much has gone out since the 1st, against what was free to spend.", s.digest_show_spending)}
-            ${settingCheck("digest_show_safe_to_spend", "Safe to spend a day", "What you can spend daily and still finish the month level.", s.digest_show_safe_to_spend)}
             ${settingCheck("digest_show_pace", "Pace for the month", "Whether you are ahead of or behind an even spend across the month.", s.digest_show_pace)}
             ${settingCheck("digest_show_projection", "Projected month end", "Where this month lands if the current pace holds.", s.digest_show_projection)}
             ${settingCheck("digest_show_commitments", "Committed overspend", "Named when a bill or subscription has gone past what you budgeted.", s.digest_show_commitments)}
             ${settingCheck("digest_show_balances", "Account balances", "The current Actual balance for every bank-linked account with monitoring on. One switch controls the whole list.", s.digest_show_balances)}
             ${settingCheck("digest_show_connections", "Bank connections", "Lists connections needing attention. A broken connection still raises the alert priority either way.", s.digest_show_connections)}
             ${settingCheck("digest_show_attention", "Waiting for you", "Transactions to review and anything still uncategorized this month.", s.digest_show_attention)}
+          </div>
+          <div class="form-grid">
+            ${settingInput("digest_good_day_percent", "Share of yesterday's allowance to keep for green", s.digest_good_day_percent, { type: "number", min: 0, max: 100, step: 1, note: "Percent. Keep at least this much of the day's safe-to-spend and the day is green; spend more of it and it is yellow, up to all of it. Past all of it is red." })}
           </div>
         </div></section>
 
@@ -2784,9 +2788,9 @@ content.addEventListener("submit", async (event) => {
   const data = new FormData(form);
   const values = {};
   const locked = new Set(state.settings?.environment_overrides || []);
-  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "memory_dispute_threshold", "income_lookback_months", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "anticipated_match_window_days", "anticipated_expire_days"]);
+  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "memory_dispute_threshold", "income_lookback_months", "digest_good_day_percent", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "anticipated_match_window_days", "anticipated_expire_days"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
-  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "ai_alias_questions", "rule_promotion_enabled", "memory_learn_from_actual", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "review_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
+  const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "ai_alias_questions", "rule_promotion_enabled", "memory_learn_from_actual", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_yesterday", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "review_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
 
   for (const [key, value] of data.entries()) {
     if (key.startsWith("clear_") || key === "committed_groups") continue;

@@ -157,6 +157,10 @@ class Settings(BaseModel):
     digest_title: str = Field(default="The Morning Report", max_length=80)
     digest_show_headline: bool = True
     digest_show_spending: bool = True
+    digest_show_yesterday: bool = True
+    # How much of yesterday's safe-to-spend a day must keep to be graded green
+    # rather than yellow. Spending past all of it is red either way.
+    digest_good_day_percent: int = Field(default=15, ge=0, le=100)
     digest_show_safe_to_spend: bool = True
     digest_show_pace: bool = True
     digest_show_projection: bool = False

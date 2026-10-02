@@ -1,8 +1,9 @@
 """The morning budget message.
 
-One notification a day. The header never changes -- it is the name you gave
-the report, so it is recognisable on a lock screen before a word is read --
-and everything the morning actually holds goes in the body, as a headline
+One notification a day. The header is the name you gave the report, so it is
+recognisable on a lock screen before a word is read; the only thing ever added
+to it is a coloured mark grading yesterday's spending against its allowance.
+Everything else the morning holds goes in the body, as a headline
 figure followed by short blocks. Each block can be switched off, because a
 report that says everything is a report nobody reads, and which parts matter
 is a matter of taste rather than something Clerk can work out.
@@ -225,12 +226,28 @@ def build_digest(
     else:
         if show("headline"):
             # Past zero there is nothing "left"; there is an amount gone past.
+            share = f"({abs(percent):.0%})"
             if remaining < 0:
-                headline = f"{format_money(abs(remaining), currency)} over budget"
+                headline = f"{format_money(abs(remaining), currency)} {share} over budget"
             else:
-                headline = f"{format_money(remaining, currency)} free money left"
-            budget_items.append(f"{headline} {BULLET} {abs(percent):.0%}")
+                headline = f"{format_money(remaining, currency)} {share} of budget remaining"
+            budget_items.append(headline)
 
+        # How yesterday went and what today may spend follow the headline:
+        # they are the figures a morning can act on.
+        if show("yesterday"):
+            line = _yesterday_line(report.get("yesterday"), currency)
+            if line:
+                budget_items.append(line)
+                # The grade rides on the header, where it is seen before the
+                # notification is even opened.
+                title = f"{title} {GRADE_MARKS[report['yesterday']['grade']]}"
+        if show("safe_to_spend") and remaining > 0:
+            safe = int(report.get("daily_safe_to_spend_cents", 0))
+            budget_items.append(
+                f"{format_money(safe, currency)} daily allowance for the "
+                f"{plural(days_remaining, 'day')} left"
+            )
         if show("spending"):
             budget_items.append(
                 f"Spent {format_money(spent, currency)} of "
@@ -248,12 +265,6 @@ def build_digest(
                     f"{plural(int(report.get('anticipated_count', 0)), 'charge')} your "
                     "phone has seen that the bank has not posted yet"
                 )
-        if show("safe_to_spend") and remaining > 0:
-            safe = int(report.get("daily_safe_to_spend_cents", 0))
-            budget_items.append(
-                f"{format_money(safe, currency)} a day keeps you level for the "
-                f"{plural(days_remaining, 'day')} left"
-            )
         if show("pace"):
             delta = format_money(abs(int(report.get("pace_delta_cents", 0))), currency)
             side = "under" if report.get("on_track") else "over"
@@ -331,6 +342,33 @@ def build_digest(
         body.listing("👀 Waiting for you", waiting)
 
     return _payload(title, body, tags, priority, report, health, review_count, today, change)
+
+
+# How yesterday went against its safe-to-spend allowance, at a glance: kept a
+# good share of it, roughly level, or over.
+GRADE_MARKS = {"green": "\U0001f7e2", "yellow": "\U0001f7e1", "red": "\U0001f534"}
+
+
+def _yesterday_line(yesterday: dict[str, Any] | None, currency: str) -> str:
+    """How much of yesterday's allowance was kept, or nothing when it is unknown.
+
+    Its grade goes on the header rather than here, so the line itself is plain.
+    """
+
+    if not isinstance(yesterday, dict) or yesterday.get("grade") not in GRADE_MARKS:
+        return ""
+    # A refund cannot save more than the day was allowed.
+    spent = max(0, int(yesterday.get("spent_cents", 0)))
+    allowance = int(yesterday.get("allowance_cents", 0))
+    if allowance <= 0:
+        if spent == 0:
+            return "No daily allowance yesterday, and nothing spent"
+        return f"{format_money(spent, currency)} over daily allowance yesterday"
+    saved = allowance - spent
+    share = f"({abs(saved) / allowance:.0%})"
+    if saved < 0:
+        return f"{format_money(-saved, currency)} {share} over daily allowance yesterday"
+    return f"{format_money(saved, currency)} {share} of daily allowance saved yesterday"
 
 
 def _payload(
