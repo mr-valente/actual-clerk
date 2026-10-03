@@ -12,6 +12,7 @@ from __future__ import annotations
 import datetime
 import hashlib
 import logging
+from collections import Counter
 from typing import Any
 
 from actual_clerk.categorize import build_memory
@@ -25,9 +26,11 @@ from actual_clerk.domain.anticipated import (
     expired_charges,
     match_charges,
     parse_notification,
+    same_merchant,
 )
 from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, canonical_key, resolve
 from actual_clerk.domain.merchants import normalize_merchant
+from actual_clerk.domain.plaid_import import short_payee
 
 log = logging.getLogger(__name__)
 
@@ -285,6 +288,110 @@ def date_restoration(charge: dict[str, Any]) -> dict[str, Any] | None:
         "transaction_id": charge["matched_transaction_id"],
         "date": charge["matched_date"],
         "from_date": charge["noticed_date"],
+    }
+
+
+def bank_name_unusable(item: dict[str, Any]) -> bool:
+    """Whether a bank row names no merchant Clerk can read.
+
+    Capital One's feed through Plaid replaces every word that mixes letters
+    and digits with asterisks, so `PP*SPOTIFY*P46453222D` arrives as 21
+    asterisks and `7-ELEVEN 36883` as `*-****** 36883`. Neither leaves a
+    merchant key; a row whose payee or bank line does is left alone.
+    """
+
+    if item.get("merchant_key"):
+        return False
+    return not normalize_merchant(
+        str(item.get("payee_name") or ""), str(item.get("imported_description") or "")
+    )
+
+
+def phone_payee(
+    charge: dict[str, Any], transactions: list[dict[str, Any]], aliases: dict[str, str]
+) -> str:
+    """The payee a settled charge's merchant goes by in this budget.
+
+    The name the budget already files the merchant under when it has one, so
+    the row reads like the rest of its history and meets the same rules and
+    memory; otherwise the notification's own name, tidied.
+    """
+
+    key = str(charge.get("merchant_key") or "")
+    if not key:
+        return ""
+    names = Counter(
+        str(item.get("payee_name") or "").strip()
+        for item in transactions
+        if item.get("payee_name")
+        and not item.get("is_transfer")
+        and same_merchant(key, str(item.get("merchant_key") or ""), aliases)
+    )
+    if names:
+        return names.most_common(1)[0][0]
+    return short_payee(str(charge.get("merchant") or ""))
+
+
+def name_corrections(
+    database: Database, snapshot: dict[str, Any]
+) -> tuple[list[dict[str, Any]], list[str]]:
+    """Bank rows a phone charge settled whose bank sent no readable name.
+
+    The phone's notification is Capital One's own record of the same
+    purchase, already trusted for the day it happened; where the bank's line
+    arrived masked it names the merchant too. Each settled charge is looked
+    at once. Returns the renames to write (with the charge each belongs to
+    and the bank's name, so a Reopen can put it back) and the charges that
+    need nothing: their row names its merchant, is gone, or is not a plain
+    purchase.
+    """
+
+    waiting = database.matched_charge_names(uncarried_only=True)
+    if not waiting:
+        return [], []
+    transactions = list(snapshot.get("transactions") or [])
+    items = {str(item.get("id") or ""): item for item in transactions}
+    aliases = database.alias_map()
+    updates: list[dict[str, Any]] = []
+    finished: list[str] = []
+    for row in waiting:
+        item = items.get(str(row["matched_transaction_id"]))
+        name = ""
+        if (
+            item is not None
+            and not item.get("is_transfer")
+            and not item.get("is_child")
+            and bank_name_unusable(item)
+        ):
+            name = phone_payee(row, transactions, aliases)
+        if not name:
+            finished.append(row["id"])
+            continue
+        updates.append(
+            {
+                "charge_id": row["id"],
+                "transaction_id": item["id"],
+                "payee_name": name,
+                "from_payee": str(item.get("payee_name") or ""),
+            }
+        )
+    return updates, finished
+
+
+def name_restoration(charge: dict[str, Any]) -> dict[str, Any] | None:
+    """What putting the bank's own name back on a settled row takes, when this charge renamed it."""
+
+    if (
+        charge.get("status") != MATCHED
+        or not charge.get("matched_transaction_id")
+        or not charge.get("renamed_to")
+        or not charge.get("replaced_payee")
+    ):
+        return None
+    return {
+        "transaction_id": charge["matched_transaction_id"],
+        "payee_name": charge["replaced_payee"],
+        "from_payee": charge["renamed_to"],
     }
 
 

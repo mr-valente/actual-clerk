@@ -1019,7 +1019,9 @@ export class ActualService {
     // Rename an imported row's payee and/or fill its notes. A payee is found
     // by name as Actual's import would (ignoring case) or created; one the
     // renames leave with no transactions and no rules is deleted, so the old
-    // bank-line payees do not linger in the payee list.
+    // bank-line payees do not linger in the payee list. An update naming the
+    // payee it expects to replace (`from_payee`) leaves a row someone has
+    // renamed since alone.
     const updates = params.updates || [];
     const ids = [...new Set(updates.map(update => cleanString(update.transaction_id)).filter(Boolean))];
     if (!ids.length) return { applied: [], skipped: [], payees_created: [], payees_deleted: [] };
@@ -1028,8 +1030,10 @@ export class ActualService {
       .options({ splits: 'all' })
       .select(['id', 'payee', 'notes']));
     const existing = new Map(rows.map(row => [cleanString(row.id), row]));
-    const payees = (await this.api.getPayees()).filter(payee => !payee.transfer_acct);
+    const allPayees = await this.api.getPayees();
+    const payees = allPayees.filter(payee => !payee.transfer_acct);
     const byName = new Map(payees.map(payee => [cleanString(payee.name).toLocaleLowerCase(), cleanString(payee.id)]));
+    const nameOf = new Map(allPayees.map(payee => [cleanString(payee.id), cleanString(payee.name)]));
     const planned = [];
     const skipped = [];
     const wanted = new Set();
@@ -1039,6 +1043,13 @@ export class ActualService {
       if (!row) {
         skipped.push({ id, reason: 'deleted' });
         continue;
+      }
+      if (update.from_payee != null) {
+        const current = nameOf.get(cleanString(row.payee)) || '';
+        if (current.trim().toLocaleLowerCase() !== cleanString(update.from_payee).trim().toLocaleLowerCase()) {
+          skipped.push({ id, reason: 'changed' });
+          continue;
+        }
       }
       const name = cleanString(update.payee_name).trim();
       if (name && !byName.has(name.toLocaleLowerCase())) wanted.add(name);

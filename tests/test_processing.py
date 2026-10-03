@@ -28,6 +28,8 @@ class StubGateway:
         self.skipped: list[dict[str, str]] = []
         self.applied_ids: list[str] | None = None
         self.snapshot_transaction_ids: list[set[str]] = []
+        self.retidied: list[dict[str, Any]] = []
+        self.renamed_by_hand: set[str] = set()
 
     def settings_changed(self):
         pass
@@ -69,6 +71,23 @@ class StubGateway:
     async def ensure_tags(self, catalog):
         self.tags.append(list(catalog))
         return [entry["tag"] for entry in catalog]
+
+    async def retidy_transactions(self, updates):
+        self.retidied = [dict(item) for item in updates]
+        if self.apply_error is not None:
+            raise self.apply_error
+        # A row named in `renamed_by_hand` has been renamed since; the worker leaves it.
+        applied = [item for item in updates if item["transaction_id"] not in self.renamed_by_hand]
+        for item in applied:
+            for row in self.snap["transactions"]:
+                if row["id"] == item["transaction_id"]:
+                    row["payee_name"] = item["payee_name"]
+        return {
+            "applied": [{"id": item["transaction_id"], "fields": {"payee": item["payee_name"]}} for item in applied],
+            "skipped": [{"id": tid, "reason": "changed"} for tid in self.renamed_by_hand],
+            "payees_created": [],
+            "payees_deleted": [],
+        }
 
     async def redate_transactions(self, updates):
         self.redated = [dict(item) for item in updates]
@@ -1226,6 +1245,72 @@ async def test_a_settled_phone_charge_dates_its_bank_row_and_counts_in_its_month
     assert manager.gateway.redated == []
     reports = database.get_snapshot(processing.REPORTS_SNAPSHOT)
     assert "months" in reports
+
+
+MASKED = "*********************"  # PP*SPOTIFY*P46453222D through Capital One's Plaid feed
+
+
+def masked_spotify(database, settings_manager, *, decision_status=None):
+    row = phone_charge(database, settings_manager, text="Your purchase for $13.85 at Spotify was approved.")
+    noticed = datetime.date.fromisoformat(row["noticed_date"])
+    history = transaction(noticed - datetime.timedelta(days=30), -1385, payee="Spotify",
+                          description="PP*SPOTIFY*P46453222D", category_id="cat-spotify", category_name="Spotify")
+    masked = transaction(noticed, -1385, payee=MASKED, transaction_id="txn-masked")
+    if decision_status:
+        database.add_decision({
+            "transaction_id": "txn-masked", "payee_name": MASKED, "source": "model",
+            "status": decision_status, "rationale": {"abstained": True},
+        })
+    return row, budget_snapshot([history, masked])
+
+
+async def test_a_masked_bank_row_is_named_from_the_phone_and_filed_again(manager, database, settings_manager):
+    row, snap = masked_spotify(database, settings_manager, decision_status="needs_review")
+    manager.gateway.snap = snap
+    overview = await manager.refresh_now()
+    assert manager.gateway.retidied == [
+        {"transaction_id": "txn-masked", "payee_name": "Spotify", "from_payee": MASKED}
+    ]
+    assert overview["anticipated_summary"]["renamed"] == 1
+    charge = database.get_anticipated_charge(row["id"])
+    assert (charge["name_carried"], charge["replaced_payee"], charge["renamed_to"]) == (1, MASKED, "Spotify")
+    # The question asked about a nameless row is withdrawn, and the filing run looks again.
+    assert database.latest_decision_for("txn-masked") is None
+    assert "txn-masked" not in database.pending_transaction_ids()
+    assert any(job["kind"] == "categorize" and job["trigger"] == "settled" for job in database.list_jobs())
+    # Named once: a later read writes nothing.
+    manager.gateway.retidied = []
+    await manager.refresh_now()
+    assert manager.gateway.retidied == []
+
+
+async def test_a_skip_on_the_nameless_row_stands(manager, database, settings_manager):
+    _, snap = masked_spotify(database, settings_manager, decision_status="skipped")
+    manager.gateway.snap = snap
+    await manager.refresh_now()
+    assert manager.gateway.retidied[0]["payee_name"] == "Spotify"
+    assert database.latest_decision_for("txn-masked")["status"] == "skipped"
+
+
+async def test_a_row_renamed_by_hand_is_left_as_it_is(manager, database, settings_manager):
+    row, snap = masked_spotify(database, settings_manager)
+    manager.gateway.snap = snap
+    manager.gateway.renamed_by_hand = {"txn-masked"}
+    overview = await manager.refresh_now()
+    assert "renamed" not in overview["anticipated_summary"]
+    charge = database.get_anticipated_charge(row["id"])
+    assert (charge["name_carried"], charge["renamed_to"]) == (1, "")
+
+
+async def test_a_failed_name_write_is_tried_again_on_the_next_read(manager, database, settings_manager):
+    row, snap = masked_spotify(database, settings_manager)
+    manager.gateway.snap = snap
+    manager.gateway.apply_error = ActualGatewayError("Actual is away")
+    await manager.refresh_now()
+    assert database.get_anticipated_charge(row["id"])["name_carried"] == 0
+    manager.gateway.apply_error = None
+    await manager.refresh_now()
+    assert database.get_anticipated_charge(row["id"])["renamed_to"] == "Spotify"
 
 
 async def test_a_failed_date_write_is_tried_again_on_the_next_read(manager, database, settings_manager):

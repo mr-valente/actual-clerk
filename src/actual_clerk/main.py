@@ -2103,6 +2103,7 @@ async def anticipated_reopen(charge_id: str, request: Request) -> dict[str, Any]
     if not charge:
         raise HTTPException(status_code=404, detail="Anticipated charge not found")
     restore = anticipated.date_restoration(charge)
+    rename = anticipated.name_restoration(charge)
     if not database.reopen_anticipated_charge(charge_id):
         raise HTTPException(status_code=409, detail="This charge is already open, or was never read")
     if restore:
@@ -2112,6 +2113,13 @@ async def anticipated_reopen(charge_id: str, request: Request) -> dict[str, Any]
             await _gateway(request).redate_transactions([restore])
         except ActualGatewayError as exc:
             log.warning("Could not restore the bank's date after reopening a charge: %s", exc)
+    if rename:
+        # The row took the phone's merchant because of this match. Put the
+        # bank's own name back, unless someone has renamed it by hand since.
+        try:
+            await _gateway(request).retidy_transactions([rename])
+        except ActualGatewayError as exc:
+            log.warning("Could not restore the bank's name after reopening a charge: %s", exc)
     with contextlib.suppress(Exception):
         await _jobs(request).refresh_now()
     return {"status": anticipated.OPEN}

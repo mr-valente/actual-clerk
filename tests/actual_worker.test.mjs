@@ -522,6 +522,38 @@ test('retidying renames payees, fills notes, and deletes only payees left unused
   assert.deepEqual(await service.dispatch('retidyTransactions', {}), { applied: [], skipped: [], payees_created: [], payees_deleted: [] });
 });
 
+test('a retidy that names the payee it replaces leaves a row renamed since alone', async () => {
+  const written = [];
+  class WhereQuery extends Query {
+    filter(where) { this.where = where; return this; }
+  }
+  const api = {
+    q: () => new WhereQuery(),
+    aqlQuery: async query => ({ data: query.where.id ? [
+      { id: 'masked', payee: 'p-stars', notes: '' },
+      { id: 'mine', payee: 'p-mine', notes: '' },
+    ] : [{ id: 'still-used' }] }),
+    getPayees: async () => [
+      { id: 'p-stars', name: '*********************', transfer_acct: null },
+      { id: 'p-mine', name: 'My Own Name', transfer_acct: null },
+      { id: 'p-spotify', name: 'Spotify', transfer_acct: null },
+    ],
+    getRules: async () => [],
+    deletePayee: async () => {},
+    batchBudgetUpdates: async callback => { await callback(); },
+    updateTransaction: async (id, fields) => { written.push({ id, fields }); },
+    sync: async () => {},
+  };
+  const service = new ActualService(api);
+  service.initialized = true;
+  const result = await service.retidyTransactions({ updates: [
+    { transaction_id: 'masked', payee_name: 'Spotify', from_payee: '*********************' },
+    { transaction_id: 'mine', payee_name: 'Spotify', from_payee: '*********************' },
+  ] });
+  assert.deepEqual(written, [{ id: 'masked', fields: { payee: 'p-spotify' } }]);
+  assert.deepEqual(result.skipped, [{ id: 'mine', reason: 'changed' }]);
+});
+
 test('a payee a rule still names is kept after a retidy', async () => {
   const deletedPayees = [];
   class WhereQuery extends Query {

@@ -516,6 +516,83 @@ def test_a_settled_charge_s_row_is_dated_once_on_the_day_the_phone_saw(database,
     assert database.get_anticipated_charge(row["id"])["date_carried"] == 0
 
 
+MASKED_SPOTIFY = "*********************"  # PP*SPOTIFY*P46453222D through Capital One's Plaid feed
+
+
+@pytest.mark.parametrize(
+    ("payee", "description", "unusable"),
+    [
+        (MASKED_SPOTIFY, MASKED_SPOTIFY, True),
+        ("*-****** 36883", "*-****** 36883", True),  # 7-ELEVEN 36883
+        ("", "", True),
+        ("BP", "**#***************** BP", False),  # Plaid still named the merchant
+        ("Knoebels Trading", "**-***** KNOEBELS TRADING", False),
+        ("Spotify", "PP*SPOTIFY*P46453222D", False),
+    ],
+)
+def test_a_bank_row_is_unnamed_only_when_no_merchant_survives(payee, description, unusable):
+    row = transaction(TODAY, -1385, payee=payee, description=description)
+    assert anticipated.bank_name_unusable(row) is unusable
+
+
+def _settle(database, settings, text, rows, *, at=None):
+    src = source(database)
+    noticed = at or datetime.datetime(2026, 8, 19, 15, tzinfo=datetime.UTC)
+    charge, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(noticed.timestamp() * 1000), title="", text=text,
+    )
+    snap = snapshot(accounts=[account("Card", account_id="acct-card")], transactions=rows)
+    anticipated.reconcile(database, snap, settings, today=TODAY)
+    return charge, snap
+
+
+def test_a_masked_bank_row_takes_the_name_the_budget_files_its_merchant_under(database, settings):
+    history = transaction(datetime.date(2026, 7, 19), -1385, payee="Spotify", description="PP*SPOTIFY*P46453222D",
+                          account_id="acct-card", category_id="cat-spotify", category_name="Spotify")
+    masked = transaction(datetime.date(2026, 8, 20), -1385, payee=MASKED_SPOTIFY, account_id="acct-card",
+                         transaction_id="t-masked")
+    charge, snap = _settle(database, settings, "A charge of $13.85 at Spotify was approved.", [history, masked])
+    assert database.get_anticipated_charge(charge["id"])["matched_transaction_id"] == "t-masked"
+    updates, finished = anticipated.name_corrections(database, snap)
+    assert updates == [{"charge_id": charge["id"], "transaction_id": "t-masked", "payee_name": "Spotify",
+                        "from_payee": MASKED_SPOTIFY}]
+    assert finished == []
+    database.mark_names_carried([], renamed={charge["id"]: (MASKED_SPOTIFY, "Spotify")})
+    assert anticipated.name_corrections(database, snap) == ([], [])
+    stored = database.get_anticipated_charge(charge["id"])
+    assert anticipated.name_restoration(stored) == {"transaction_id": "t-masked", "payee_name": MASKED_SPOTIFY,
+                                                    "from_payee": "Spotify"}
+    # Reopening forgets the rename, so the next settlement is checked afresh.
+    database.reopen_anticipated_charge(charge["id"])
+    reopened = database.get_anticipated_charge(charge["id"])
+    assert (reopened["name_carried"], reopened["replaced_payee"], reopened["renamed_to"]) == (0, "", "")
+    assert anticipated.name_restoration(reopened) is None
+
+
+def test_a_merchant_new_to_the_budget_is_named_from_the_notification(database, settings):
+    masked = transaction(datetime.date(2026, 8, 20), -550, payee="*-****** 36883", account_id="acct-card",
+                         transaction_id="t-masked")
+    _, snap = _settle(database, settings, "A charge of $5.50 at 7-ELEVEN was approved.", [masked])
+    [update], _ = anticipated.name_corrections(database, snap)
+    assert update["payee_name"] == "7-Eleven"
+
+
+def test_a_bank_row_that_names_its_merchant_is_never_renamed(database, settings):
+    named = transaction(datetime.date(2026, 8, 20), -1385, payee="Totally Different", account_id="acct-card",
+                        transaction_id="t-named")
+    charge, snap = _settle(database, settings, "A charge of $13.85 at Spotify was approved.", [named])
+    assert database.get_anticipated_charge(charge["id"])["status"] == "matched"
+    assert anticipated.name_corrections(database, snap) == ([], [charge["id"]])
+
+
+def test_a_transfer_or_a_vanished_row_is_never_renamed(database, settings):
+    transfer = transaction(datetime.date(2026, 8, 20), -1385, payee="", account_id="acct-card",
+                           transaction_id="t-transfer", is_transfer=True)
+    charge, snap = _settle(database, settings, "A charge of $13.85 at Spotify was approved.", [transfer])
+    assert anticipated.name_corrections(database, snap) == ([], [charge["id"]])
+    assert anticipated.name_corrections(database, snapshot(transactions=[])) == ([], [charge["id"]])
+
+
 def test_reconcile_does_nothing_when_the_feature_is_off(database, settings):
     settings.anticipated_enabled = False
     src = source(database)

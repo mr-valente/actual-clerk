@@ -1747,6 +1747,35 @@ async def test_reports_are_read_from_the_last_snapshot(client):
     assert stored["stale"] is not None
 
 
+async def test_reopening_a_wrong_match_puts_the_bank_s_name_back(client, gateway):
+    database = client.database
+    src = database.upsert_notification_source({
+        "device_id": "phone-1", "device_name": "Pixel", "package_name": "com.konylabs.capitalone",
+        "app_label": "Capital One", "actual_account_id": "acct-card", "account_name": "Venture",
+    })
+    charge, _ = database.add_anticipated_charge({
+        "source_id": src["id"], "actual_account_id": "acct-card", "notification_key": "k1", "kind": "charge",
+        "amount_cents": -1385, "merchant": "Spotify", "merchant_key": "spotify", "title": "", "text": "",
+        "noticed_at": 1.0, "noticed_date": "2026-09-30", "status": "open",
+    })
+    database.resolve_anticipated_charge(charge["id"], "matched", matched_transaction_id="row-x",
+                                        matched_date="2026-09-30", match_reason="amount and date")
+    database.mark_names_carried([], renamed={charge["id"]: ("*********************", "Spotify")})
+    written: list[dict[str, Any]] = []
+
+    async def retidy_transactions(updates):
+        written.extend(updates)
+        return {"applied": [], "skipped": [], "payees_created": [], "payees_deleted": []}
+
+    gateway.retidy_transactions = retidy_transactions
+    response = await client.post(f"/api/anticipated/charges/{charge['id']}/reopen")
+    assert response.status_code == 200
+    # Only while the row still carries the phone's name.
+    assert written == [{"transaction_id": "row-x", "payee_name": "*********************", "from_payee": "Spotify"}]
+    reopened = database.get_anticipated_charge(charge["id"])
+    assert (reopened["name_carried"], reopened["renamed_to"]) == (0, "")
+
+
 async def test_reopening_a_wrong_match_puts_the_bank_s_date_back(client, gateway):
     database = client.database
     src = database.upsert_notification_source({

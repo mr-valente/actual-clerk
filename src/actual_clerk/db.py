@@ -311,6 +311,12 @@ CREATE TABLE IF NOT EXISTS anticipated_charges (
     -- Set once the phone's day has been written onto the matched bank row,
     -- so a date the person later changes in Actual is left as they put it.
     date_carried INTEGER NOT NULL DEFAULT 0,
+    -- Set once the matched bank row has been checked for a readable name.
+    -- When the bank's was unreadable and the phone's was written instead,
+    -- the two names are kept so a Reopen can put the bank's back.
+    name_carried INTEGER NOT NULL DEFAULT 0,
+    replaced_payee TEXT NOT NULL DEFAULT '',
+    renamed_to TEXT NOT NULL DEFAULT '',
     -- Rows this charge was settled against and then reopened from, comma
     -- separated: the person said it is not them, so they are never matched again.
     rejected_transaction_ids TEXT NOT NULL DEFAULT '',
@@ -552,6 +558,9 @@ class Database:
             "category_source": "TEXT NOT NULL DEFAULT ''",
             "category_confidence": "REAL NOT NULL DEFAULT 0",
             "date_carried": "INTEGER NOT NULL DEFAULT 0",
+            "name_carried": "INTEGER NOT NULL DEFAULT 0",
+            "replaced_payee": "TEXT NOT NULL DEFAULT ''",
+            "renamed_to": "TEXT NOT NULL DEFAULT ''",
             "rejected_transaction_ids": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in additions.items():
@@ -2584,6 +2593,7 @@ class Database:
                 "ELSE rejected_transaction_ids || ',' || matched_transaction_id END, "
                 "matched_transaction_id='', "
                 "matched_payee='', matched_date='', match_reason='', date_carried=0, "
+                "name_carried=0, replaced_payee='', renamed_to='', "
                 "resolved_at=NULL, updated_at=? "
                 "WHERE id=? AND status IN ('matched','expired','dismissed')",
                 (now, charge_id),
@@ -2623,6 +2633,42 @@ class Database:
                 (time.time(), *ids),
             )
         return cursor.rowcount
+
+    def matched_charge_names(self, *, uncarried_only: bool = False) -> list[dict[str, Any]]:
+        """Settled charges with the bank row they settled and the merchant the phone saw."""
+        query = (
+            "SELECT id, actual_account_id, matched_transaction_id, merchant, merchant_key, "
+            "name_carried, replaced_payee, renamed_to "
+            "FROM anticipated_charges WHERE status='matched' AND matched_transaction_id != ''"
+        )
+        if uncarried_only:
+            query += " AND name_carried=0"
+        with self.connect() as connection:
+            rows = connection.execute(query + " ORDER BY noticed_at").fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_names_carried(
+        self, charge_ids: Sequence[str], *, renamed: Mapping[str, tuple[str, str]] | None = None
+    ) -> int:
+        """Mark charges' rows as checked; `renamed` holds (bank's name, phone's name) per charge."""
+        renamed = dict(renamed or {})
+        ids = [str(item) for item in charge_ids if item and str(item) not in renamed]
+        now = time.time()
+        count = 0
+        with self.connect() as connection:
+            if ids:
+                count += connection.execute(
+                    f"UPDATE anticipated_charges SET name_carried=1, updated_at=? "
+                    f"WHERE id IN ({','.join('?' for _ in ids)})",
+                    (now, *ids),
+                ).rowcount
+            for charge_id, (replaced, renamed_to) in renamed.items():
+                count += connection.execute(
+                    "UPDATE anticipated_charges SET name_carried=1, replaced_payee=?, "
+                    "renamed_to=?, updated_at=? WHERE id=?",
+                    (replaced, renamed_to, now, charge_id),
+                ).rowcount
+        return count
 
     def delete_anticipated_charge(self, charge_id: str) -> bool:
         with self.connect() as connection:

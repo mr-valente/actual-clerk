@@ -47,6 +47,7 @@ from actual_clerk.domain.intelligence import (
     payee_aliases,
     rules_needing_repair,
 )
+from actual_clerk.domain.merchants import merchant_label, normalize_merchant
 from actual_clerk.plaid_links import read_items, readings
 from actual_clerk.plaid_sync import PlaidSyncEngine
 from actual_clerk.reporting import (
@@ -1263,12 +1264,16 @@ class JobManager:
         redated = await self._carry_phone_dates(snapshot)
         if redated:
             anticipations["redated"] = redated
+        renamed = await self._carry_phone_names(snapshot)
+        if renamed:
+            anticipations["renamed"] = renamed
         if anticipations.get("asking") and settings.categorization_enabled:
             # Reviews opened for new charges wait on the model's suggestion.
             self._enqueue_nowait("phone", trigger="asking")
-        if anticipations.get("carried") and settings.categorization_enabled:
-            # A charge settled with the person's answer on it; the filing run
-            # is what writes that answer onto the bank's row.
+        if (anticipations.get("carried") or renamed) and settings.categorization_enabled:
+            # A charge settled with the person's answer on it, or gave a
+            # nameless bank row its merchant; the filing run is what writes
+            # the answer, or files the row under its new name.
             self._enqueue_nowait("categorize", trigger="settled")
         overview = {
             "budget": budget_report(
@@ -1361,6 +1366,65 @@ class JobManager:
                 log.info("Dated %d bank row(s) on the day the phone saw the purchase", len(moved))
         self.database.mark_dates_carried(finished)
         return len(moved)
+
+    async def _carry_phone_names(self, snapshot: dict[str, Any]) -> int:
+        """Name each settled bank row the bank sent without a readable merchant.
+
+        The rename is written before the filing run sees the row, and the
+        snapshot is corrected in place. A review Clerk opened while the row
+        had no name is closed, so the row is filed again under its merchant;
+        a Skip is the person's and stays.
+        """
+        updates, finished = anticipated.name_corrections(self.database, snapshot)
+        renamed: dict[str, tuple[str, str]] = {}
+        if updates:
+            try:
+                result = await self.gateway.retidy_transactions(
+                    [
+                        {
+                            "transaction_id": update["transaction_id"],
+                            "payee_name": update["payee_name"],
+                            "from_payee": update["from_payee"],
+                        }
+                        for update in updates
+                    ]
+                )
+            except ActualGatewayError as exc:
+                # Tried again on the next read; until then the row keeps the
+                # bank's name and is filed as before.
+                log.warning("Could not name settled phone charges on their bank rows: %s", exc)
+                self.database.mark_names_carried(finished)
+                return 0
+            applied = {str(entry.get("id") or "") for entry in result.get("applied") or []}
+            items = {str(item.get("id") or ""): item for item in snapshot.get("transactions") or []}
+            for update in updates:
+                if update["transaction_id"] not in applied:
+                    # Renamed by hand since, or gone: theirs stands.
+                    finished.append(update["charge_id"])
+                    continue
+                renamed[update["charge_id"]] = (update["from_payee"], update["payee_name"])
+                item = items.get(update["transaction_id"])
+                if item is not None:
+                    item["payee_name"] = update["payee_name"]
+                    item["merchant_key"] = normalize_merchant(
+                        update["payee_name"], str(item.get("imported_description") or "")
+                    )
+                    item["merchant_label"] = merchant_label(
+                        update["payee_name"], str(item.get("imported_description") or "")
+                    )
+                decision = self.database.latest_decision_for(update["transaction_id"])
+                if (
+                    decision is not None
+                    and decision["status"] == "needs_review"
+                    and not decision.get("anticipated_id")
+                ):
+                    self.database.close_decision(
+                        decision["id"], "superseded", reason="the phone named the merchant"
+                    )
+            if renamed:
+                log.info("Named %d bank row(s) after the merchant the phone saw", len(renamed))
+        self.database.mark_names_carried(finished, renamed=renamed)
+        return len(renamed)
 
     async def refresh_now(self) -> dict[str, Any]:
         """Read the budget and rebuild the overview outside the job queue."""
