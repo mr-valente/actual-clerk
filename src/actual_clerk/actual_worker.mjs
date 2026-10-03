@@ -131,6 +131,21 @@ export function assembleSnapshot({
   const totals = new Map(balanceRows.map(row => [cleanString(row.account_id), cleanInteger(row.balance_cents)]));
   const cleared = new Map(clearedBalanceRows.map(row => [cleanString(row.account_id), cleanInteger(row.balance_cents)]));
   const unconfirmed = findUnconfirmedTransfers(transferRows);
+  // Actual budgets a transfer between an on-budget and an off-budget account
+  // as an ordinary transaction: the on-budget half carries a category and is
+  // spending or income like any other. Only a transfer between two accounts on
+  // the same side of the budget is invisible to it, and that is what
+  // `is_transfer` means to everything downstream. A half whose counterpart
+  // cannot be found stays a transfer.
+  const transferAccount = new Map(transferRows.map(row => [cleanString(row.id), cleanString(row.account_id)]));
+  const isBudgetTransfer = row => {
+    const counterpartId = cleanString(row.transfer_id);
+    if (!counterpartId) return false;
+    const own = accountById.get(cleanString(row.account_id));
+    const other = accountById.get(transferAccount.get(counterpartId));
+    if (!own || !other) return true;
+    return Boolean(own.offbudget) === Boolean(other.offbudget);
+  };
 
   const categoryList = categories.map(category => {
     const groupId = cleanString(category.group_id ?? category.group);
@@ -161,7 +176,7 @@ export function assembleSnapshot({
       account_name: cleanString(account.name),
       off_budget: Boolean(account.offbudget),
       closed_account: Boolean(account.closed),
-      is_transfer: Boolean(row.transfer_id),
+      is_transfer: isBudgetTransfer(row),
       is_child: Boolean(row.is_child),
       is_starting_balance: Boolean(row.starting_balance_flag),
       cleared: Boolean(row.cleared),

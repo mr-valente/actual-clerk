@@ -72,6 +72,45 @@ test('the snapshot uses Actual-resolved category and payee mappings', () => {
   assert.deepEqual(snapshot.budgeted, { 'cat-new': 120000 });
 });
 
+test('a transfer to an off-budget account is budgeted like any other transaction', () => {
+  const snapshot = assembleSnapshot({
+    today: '2026-10-02',
+    historyStart: '2026-09-01',
+    accounts: [
+      { id: 'checking', name: 'Checking', offbudget: false, closed: false },
+      { id: 'savings', name: 'Savings', offbudget: false, closed: false },
+      { id: 'loan', name: 'Loan', offbudget: true, closed: false },
+    ],
+    accountMetadata: [],
+    groups: [{ id: 'bills', name: 'Bills', is_income: false, hidden: false }],
+    categories: [{ id: 'loan-cat', name: 'Loan', group_id: 'bills', is_income: false, hidden: false }],
+    transactionRows: [
+      { id: 'pay', date: '2026-10-02', amount_cents: -50000, category_id: 'loan-cat', account_id: 'checking', transfer_id: 'paid', cleared: true },
+      { id: 'paid', date: '2026-10-02', amount_cents: 50000, account_id: 'loan', transfer_id: 'pay', cleared: true },
+      { id: 'save', date: '2026-10-02', amount_cents: -10000, account_id: 'checking', transfer_id: 'saved', cleared: true },
+      { id: 'saved', date: '2026-10-02', amount_cents: 10000, account_id: 'savings', transfer_id: 'save', cleared: true },
+    ],
+    balanceRows: [],
+    clearedBalanceRows: [],
+    transferRows: [
+      { id: 'pay', account_id: 'checking', transfer_id: 'paid' },
+      { id: 'paid', account_id: 'loan', transfer_id: 'pay' },
+      { id: 'save', account_id: 'checking', transfer_id: 'saved' },
+      { id: 'saved', account_id: 'savings', transfer_id: 'save' },
+    ],
+    budgetMonths: {},
+    tags: [],
+    collectedAt: '2026-10-02T12:00:00Z',
+  });
+  const byId = Object.fromEntries(snapshot.transactions.map(item => [item.id, item]));
+  assert.equal(byId.pay.is_transfer, false, 'the on-budget half of a loan payment is spending');
+  assert.equal(byId.pay.category_id, 'loan-cat');
+  assert.equal(byId.paid.is_transfer, false);
+  assert.equal(byId.paid.off_budget, true, 'the loan half stays out of the budget as off-budget');
+  assert.equal(byId.save.is_transfer, true, 'moving money between budget accounts is still a transfer');
+  assert.equal(byId.saved.is_transfer, true);
+});
+
 test('native bank sync is called and reports new and reconciled rows', async () => {
   const before = [{ id: 'old', account: 'acct', date: '2026-08-30', amount: -100, payee: 'p1', category: null, notes: '', imported_id: 'bank-1', transfer_id: null, cleared: true }];
   const after = [
