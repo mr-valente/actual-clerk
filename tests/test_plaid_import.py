@@ -329,6 +329,49 @@ def test_adoption_prefers_the_closest_date_and_respects_the_window():
     assert len(outside.imports) == 1
 
 
+def test_a_different_merchant_with_the_same_amount_is_never_adopted():
+    # 2026-10-02 live: Plaid's 10/01 Tailscale $5.00 took over a 9/21
+    # SimpleFIN Teacup Media $5.00 row ten days earlier, so the Tailscale
+    # charge went missing. The same shape, around this test's cutover.
+    existing = [
+        row("teacup", -500, "2026-09-01", imported_id="TRN-27aa", cleared=True,
+            payee_name="Teacup Media", imported_description="Teacup Media"),
+    ]
+    tailscale = plaid_txn("t1", 5, "2026-09-11", name="TAILSCALE", merchant_name="Tailscale",
+                          original_description="TAILSCALE")
+    result = plan(added=[tailscale], existing=existing, adopt_window_days=14)
+    assert result.adoptions == []
+    assert [item["imported_id"] for item in result.imports] == ["t1"]
+    # Not even a day apart.
+    next_day = plaid_txn("t2", 5, "2026-09-02", name="TAILSCALE", merchant_name="Tailscale")
+    assert plan(added=[next_day], existing=existing).adoptions == []
+
+
+def test_the_same_merchant_is_adopted_across_the_window_under_either_name():
+    existing = [
+        row("sf-1", -1878, "2026-09-02", imported_id="ACT-1", cleared=True,
+            payee_name="Namecheap", imported_description="NAME-CHEAP.COM* WDGHBB"),
+        row("sf-2", -450, "2026-09-02", imported_id="ACT-2", cleared=True,
+            payee_name="SQ *BLUE BOTTLE", imported_description="SQ *BLUE BOTTLE"),
+    ]
+    namecheap = plaid_txn("t1", 18.78, "2026-09-12", name="NAME-CHEAP.COM* WDGHBB", merchant_name="Namecheap")
+    coffee = plaid_txn("t2", 4.5, "2026-09-03")  # Blue Bottle Coffee
+    result = plan(added=[namecheap, coffee], existing=existing)
+    assert sorted(item["transaction_id"] for item in result.adoptions) == ["sf-1", "sf-2"]
+    assert result.imports == []
+
+
+def test_without_a_name_on_either_side_only_a_near_date_adopts():
+    existing = [row("sf-1", -1385, "2026-09-03", imported_id="ACT-1", cleared=True,
+                    payee_name="", imported_description="")]
+    masked = dict(name="*********************", original_description="*********************", merchant_name=None)
+    near = plan(added=[plaid_txn("t1", 13.85, "2026-09-06", **masked)], existing=existing)
+    assert [item["transaction_id"] for item in near.adoptions] == ["sf-1"]
+    far = plan(added=[plaid_txn("t1", 13.85, "2026-09-12", **masked)], existing=existing)
+    assert far.adoptions == []
+    assert len(far.imports) == 1
+
+
 def test_a_reconciled_row_only_takes_the_id():
     existing = [row("row-r", -450, "2026-09-03", imported_id="t-pending", cleared=True, reconciled=True)]
     result = plan(

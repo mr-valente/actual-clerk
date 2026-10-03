@@ -13,7 +13,10 @@ public import will not:
   the posted id, it clears, and its amount settles.
 - **The cutover boundary.** Rows that another provider imported around the
   cutover date carry that provider's ids. A Plaid transaction with the same
-  amount within a few days adopts such a row rather than duplicating it.
+  amount adopts such a row rather than duplicating it, but only when it is
+  plausibly the same purchase: the two name the same merchant, or, when
+  either side names none, they are dated within a few days of each other.
+  Two different merchants are never one purchase, however close the amount.
 - **Amount or date changes.** Actual's import never rewrites an existing
   row's amount or date, so a ``modified`` transaction that still matches by
   id is settled directly.
@@ -35,6 +38,8 @@ import re
 from dataclasses import dataclass, field
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 from typing import Any
+
+from actual_clerk.domain.merchants import normalize_merchant
 
 # Plaid transaction ids are opaque base-62 strings of this shape. A row whose
 # imported_id looks like this was written by Plaid (through Clerk) and is
@@ -400,17 +405,59 @@ def _adopt_foreign(
     window: datetime.timedelta,
 ) -> dict[str, Any] | None:
     amount = plaid_amount_to_cents(transaction.get("amount"))
+    theirs = _merchant_keys(
+        transaction.get("merchant_name"), transaction.get("name"), transaction.get("original_description")
+    )
     best: dict[str, Any] | None = None
     best_distance: datetime.timedelta | None = None
     for row in foreign:
         if row["id"] in claimed or row.get("amount_cents") != amount:
             continue
         distance = abs(row["date"] - date)
-        if distance > window:
+        ours = _merchant_keys(row.get("payee_name"), row.get("imported_description"))
+        if theirs and ours:
+            if not _same_merchant(theirs, ours):
+                continue
+            limit = window
+        else:
+            # Nothing to compare by name, so only a near date says it is the
+            # same purchase; two providers date one purchase days apart at most.
+            limit = min(window, _UNNAMED_ADOPT_GAP)
+        if distance > limit:
             continue
         if best is None or distance < best_distance:
             best, best_distance = row, distance
     return best
+
+
+# The furthest apart two providers date one purchase when neither names its
+# merchant: a weekend between the authorization and the posting.
+_UNNAMED_ADOPT_GAP = datetime.timedelta(days=4)
+
+
+def _merchant_keys(*descriptors: Any) -> set[str]:
+    """Each descriptor's merchant key, spaces dropped so 'name cheap' meets 'namecheap'."""
+    keys = set()
+    for descriptor in descriptors:
+        key = normalize_merchant(_clean(descriptor)).replace(" ", "")
+        if key:
+            keys.add(key)
+    return keys
+
+
+def _same_merchant(left: set[str], right: set[str]) -> bool:
+    """Whether two sets of merchant keys name one merchant.
+
+    One key may extend the other ('bluebottle' and 'bluebottlecoffee'), but
+    only from the start, and only when the shorter key is long enough to mean
+    something on its own.
+    """
+    for one in left:
+        for other in right:
+            short, long = sorted((one, other), key=len)
+            if short == long or (len(short) >= 4 and long.startswith(short)):
+                return True
+    return False
 
 
 def _settlement(
