@@ -115,6 +115,48 @@ to that row again, and the row goes back to the bank's date unless you have
 dated it yourself since. The only change this feature makes in
 Actual is the date of a row a charge settled, as above.
 
+## Pending charges the bank withdraws
+
+The bank feed can announce a purchase too, and then take it back. Some banks
+withdraw a pending transaction without posting it, and list the posted one
+hours or days later under a new id, and often under a new name: FFFCU did
+exactly that with the October 2026 rent, which was pending as `Demattheisinv`
+and posted 14 hours later as `PL*DeMattheisInv`. Clerk deletes a withdrawn
+pending row from Actual, as before, but no longer forgets it:
+
+1. **Held.** The row becomes an anticipated charge of origin `pending`, with
+   no phone source, carrying the category the row held in Actual. It counts
+   as spent against that category, so the morning report does not lose the
+   money while the bank has nothing.
+2. **Settled.** When the posted row arrives it settles the hold: by identity
+   when Plaid names the pending transaction it replaces (whatever the posted
+   amount, so a gas-pump hold that posts for less is not counted twice), and
+   otherwise by account, exact amount, and date, as a phone charge is.
+3. **Carried.** The posted row inherits the hold's category as an approved
+   decision, which the next filing run writes; memory then learns the
+   posted row's name, so the next one files itself. Only the category the
+   pending row itself held is carried. A posted row already categorized,
+   already decided, or skipped keeps what it has; one waiting in Review is
+   answered.
+4. **Released.** A hold nothing settles within `plaid_hold_withdrawn_days`
+   (default 5) of the withdrawal was a hold the bank released, and stops
+   counting. 0 turns holding off.
+
+A held charge is never asked about in Review (its posted row is, if there is
+nothing to inherit), never moves its posted row's date or name, and never
+teaches an alias: two bank names for one purchase are not two names for one
+shop. Holds count whether or not the phone feature is on.
+
+What it costs, in the rare cases where a hold's matching is a guess (the bank
+named no pending id): a posted row that comes back at a different amount (a
+tip added, a pre-authorisation released for less), or an authorisation the
+bank simply cancelled, counts alongside the hold until the hold is released,
+at most `plaid_hold_withdrawn_days`. Two identical charges on one account
+can settle a hold against the wrong one of them, leaving that purchase
+uncounted until its own row posts. A hold is never settled against its own
+pending row, and Reopen on a hold works as it does for a phone charge: the
+row is never matched to it again, and its days count from the reopen.
+
 ## Setting it up
 
 ### 1. Clerk
@@ -201,8 +243,8 @@ itself once access is granted.
 ## Data
 
 Three tables in Clerk's SQLite: `notification_sources` (one app on one phone,
-pointed at an Actual account), `anticipated_charges` (one per notification,
-with the parsed amount, merchant, the raw title and text, the provisional
+pointed at an Actual account), `anticipated_charges` (one per notification, or per
+withdrawn pending charge, told apart by `origin`, with the parsed amount, merchant, the raw title and text, the provisional
 category and where it came from, and how it was settled: `open`, `matched`,
 `expired`, `dismissed`, or `ignored` for a declined, unreadable, or purely
 informational notification), and `merchant_aliases`, which is shared with the rest of

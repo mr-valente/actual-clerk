@@ -13,6 +13,7 @@ user does in Actual afterwards.
 | [stage-3.md](stage-3.md) | One identity: aliases from every source, the payee catalogue read as evidence, the Merchants section, teaching as a rule |
 | [stage-4.md](stage-4.md) | Learning from Actual: corrections, disputes, rule-change and retire proposals, category repair, the digest line |
 | [stage-5.md](stage-5.md) | The model as consultant: rule hints in the category question, the same-merchant question, rule proposals from history |
+| [renamed-and-withdrawn.md](renamed-and-withdrawn.md) | After the October 2026 rent lapse: withdrawn pending charges held, names with the same words, Review spending in the report, asking the model again |
 
 Stages are implemented one at a time on the `feature/plaid` branch; each ends
 with a checkpoint before the next begins.

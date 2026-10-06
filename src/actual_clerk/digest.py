@@ -262,8 +262,14 @@ def build_digest(
             if anticipated > 0:
                 budget_items.append(
                     f"Including {format_money(anticipated, currency)} from "
-                    f"{plural(int(report.get('anticipated_count', 0)), 'charge')} your "
-                    "phone has seen that the bank has not posted yet"
+                    f"{plural(int(report.get('anticipated_count', 0)), 'charge')} "
+                    "the bank has not posted yet"
+                )
+            provisional = int(report.get("provisional_cents", 0))
+            if provisional > 0:
+                budget_items.append(
+                    f"Including {format_money(provisional, currency)} waiting in Review, "
+                    "counted where Clerk suggests"
                 )
         if show("pace"):
             delta = format_money(abs(int(report.get("pace_delta_cents", 0))), currency)

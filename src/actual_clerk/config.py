@@ -64,6 +64,11 @@ class Settings(BaseModel):
     plaid_starting_balance: bool = True
     # How far either side of the cutover date a foreign-id row may be adopted.
     plaid_adopt_window_days: int = Field(default=14, ge=0, le=90)
+    # A pending charge the bank withdraws without posting it is held -- still
+    # counted as spent, the way its row was filed -- for this many days after
+    # the withdrawal, so a bank that posts it again later (FFFCU, hours on)
+    # neither loses the money nor its category. 0 lets it go at once.
+    plaid_hold_withdrawn_days: int = Field(default=5, ge=0, le=30)
 
     # --- Anticipated charges (phone companion) ----------------------------
     # A card app's notification announces a purchase before the bank feed
@@ -424,6 +429,7 @@ ENVIRONMENT_FIELDS = {
     "CLERK_PLAID_DELETE_REMOVED_PENDING": "plaid_delete_removed_pending",
     "CLERK_PLAID_STARTING_BALANCE": "plaid_starting_balance",
     "CLERK_PLAID_ADOPT_WINDOW_DAYS": "plaid_adopt_window_days",
+    "CLERK_PLAID_HOLD_WITHDRAWN_DAYS": "plaid_hold_withdrawn_days",
     "CLERK_ANTICIPATED_ENABLED": "anticipated_enabled",
     "CLERK_ANTICIPATED_DEVICE_TOKEN": "anticipated_device_token",
     "CLERK_ANTICIPATED_MATCH_WINDOW_DAYS": "anticipated_match_window_days",

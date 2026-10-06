@@ -11,8 +11,11 @@ Actual afterwards. One resolver reads them in a fixed order:
    regardless of the apply mode.
 3. Learned evidence meeting the configured thresholds.
 4. One consistent exact sighting, as a review-only suggestion.
+5. For a name never seen at all, one category filed every time under names
+   with the same words, as a review-only suggestion: a feed that decorates a
+   merchant differently has not changed the merchant.
 
-The caller may go on to ask the model; nothing here ever does. Steps 1 to 4
+The caller may go on to ask the model; nothing here ever does. Steps 1 to 5
 need no network and complete when the model and the bank are both down,
 which is what lets anticipated charges and the filing cascade share them.
 """
@@ -24,7 +27,12 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from actual_clerk.domain.memory import MerchantMemory, token_similarity
-from actual_clerk.domain.merchants import keys_related, merchant_label, normalize_merchant
+from actual_clerk.domain.merchants import (
+    RAIL_TOKENS,
+    keys_related,
+    merchant_label,
+    normalize_merchant,
+)
 
 SOURCE_RULE = "rule"
 SOURCE_MEMORY = "memory"
@@ -168,22 +176,8 @@ class Resolution:
 
 # A pair has to recur before it is read as an alias rather than a one-off.
 ALIAS_MIN_SIGHTINGS = 2
-# Words that describe how money moved rather than where it went. A descriptor
-# left with nothing else names the rail, and a rail is not a merchant.
-_RAIL_TOKENS = frozenset(
-    {
-        "ach", "eft", "pos", "sig", "visa", "mastercard", "amex", "discover", "paypal", "pp",
-        "venmo", "zelle", "inst", "xfer", "transfer", "tfr", "debit", "credit", "card",
-        "consumer", "withdrawal", "deposit", "dep", "electronic", "payment", "pmnt", "pymt",
-        "rcvd", "received", "recurring", "purchase", "pur", "online", "mobile", "internet",
-        "check", "chk", "atm", "cash", "fee", "interest", "direct", "ext", "trn", "merchant",
-        "location", "timestamp", "date", "retail", "store", "web", "ppd", "ccd", "pending",
-    }
-)
-
-
 def _names_a_rail(key: str) -> bool:
-    return all(token in _RAIL_TOKENS or len(token) <= 2 for token in key.split())
+    return all(token in RAIL_TOKENS or len(token) <= 2 for token in key.split())
 
 
 def _too_generic(key: str) -> bool:
@@ -344,6 +338,31 @@ def resolve(
                     "reason": "One exact prior filing suggests this category; approval is required.",
                 },
             )
+    for candidate in keys:
+        found = memory.sibling_suggestion(
+            candidate, min_observations=min_observations, allowed_categories=allowed_categories
+        )
+        if found is None:
+            continue
+        sibling, siblings = found
+        name = names.get(sibling.category_id, sibling.category_name)
+        return Resolution(
+            source=SOURCE_MEMORY,
+            category_id=sibling.category_id,
+            category_name=name,
+            confidence=sibling.confidence,
+            automatic=False,
+            rationale={
+                "memory": sibling.as_dict(),
+                "evidence": memory.evidence(siblings[0])[:5],
+                "siblings": siblings[:5],
+                "provisional": True,
+                "reason": (
+                    f"Filed as {name or 'this category'} every time under a name with the "
+                    f"same words ({', '.join(siblings[:3])}); approval is required."
+                ),
+            },
+        )
     return None
 
 

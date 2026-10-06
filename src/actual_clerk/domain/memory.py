@@ -13,7 +13,7 @@ import math
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 
-from actual_clerk.domain.merchants import keys_related
+from actual_clerk.domain.merchants import keys_related, keys_share_words
 
 # A category chosen 9 months ago still describes the merchant, but a more
 # recent choice describes it better. Half the weight per 9 months.
@@ -263,6 +263,53 @@ class MerchantMemory:
             allowed_categories=allowed_categories,
         )
         return match if match is not None and match.share == 1.0 else None
+
+
+    def sibling_suggestion(
+        self,
+        merchant_key: str,
+        *,
+        min_observations: float = 2.0,
+        allowed_categories: set[str] | None = None,
+    ) -> tuple[MemoryMatch, list[str]] | None:
+        """One category, filed every time, under names with the same words.
+
+        For a merchant memory has never seen under this name or a related
+        one: a bank that changed its descriptor (`pl demattheisinv` for
+        `demattheisinv name nicholas`) is still the same merchant if its
+        identifying words are. Every such name is pooled, and the answer is
+        offered only when all of them agree on one category. It is a
+        review-only suggestion, like a lone exact sighting: the words are a
+        guess about identity, and the evidence is about the other names.
+        Being a looser match, it does not also accept thinner evidence: the
+        other names need the sightings memory ordinarily asks for, so one
+        visit to Sack's Shell never speaks for every Shell station.
+        Returns the match and the names it rests on.
+        """
+
+        if not merchant_key or merchant_key in self._buckets:
+            return None
+        if any(keys_related(candidate, merchant_key) for candidate in self._buckets):
+            return None
+        pooled = _Bucket()
+        siblings = []
+        for candidate, bucket in self._buckets.items():
+            if keys_share_words(candidate, merchant_key):
+                pooled.merge(bucket)
+                siblings.append(candidate)
+        if not siblings:
+            return None
+        match = self._resolve(
+            pooled,
+            merchant_key,
+            exact=False,
+            min_observations=min_observations,
+            min_confidence=0,
+            allowed_categories=allowed_categories,
+        )
+        if match is None or match.share != 1.0:
+            return None
+        return match, sorted(siblings)
 
 
 def saturation(sightings: float) -> float:

@@ -60,6 +60,7 @@ Activity page.
 | `plaid_delete_removed_pending` | on | Delete withdrawn pending charges while uncleared |
 | `plaid_starting_balance` | on | Opening balance for an empty account |
 | `plaid_adopt_window_days` | 14 | Cutover adoption window |
+| `plaid_hold_withdrawn_days` | 5 | Keep counting a withdrawn pending charge until it posts again (0 = off); see [anticipated charges](../anticipated-charges.md#pending-charges-the-bank-withdraws) |
 
 ## Verified against the lab
 

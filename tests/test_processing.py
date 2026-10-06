@@ -13,7 +13,9 @@ from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, digest_is_due
 
 from .factories import account, snapshot, transaction
 
-TODAY = datetime.date(2026, 8, 21)
+# The jobs read the clock themselves, so the fixtures are dated from it too:
+# a fixed date drifts out of the filing window as the calendar moves on.
+TODAY = datetime.datetime.now(datetime.UTC).date()
 
 
 class StubGateway:
@@ -1325,3 +1327,101 @@ async def test_a_failed_date_write_is_tried_again_on_the_next_read(manager, data
     manager.gateway.apply_error = None
     await manager.refresh_now()
     assert database.get_anticipated_charge(row["id"])["date_carried"] == 1
+
+
+# -------------------------------------------------- asking the model again
+
+
+async def test_a_review_the_model_never_answered_is_asked_again_without_a_second_alert(
+    manager, database, settings_manager, delivers, monkeypatch
+):
+    from actual_clerk.categorize import UNASKED, Categorizer
+    from actual_clerk.clients.openai_compatible import ModelError
+
+    from .factories import FakeModel
+
+    settings_manager.update({"notifications_enabled": True, "ntfy_topic": "clerk"})
+    manager.gateway.snap = budget_snapshot([transaction(TODAY, -4399, payee="Kam Man Supermarket", transaction_id="txn-km")])
+    down = FakeModel(error=ModelError("Model returned 502: ", retryable=True))
+    monkeypatch.setattr(processing, "Categorizer", lambda settings: Categorizer(settings, model_client=down))
+    await run_job(manager, "categorize", trigger="sync")
+    [waiting] = database.list_decisions(status="needs_review")
+    assert waiting["rationale"][UNASKED] is True
+    assert len(delivers) == 1
+
+    # Still down: the review is asked about again but kept as it is, so a
+    # person answering it is never told it was already resolved.
+    job = await run_job(manager, "categorize", trigger="sync")
+    assert [d["id"] for d in database.list_decisions(status="needs_review")] == [waiting["id"]]
+    assert job["result"]["model_retried"] == 0
+    assert len(delivers) == 1
+
+    up = FakeModel([{"category_number": 4, "confidence": 0.95, "reason": "A supermarket.", "suggested_new_category": ""}])
+    monkeypatch.setattr(processing, "Categorizer", lambda settings: Categorizer(settings, model_client=up))
+    job = await run_job(manager, "categorize", trigger="sync")
+    assert len(up.calls) == 1
+    assert job["result"]["model_retried"] == 1
+    [answered] = database.list_decisions(status="needs_review")
+    assert answered["transaction_id"] == "txn-km"
+    assert answered["source"] == "model" and answered["category_id"]
+    assert UNASKED not in answered["rationale"]
+    assert len(delivers) == 1, "the person already heard about this row"
+
+    # Answered now, so the next run leaves it alone.
+    await run_job(manager, "categorize", trigger="sync")
+    assert len(up.calls) == 1
+
+
+async def test_with_no_model_to_ask_an_unanswered_review_is_left_alone(manager, database, settings_manager):
+    settings_manager.update({"ai_enabled": False})
+    manager.gateway.snap = budget_snapshot([transaction(TODAY, -4399, payee="Kam Man Supermarket", transaction_id="txn-km")])
+    await run_job(manager, "categorize")
+    [first] = database.list_decisions(status="needs_review")
+    await run_job(manager, "categorize")
+    assert [d["id"] for d in database.list_decisions(status="needs_review")] == [first["id"]]
+
+
+# ------------------------------------------------ held pending charges
+
+
+async def test_a_posted_row_filed_from_its_held_pending_charge_teaches_its_new_name(
+    manager, database, settings_manager
+):
+    from actual_clerk import anticipated
+
+    settings_manager.update({"ai_enabled": False})
+    anticipated.hold_withdrawn(
+        database, settings_manager.get(), actual_account_id="acct-checking", label="CHECKING",
+        deletions=[{"transaction_id": "row-pending", "imported_id": "t-pending", "amount_cents": -255000,
+                    "date": TODAY, "payee_name": "Demattheisinv", "imported_description": "",
+                    "category_id": "cat-rent"}],
+    )
+    posted = transaction(TODAY, -255000, payee="Pl*Demattheisinv", transaction_id="txn-rent")
+    manager.gateway.snap = budget_snapshot([posted])
+    await manager.refresh_now()
+    [carried] = database.approved_decisions()
+    assert carried["transaction_id"] == "txn-rent"
+
+    await run_job(manager, "categorize")
+    assert {"transaction_id": "txn-rent", "category_id": "cat-rent", "add_tags": ["clerk"]} in manager.gateway.updates
+    assert database.get_decision(carried["id"])["status"] == "applied"
+    assert [row["category_id"] for row in database.memory_for("pl demattheisinv")] == ["cat-rent"]
+
+
+# -------------------------------------------- reviews in the budget report
+
+
+async def test_spending_waiting_in_review_counts_under_its_suggestion_in_the_report(
+    manager, database, settings_manager
+):
+    settings_manager.update({"ai_enabled": False})
+    waiting = transaction(TODAY, -255000, payee="Pl*Demattheisinv", transaction_id="txn-rent")
+    manager.gateway.snap = budget_snapshot([waiting])
+    database.add_decision({"transaction_id": "txn-rent", "status": "needs_review", "source": "memory",
+                           "category_id": "cat-rent", "category_name": "Rent", "confidence": 0.89})
+    await manager.refresh_now()
+    report = database.get_snapshot(OVERVIEW_SNAPSHOT)["budget"]
+    assert report["provisional_cents"] == 255000 and report["provisional_count"] == 1
+    assert report["uncategorized_cents"] == 700, "only the fixture's unfiled coffee"
+    assert report["committed_spent_cents"] >= 255000, "rent draws on its own budget"
+    assert manager.gateway.updates == [], "nothing is written to Actual"

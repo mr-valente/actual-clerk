@@ -1984,21 +1984,30 @@ async def anticipated_overview(request: Request) -> dict[str, Any]:
     """Sources, what is still anticipated, and what was settled recently."""
     settings = _settings_manager(request).get()
     database = _database(request)
+    accounts = _anticipated_accounts(request)
+    names = {account["id"]: account["name"] for account in accounts}
     return {
         "enabled": settings.anticipated_enabled,
         "token_configured": bool(settings.secret_value("anticipated_device_token")),
         "match_window_days": settings.anticipated_match_window_days,
         "expire_days": settings.anticipated_expire_days,
+        "hold_days": settings.plaid_hold_withdrawn_days,
         "sources": [_serialize_source(s) for s in database.list_notification_sources()],
         "open": anticipated.public_charges(
-            database, database.list_anticipated_charges(status=anticipated.OPEN, limit=200)
+            database,
+            database.list_anticipated_charges(status=anticipated.OPEN, limit=200),
+            account_names=names,
         ),
-        "recent": [
-            anticipated.public_charge(c)
-            for c in database.list_anticipated_charges(limit=60)
-            if c["status"] != anticipated.OPEN
-        ],
-        "accounts": _anticipated_accounts(request),
+        "recent": anticipated.public_charges(
+            database,
+            [
+                c
+                for c in database.list_anticipated_charges(limit=60)
+                if c["status"] != anticipated.OPEN
+            ],
+            account_names=names,
+        ),
+        "accounts": accounts,
         "categories": [
             category
             for category in (database.get_snapshot(OVERVIEW_SNAPSHOT) or {}).get("categories") or []

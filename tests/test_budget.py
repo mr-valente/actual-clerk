@@ -724,3 +724,55 @@ def test_a_day_is_graded_against_its_allowance():
     assert grade(7500, 10000, percent=25) == "green"
     # At zero, anything up to the whole allowance is green.
     assert grade(10000, 10000, percent=0) == "green"
+
+
+# ------------------------------------------------- suggestions in Review
+
+
+def _review(transaction_id, category_id, *, source="model", confidence=0.95):
+    return {"transaction_id": transaction_id, "anticipated_id": "", "source": source,
+            "category_id": category_id, "category_name": "", "confidence": confidence}
+
+
+def test_only_suggestions_clerk_would_stand_behind_place_review_spending(settings):
+    from actual_clerk.reporting import provisional_categories
+
+    placed = provisional_categories(
+        [
+            _review("t-history", "cat-rent", source="memory", confidence=0.6),
+            _review("t-sure", "cat-dining", confidence=0.95),
+            _review("t-guess", "cat-dining", confidence=0.4),
+            _review("t-none", "", source="unresolved", confidence=0.0),
+        ],
+        settings,
+    )
+    assert placed == {"t-history": "cat-rent", "t-sure": "cat-dining"}
+
+
+def test_review_spending_counts_under_its_suggestion_and_never_as_income(settings):
+    import datetime as dt
+
+    from actual_clerk.anticipated import phone_transaction_id
+    from actual_clerk.reporting import budget_report
+
+    from .factories import account, snapshot, transaction
+
+    today = dt.date(2026, 10, 6)
+    snap = snapshot(
+        accounts=[account("Checking", account_id="acct-checking")],
+        transactions=[
+            transaction(today, -255000, payee="Pl*Demattheisinv", transaction_id="t-rent"),
+            transaction(today, -1500, payee="Odd Shop", transaction_id="t-odd"),
+        ],
+        budgeted={"cat-rent": 255000},
+    )
+    charge = {"id": "c-1", "status": "open", "actual_account_id": "acct-checking", "amount_cents": -900,
+              "merchant": "Cafe", "category_id": "", "noticed_date": today.isoformat()}
+    provisional = {"t-rent": "cat-rent", "t-odd": "cat-paycheck", phone_transaction_id("c-1"): "cat-dining"}
+    report = budget_report(snap, settings, today=today, anticipated=[charge], provisional=provisional)
+    assert report["provisional_cents"] == 255000 + 900 and report["provisional_count"] == 2
+    assert report["uncategorized_cents"] == 1500, "spending suggested as income stays uncategorized"
+    assert report["anticipated_uncategorized_count"] == 0
+    without = budget_report(snap, settings, today=today, anticipated=[charge])
+    assert without["uncategorized_cents"] == 255000 + 1500 + 900
+    assert without["provisional_cents"] == 0

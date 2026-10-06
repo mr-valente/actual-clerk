@@ -8,9 +8,10 @@ the picture.
 from __future__ import annotations
 
 import datetime
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from typing import Any
 
+from actual_clerk.anticipated import phone_transaction_id
 from actual_clerk.config import Settings
 from actual_clerk.domain.budget import (
     AnticipatedInfo,
@@ -80,25 +81,75 @@ def to_category_infos(snapshot: dict[str, Any]) -> list[CategoryInfo]:
     ]
 
 
-def to_transaction_infos(
-    snapshot: dict[str, Any], *, start: datetime.date, end: datetime.date
-) -> list[TransactionInfo]:
-    return [
-        TransactionInfo(
-            id=item["id"],
-            date=item["date"],
-            amount_cents=item["amount_cents"],
-            category_id=item.get("category_id"),
-            account_id=item.get("account_id", ""),
-            account_name=item.get("account_name", ""),
-            payee_name=item.get("payee_name", ""),
-            off_budget=item.get("off_budget", False),
-            is_transfer=item.get("is_transfer", False),
-            is_starting_balance=item.get("is_starting_balance", False),
+REVIEW_SOURCES_COUNTED = ("memory", "rule")
+
+
+def provisional_categories(
+    suggestions: Sequence[dict[str, Any]], settings: Settings
+) -> dict[str, str]:
+    """Where the report counts spending still waiting in Review, by transaction id.
+
+    Actual holds such a row uncategorized, and the conservative reading of
+    an uncategorized charge is free money spent. When Clerk already has a
+    good answer -- the person's history, or a model answer it would stand
+    behind -- that reading is usually wrong: rent waiting on a tap is not a
+    blown day. So the report counts the row under the suggestion until the
+    person answers, the way it counts a phone charge under its provisional
+    category. Nothing is written to Actual. A model answer below the
+    confidence the model is held to stays uncategorized. Phone charges are
+    keyed by their review's own id, `phone:<charge id>`.
+    """
+
+    return {
+        str(item["transaction_id"]): str(item["category_id"])
+        for item in suggestions
+        if item.get("category_id")
+        and (
+            item.get("source") in REVIEW_SOURCES_COUNTED
+            or float(item.get("confidence") or 0.0) >= settings.ai_min_confidence
         )
-        for item in snapshot["transactions"]
-        if start <= item["date"] <= end
-    ]
+    }
+
+
+def to_transaction_infos(
+    snapshot: dict[str, Any],
+    *,
+    start: datetime.date,
+    end: datetime.date,
+    provisional: Mapping[str, str] | None = None,
+) -> list[TransactionInfo]:
+    provisional = provisional or {}
+    income = {
+        str(category.get("id") or "")
+        for category in snapshot.get("categories") or []
+        if category.get("is_income")
+    }
+    infos = []
+    for item in snapshot["transactions"]:
+        if not start <= item["date"] <= end:
+            continue
+        category_id = item.get("category_id")
+        suggested = "" if category_id else provisional.get(str(item["id"]), "")
+        # Spending suggested as income is a slip for the person to catch, and
+        # would otherwise vanish from the month instead of counting.
+        if suggested in income and item["amount_cents"] < 0:
+            suggested = ""
+        infos.append(
+            TransactionInfo(
+                id=item["id"],
+                date=item["date"],
+                amount_cents=item["amount_cents"],
+                category_id=category_id or suggested or None,
+                account_id=item.get("account_id", ""),
+                account_name=item.get("account_name", ""),
+                payee_name=item.get("payee_name", ""),
+                off_budget=item.get("off_budget", False),
+                is_transfer=item.get("is_transfer", False),
+                is_starting_balance=item.get("is_starting_balance", False),
+                provisional=bool(suggested),
+            )
+        )
+    return infos
 
 
 def _uncleared_imports_by_account(
@@ -194,13 +245,19 @@ def to_simplefin_accounts(payload: dict[str, Any] | None) -> list[RemoteAccountI
 
 
 def to_anticipated_infos(
-    snapshot: dict[str, Any], charges: Sequence[dict[str, Any]]
+    snapshot: dict[str, Any],
+    charges: Sequence[dict[str, Any]],
+    provisional: Mapping[str, str] | None = None,
 ) -> list[AnticipatedInfo]:
     """Open anticipations, with each account's budget standing read off the snapshot.
 
     A charge on an off-budget or closed account never competes for free money,
-    and one whose account Actual no longer knows is left out the same way.
+    and one whose account Actual no longer knows is left out the same way. A
+    charge nothing has categorized counts under its review's suggestion, when
+    `provisional` holds one.
     """
+
+    provisional = provisional or {}
 
     accounts = {
         str(account.get("id") or ""): account for account in snapshot.get("accounts") or []
@@ -212,6 +269,10 @@ def to_anticipated_infos(
         account = accounts.get(str(charge.get("actual_account_id") or ""))
         if account is None or account.get("closed"):
             continue
+        category_id = str(charge.get("category_id") or "")
+        suggested = (
+            "" if category_id else provisional.get(phone_transaction_id(str(charge.get("id") or "")), "")
+        )
         infos.append(
             AnticipatedInfo(
                 id=str(charge.get("id") or ""),
@@ -219,8 +280,9 @@ def to_anticipated_infos(
                 account_id=str(charge.get("actual_account_id") or ""),
                 off_budget=bool(account.get("off_budget")),
                 merchant=str(charge.get("merchant") or ""),
-                category_id=str(charge.get("category_id") or ""),
+                category_id=category_id or suggested,
                 date=_charge_date(charge),
+                provisional=bool(suggested),
             )
         )
     return infos
@@ -239,6 +301,7 @@ def budget_report(
     *,
     today: datetime.date,
     anticipated: Sequence[dict[str, Any]] = (),
+    provisional: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     _, end = month_bounds(today)
     report = build_budget_report(
@@ -247,17 +310,19 @@ def budget_report(
         budgeted=snapshot["budgeted"],
         # Earlier months are needed to work out what a committed category still
         # holds; the report itself only counts spending inside the month.
-        transactions=to_transaction_infos(snapshot, start=datetime.date.min, end=end),
+        transactions=to_transaction_infos(
+            snapshot, start=datetime.date.min, end=end, provisional=provisional
+        ),
         income_history=snapshot["income_history"],
         budgeted_history=snapshot.get("budgeted_history") or {},
         committed_groups=settings.committed_groups,
         income_override_cents=settings.monthly_income_override_cents,
         income_lookback_months=settings.income_lookback_months,
-        anticipated=to_anticipated_infos(snapshot, anticipated),
+        anticipated=to_anticipated_infos(snapshot, anticipated, provisional),
     )
     result = report.as_dict()
     result["yesterday"] = yesterday_allowance(
-        snapshot, settings, today=today, anticipated=anticipated
+        snapshot, settings, today=today, anticipated=anticipated, provisional=provisional
     )
     return result
 
@@ -268,6 +333,7 @@ def yesterday_allowance(
     *,
     today: datetime.date,
     anticipated: Sequence[dict[str, Any]] = (),
+    provisional: Mapping[str, str] | None = None,
 ) -> dict[str, Any] | None:
     """What yesterday was safe to spend, what it spent, and how that went.
 
@@ -290,9 +356,9 @@ def yesterday_allowance(
             return None
     categories = to_category_infos(snapshot)
     transactions = to_transaction_infos(
-        snapshot, start=datetime.date.min, end=yesterday
+        snapshot, start=datetime.date.min, end=yesterday, provisional=provisional
     )
-    charges = to_anticipated_infos(snapshot, anticipated)
+    charges = to_anticipated_infos(snapshot, anticipated, provisional)
     income_history = [
         entry for entry in snapshot.get("income_history") or [] if entry[0] <= yesterday
     ]
@@ -345,6 +411,7 @@ def monthly_reports(
     *,
     today: datetime.date,
     anticipated: Sequence[dict[str, Any]] = (),
+    provisional: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
     """How each month went: what it had to spend, what it spent, what was left.
 
@@ -365,8 +432,10 @@ def monthly_reports(
     if isinstance(history_start, str):
         history_start = datetime.date.fromisoformat(history_start[:10])
     categories = to_category_infos(snapshot)
-    transactions = to_transaction_infos(snapshot, start=datetime.date.min, end=datetime.date.max)
-    charges = to_anticipated_infos(snapshot, anticipated)
+    transactions = to_transaction_infos(
+        snapshot, start=datetime.date.min, end=datetime.date.max, provisional=provisional
+    )
+    charges = to_anticipated_infos(snapshot, anticipated, provisional)
     current = month_key(today)
     months = []
     for key in sorted(budgeted_history):

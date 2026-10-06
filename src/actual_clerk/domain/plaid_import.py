@@ -269,6 +269,9 @@ class AccountPlan:
     deletions: list[dict[str, Any]] = field(default_factory=list)
     # Removed by the bank but cleared (or reconciled) in Actual: left alone.
     kept: list[dict[str, Any]] = field(default_factory=list)
+    # Posted transactions that name a pending one this plan could not find,
+    # because an earlier sync deleted it: {pending id: posted id}.
+    posted_for_pending: dict[str, str] = field(default_factory=dict)
     skipped_before_cutover: int = 0
     unknown_removed: int = 0
 
@@ -357,6 +360,8 @@ def plan_account(
                 row = candidate
                 reason = "posted"
                 swapped_pending.add(pending_id)
+            elif pending_id and candidate is None:
+                plan.posted_for_pending[pending_id] = transaction_id
         if row is None:
             row = _adopt_foreign(transaction, date, foreign, claimed, window)
             reason = "cutover"
@@ -392,8 +397,15 @@ def plan_account(
             plan.kept.append({"transaction_id": row["id"], "imported_id": transaction_id,
                               "amount_cents": row.get("amount_cents", 0), "date": row.get("date")})
         else:
+            # What the row was is kept with the deletion: a withdrawn pending
+            # charge is held until it posts again, filed the way it was.
             plan.deletions.append({"transaction_id": row["id"], "imported_id": transaction_id,
-                                   "amount_cents": row.get("amount_cents", 0), "date": row.get("date")})
+                                   "amount_cents": row.get("amount_cents", 0), "date": row.get("date"),
+                                   "payee_name": row.get("payee_name") or "",
+                                   "imported_description": row.get("imported_description") or "",
+                                   "category_id": row.get("category_id") or "",
+                                   "is_transfer": bool(row.get("is_transfer")),
+                                   "is_parent": bool(row.get("is_parent"))})
     return plan
 
 

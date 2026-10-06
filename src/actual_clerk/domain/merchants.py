@@ -113,6 +113,19 @@ _ALIASES = {
     "tfl travel": "tfl",
 }
 
+# Words that describe how money moved rather than where it went. A descriptor
+# left with nothing else names the rail, and a rail is not a merchant.
+RAIL_TOKENS = frozenset(
+    {
+        "ach", "eft", "pos", "sig", "visa", "mastercard", "amex", "discover", "paypal", "pp",
+        "venmo", "zelle", "inst", "xfer", "transfer", "tfr", "debit", "credit", "card",
+        "consumer", "withdrawal", "deposit", "dep", "electronic", "payment", "pmnt", "pymt",
+        "rcvd", "received", "recurring", "purchase", "pur", "online", "mobile", "internet",
+        "check", "chk", "atm", "cash", "fee", "interest", "direct", "ext", "trn", "merchant",
+        "location", "timestamp", "date", "retail", "store", "web", "ppd", "ccd", "pending",
+    }
+)
+
 _URL_SUFFIX = re.compile(r"\b(?:www\.|https?://)?([a-z0-9-]+)\.(?:com|net|org|co|io|app|shop)\b")
 _DATE_LIKE = re.compile(r"\b\d{1,4}[-/]\d{1,2}(?:[-/]\d{1,4})?\b")
 _TIME_LIKE = re.compile(r"\b\d{1,2}:\d{2}(?::\d{2})?\b")
@@ -236,6 +249,44 @@ def keys_related(left: str, right: str) -> bool:
     if longer[: len(shorter)] != shorter:
         return False
     return len(shorter) >= 2 or len(shorter[0]) >= 5
+
+
+def identity_words(key: str) -> frozenset[str]:
+    """The words of a merchant key that can say which merchant it is.
+
+    A word of one or two letters is a processor's or a channel's tag (`pl`,
+    `sq`, `co`), and a rail word says how the money moved rather than where
+    it went; neither tells two merchants apart.
+    """
+
+    return frozenset(
+        token for token in key.split() if len(token) > 2 and token not in RAIL_TOKENS
+    )
+
+
+def keys_share_words(left: str, right: str) -> bool:
+    """True when every identifying word of one key appears in the other.
+
+    Two feeds decorate one merchant differently and in a different order:
+    SimpleFIN's `demattheisinv name nicholas` and Plaid's `pl demattheisinv`
+    are one landlord, which `keys_related` cannot see because the processor's
+    tag comes first. Containment of the identifying words, in any order, is
+    the looser test. Kept apart from `keys_related` on purpose: it is
+    evidence enough to suggest, not to file. The same guard against a lone
+    short word applies, so `uber` alone never claims `uber eats`.
+    """
+
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    left_words, right_words = identity_words(left), identity_words(right)
+    if not left_words or not right_words:
+        return False
+    smaller, larger = sorted((left_words, right_words), key=len)
+    if not smaller <= larger:
+        return False
+    return len(smaller) >= 2 or len(next(iter(smaller))) >= 5
 
 
 def rule_match_value(*descriptors: str | None) -> str:

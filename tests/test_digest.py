@@ -438,14 +438,19 @@ def test_an_overspent_month_leads_with_how_far_past_it_is():
     assert "left" not in headline
 
 
-def test_charges_the_phone_has_seen_are_named_inside_the_spending():
+def test_charges_the_bank_has_not_posted_are_named_inside_the_spending():
     payload = digest({"anticipated_cents": 2500, "anticipated_count": 2})
-    assert "Including $25.00 from 2 charges your phone has seen" in payload["message"]
-    assert "not posted yet" in payload["message"]
+    assert "Including $25.00 from 2 charges the bank has not posted yet" in payload["message"]
 
 
 def test_nothing_is_said_about_anticipated_charges_when_there_are_none():
-    assert "your phone" not in digest()["message"]
+    assert "not posted yet" not in digest()["message"]
+
+
+def test_spending_counted_under_a_review_suggestion_is_named():
+    payload = digest({"provisional_cents": 255000, "provisional_count": 1})
+    assert "Including $2,550.00 waiting in Review, counted where Clerk suggests" in payload["message"]
+    assert "waiting in Review" not in digest()["message"]
 
 
 def _yesterday(spent, allowance, grade):

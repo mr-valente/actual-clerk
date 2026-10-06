@@ -29,6 +29,7 @@ import logging
 import time
 from typing import Any
 
+from actual_clerk import anticipated
 from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
 from actual_clerk.clients.plaid import PlaidClient, PlaidError
 from actual_clerk.config import Settings
@@ -367,7 +368,7 @@ class PlaidSyncEngine:
             existing=existing,
             adopt_window_days=self.settings.plaid_adopt_window_days,
             # A row a phone charge settled carries the day the phone saw.
-            pinned_dates=self.database.matched_transaction_ids(),
+            pinned_dates=self.database.matched_transaction_ids(origin=anticipated.ORIGIN_PHONE),
         )
         by_id = {row["id"]: row for row in existing}
         matched_by_actual = 0
@@ -477,6 +478,22 @@ class PlaidSyncEngine:
                     )
         if plan.deletions:
             await self.gateway.delete_transactions([item["transaction_id"] for item in plan.deletions])
+            held = anticipated.hold_withdrawn(
+                self.database,
+                self.settings,
+                actual_account_id=account_id,
+                label=_link_label(link),
+                deletions=plan.deletions,
+            )
+            if held:
+                self.events(
+                    "info",
+                    "plaid_pending_held",
+                    f"{link.get('external_name') or account_id}: the bank withdrew "
+                    f"{held} pending charge(s) without posting them; counted as spent until "
+                    "they post again",
+                    {"actual_account_id": account_id, "held": held},
+                )
         for item in plan.kept:
             self.events(
                 "warning",
@@ -512,6 +529,10 @@ class PlaidSyncEngine:
                     f"{opening / 100:.2f} added so the account matches the bank",
                     {"actual_account_id": account_id, "amount_cents": opening},
                 )
+        if plan.posted_for_pending:
+            # Written only after the import, so a held charge is never told
+            # of a row Actual refused.
+            self.database.note_posted_for_pending(account_id, plan.posted_for_pending)
         self.database.update_bank_link(account_id, last_import_at=self.clock(), last_error="")
         return plan, opening
 
@@ -796,6 +817,15 @@ def _tally(counts: dict[str, int], plan: AccountPlan, opening: int | None) -> No
     counts["kept"] += summary["kept"]
     counts["skipped_before_cutover"] += summary["skipped_before_cutover"]
     counts["starting_balances"] += 1 if opening is not None else 0
+
+
+def _link_label(link: dict[str, Any]) -> str:
+    """How a held pending charge says which account the bank withdrew it from."""
+    name = " ".join(
+        part for part in (link.get("institution"), link.get("external_name")) if part
+    )
+    mask = link.get("mask")
+    return f"{name} …{mask}" if name and mask else name
 
 
 def _cutover(link: dict[str, Any], today: datetime.date) -> datetime.date:

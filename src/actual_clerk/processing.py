@@ -22,6 +22,7 @@ from actual_clerk import anticipated
 from actual_clerk.categorize import (
     STATUS_APPLIED,
     STATUS_REVIEW,
+    UNASKED,
     Categorizer,
     build_memory,
     rule_proposal_candidates,
@@ -55,6 +56,7 @@ from actual_clerk.reporting import (
     budget_report,
     freshness,
     monthly_reports,
+    provisional_categories,
     to_actual_accounts,
     to_remote_accounts,
     to_simplefin_accounts,
@@ -178,7 +180,9 @@ class JobManager:
         # belong in Review now rather than after the next scheduled sync.
         if any(
             row.get("kind") == anticipated.KIND_CHARGE and not row.get("category_id")
-            for row in self.database.list_anticipated_charges(status=anticipated.OPEN, limit=500)
+            for row in self.database.list_anticipated_charges(
+                status=anticipated.OPEN, origin=anticipated.ORIGIN_PHONE, limit=500
+            )
         ):
             self._enqueue_nowait("phone", trigger="startup")
         self.wake()
@@ -436,6 +440,13 @@ class JobManager:
         review_transaction_ids = (
             self.database.open_review_transaction_ids() if retry_reviews else None
         )
+        # Reviews the model never answered -- it was down, or not reached --
+        # are asked again, without a second alert, whenever there is a model.
+        unasked = (
+            self.database.unasked_review_ids()
+            if not retry_reviews and _model_configured(settings)
+            else set()
+        )
 
         # What Actual shows about Clerk's earlier work: corrections become
         # evidence, and corrections against a rule become disputes.
@@ -472,7 +483,7 @@ class JobManager:
                 exclude_transaction_ids=(
                     None
                     if retry_reviews
-                    else self.database.pending_transaction_ids() | pending_ids
+                    else (self.database.pending_transaction_ids() | pending_ids) - unasked
                 ),
                 only_transaction_ids=review_transaction_ids,
             )
@@ -493,6 +504,7 @@ class JobManager:
             return {
                 "considered": 0,
                 "carried": carried,
+                "model_retried": 0,
                 "phone": phone,
                 "lookback_days": lookback,
                 "full_history": full,
@@ -526,6 +538,11 @@ class JobManager:
 
         rules_applied: dict[str, int] = {}
         for proposal in result.proposals:
+            if proposal.transaction_id in unasked and proposal.rationale.get(UNASKED):
+                # Asked again and still no answer: the review already says so,
+                # and replacing it would only give it a new id under a person
+                # who may be answering it right now.
+                continue
             if proposal.status == STATUS_APPLIED and proposal.transaction_id in skipped:
                 proposal.status = "write_skipped"
                 proposal.rationale["skipped_reason"] = skipped[proposal.transaction_id]
@@ -555,9 +572,16 @@ class JobManager:
         # A person clearing an old backlog by hand is already looking at it;
         # the phone only hears about what the schedule found.
         if job.get("trigger") != "manual" and not full and not retry_reviews:
-            await self._alert_bank_reviews(result.review, settings)
+            await self._alert_bank_reviews(
+                [item for item in result.review if item.transaction_id not in unasked], settings
+            )
         summary = result.summary()
         summary["carried"] = carried
+        summary["model_retried"] = sum(
+            1
+            for proposal in result.proposals
+            if proposal.transaction_id in unasked and not proposal.rationale.get(UNASKED)
+        )
         summary["phone"] = phone
         summary["written"] = len(applied_ids)
         summary["rule_proposals"] = promotions
@@ -621,19 +645,24 @@ class JobManager:
         if not settings.anticipated_enabled:
             return summary
         waiting: list[dict[str, Any]] = []
-        for row in self.database.list_anticipated_charges(status=anticipated.OPEN, limit=500):
+        for row in self.database.list_anticipated_charges(
+            status=anticipated.OPEN, origin=anticipated.ORIGIN_PHONE, limit=500
+        ):
             if row.get("kind") != anticipated.KIND_CHARGE or row.get("category_id"):
                 continue
             decision = self.database.phone_decision(row["id"])
             # A review opened while the model was still to be asked is this
-            # job's to fill in; any other waiting review only on a retry.
-            asking = (
-                decision is not None
-                and decision["status"] == STATUS_REVIEW
-                and bool(decision["rationale"].get("asking"))
+            # job's to fill in; one the model never answered is asked again
+            # whenever a model is there to ask; any other only on a retry.
+            open_review = decision is not None and decision["status"] == STATUS_REVIEW
+            asking = open_review and bool(decision["rationale"].get("asking"))
+            unasked = (
+                open_review and _model_configured(settings) and bool(decision["rationale"].get(UNASKED))
             )
-            if decision is None or asking or (retry and decision["status"] == STATUS_REVIEW):
-                waiting.append({**row, "_announce": decision is None or asking})
+            if decision is None or asking or unasked or (retry and open_review):
+                waiting.append(
+                    {**row, "_announce": decision is None or asking, "_unasked": unasked}
+                )
         if not waiting:
             return summary
         names = {account["id"]: account["name"] for account in snapshot.get("accounts") or []}
@@ -682,6 +711,9 @@ class JobManager:
                     confidence=proposal.confidence,
                 )
                 summary["filed"] += 1
+                continue
+            if row.get("_unasked") and proposal.rationale.get(UNASKED):
+                # Still no answer from the model; keep the review as it is.
                 continue
             decision = {
                 **proposal.as_decision(job_id),
@@ -736,10 +768,13 @@ class JobManager:
                     item["id"], STATUS_APPLIED, from_statuses=("approved",)
                 ):
                     written += 1
-                    # Memory already holds the answer under the phone's name;
-                    # the bank's name is what the next bank row is read by.
-                    phone_key = str((item.get("rationale") or {}).get("phone_key") or "")
-                    if item["merchant_key"] and item["merchant_key"] != phone_key:
+                    # Memory already holds the answer under the name it was
+                    # seen by first (the phone's, or the withdrawn pending
+                    # row's); the bank's name is what the next bank row is
+                    # read by.
+                    rationale = item.get("rationale") or {}
+                    earlier = str(rationale.get("phone_key") or rationale.get("earlier_key") or "")
+                    if item["merchant_key"] and item["merchant_key"] != earlier:
                         self.database.record_memory(
                             item["merchant_key"], item["category_id"], item["category_name"]
                         )
@@ -1275,9 +1310,16 @@ class JobManager:
             # nameless bank row its merchant; the filing run is what writes
             # the answer, or files the row under its new name.
             self._enqueue_nowait("categorize", trigger="settled")
+        # Spending waiting in Review counts under Clerk's suggestion, in the
+        # report only, until the person answers.
+        provisional = provisional_categories(self.database.review_suggestions(), settings)
         overview = {
             "budget": budget_report(
-                snapshot, settings, today=today, anticipated=anticipations["open"]
+                snapshot,
+                settings,
+                today=today,
+                anticipated=anticipations["open"],
+                provisional=provisional,
             ),
             "anticipated": anticipations["open"],
             "anticipated_summary": {
@@ -1336,7 +1378,13 @@ class JobManager:
         self.database.set_snapshot(OVERVIEW_SNAPSHOT, overview)
         self.database.set_snapshot(
             REPORTS_SNAPSHOT,
-            monthly_reports(snapshot, settings, today=today, anticipated=anticipations["open"]),
+            monthly_reports(
+                snapshot,
+                settings,
+                today=today,
+                anticipated=anticipations["open"],
+                provisional=provisional,
+            ),
         )
         return overview
 
@@ -1432,6 +1480,11 @@ class JobManager:
         today = datetime.datetime.now(settings.zone).date()
         snapshot = await self.snapshot(today=today)
         return await self._refresh_overview(snapshot, settings, today)
+
+
+def _model_configured(settings: Settings) -> bool:
+    """Whether a filing run would ask a model at all."""
+    return bool(settings.categorization_enabled and settings.ai_enabled and settings.model)
 
 
 def _stored_memory(

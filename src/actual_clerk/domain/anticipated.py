@@ -21,7 +21,7 @@ import re
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 
-from actual_clerk.domain.merchants import keys_related, normalize_merchant
+from actual_clerk.domain.merchants import keys_related, keys_share_words, normalize_merchant
 
 KIND_CHARGE = "charge"
 KIND_CREDIT = "credit"
@@ -263,8 +263,15 @@ def same_merchant(charge_key: str, transaction_key: str, aliases: Mapping[str, s
 def _rank(
     charge: AnticipatedCharge, transaction: CandidateTransaction, aliases: Mapping[str, str]
 ) -> tuple[int, int, int]:
-    """Lower sorts first: same merchant, then nearest date, then a bank-imported row."""
-    related = same_merchant(charge.merchant_key, transaction.merchant_key, aliases)
+    """Lower sorts first: same merchant, then nearest date, then a bank-imported row.
+
+    Names with the same words count as the same merchant here: the amount
+    and the date already have to agree, and this only picks among rows that
+    do.
+    """
+    related = same_merchant(
+        charge.merchant_key, transaction.merchant_key, aliases
+    ) or keys_share_words(charge.merchant_key, transaction.merchant_key)
     return (
         0 if related else 1,
         abs((transaction.date - charge.noticed_date).days),

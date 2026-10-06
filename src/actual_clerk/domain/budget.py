@@ -56,6 +56,9 @@ class TransactionInfo:
     off_budget: bool = False
     is_transfer: bool = False
     is_starting_balance: bool = False
+    # Uncategorized in Actual, but waiting in Review with a suggestion the
+    # report counts it under until the person answers.
+    provisional: bool = False
 
     @property
     def spend_cents(self) -> int:
@@ -79,6 +82,8 @@ class AnticipatedInfo:
     # was spent, and so the month it counts in. Unknown counts in the month
     # being reported.
     date: datetime.date | None = None
+    # The category is the suggestion its open review carries, not an answer.
+    provisional: bool = False
 
     @property
     def spend_cents(self) -> int:
@@ -121,6 +126,10 @@ class BudgetReport:
     # Open phone charges nothing has categorized yet; their money is already
     # inside uncategorized_cents, so the count explains that figure.
     anticipated_uncategorized_count: int
+    # Spending still waiting in Review, counted under the category Clerk
+    # suggests rather than as uncategorized: Actual still holds it bare.
+    provisional_cents: int
+    provisional_count: int
     spent_cents: int
     remaining_cents: int
     remaining_percent: float
@@ -301,6 +310,8 @@ def build_budget_report(
     discretionary_charges: dict[str, int] = {}
     discretionary_refunds: dict[str, int] = {}
     uncategorized_count = 0
+    provisional_cents = 0
+    provisional_count = 0
 
     for transaction in transactions:
         if not (start <= transaction.date <= end):
@@ -323,6 +334,9 @@ def build_budget_report(
         if not _is_budget_spending(transaction):
             continue
         spend = transaction.spend_cents
+        if transaction.provisional and category_id and spend > 0:
+            provisional_cents += spend
+            provisional_count += 1
         if spend <= 0:
             # Money coming back. A committed category keeps the simpler rule --
             # it draws on its own budget rather than on free money -- while
@@ -367,6 +381,9 @@ def build_budget_report(
             category_id = ""
         if not category_id:
             anticipated_uncategorized += 1
+        elif item.provisional:
+            provisional_cents += item.spend_cents
+            provisional_count += 1
         if category_id in committed_ids:
             committed_spent[category_id] = committed_spent.get(category_id, 0) + item.spend_cents
             anticipated_committed += item.spend_cents
@@ -536,6 +553,8 @@ def build_budget_report(
         anticipated_count=len(anticipated_open),
         anticipated_committed_cents=anticipated_committed,
         anticipated_uncategorized_count=anticipated_uncategorized,
+        provisional_cents=provisional_cents,
+        provisional_count=provisional_count,
         spent_cents=spent_cents,
         remaining_cents=remaining_cents,
         remaining_percent=remaining_percent,

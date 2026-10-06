@@ -6,6 +6,7 @@ import pytest
 
 from actual_clerk.categorize import (
     MODEL_FAILURE_LIMIT,
+    UNASKED,
     Categorizer,
     Proposal,
     candidate_categories,
@@ -683,3 +684,37 @@ async def test_an_unsure_or_unusable_same_merchant_answer_is_dropped(settings):
     assert result.alias_proposals == []
     # A dropped alias answer is not a model failure.
     assert result.errors == []
+
+
+async def test_a_renamed_merchant_gets_its_old_name_s_category_as_a_suggestion(settings):
+    """2026-10-05: the rent arrived as Pl*Demattheisinv while the model was down."""
+    model = FakeModel(error=ModelError("502", retryable=True))
+    rent = [
+        transaction(TODAY - datetime.timedelta(days=30 * n), -255000,
+                    payee="Demattheisinv Web Co Name Nicholas Valente", category_id="cat-rent", category_name="Rent")
+        for n in range(1, 9)
+    ]
+    posted = transaction(TODAY, -255000, payee="Pl*Demattheisinv",
+                         description="PL*DeMattheisInv TYPE: WEB PMTS CO: PL*DeMattheisInv NAME: Nicholas Valente")
+    result = await run(settings, snapshot(transactions=[*rent, posted]), model=model)
+
+    assert model.calls == [], "the evidence answers before the model is needed"
+    assert result.applied == []
+    [proposal] = result.review
+    assert proposal.source == "memory"
+    assert proposal.category_id == "cat-rent"
+    assert proposal.rationale["siblings"] == ["demattheisinv name nicholas"]
+
+
+async def test_a_review_the_model_never_answered_is_marked_to_ask_again(settings):
+    model = FakeModel(error=ModelError("Model returned 502: ", retryable=True))
+    result = await run(settings, snapshot(transactions=[transaction(TODAY, -1999, payee="Brand New Shop")]), model=model)
+    [proposal] = result.review
+    assert proposal.rationale[UNASKED] is True
+
+
+async def test_a_review_the_model_did_answer_is_not_asked_again(settings):
+    model = FakeModel([{"category_number": 0, "confidence": 0.2, "reason": "No fit", "suggested_new_category": ""}])
+    result = await run(settings, snapshot(transactions=[transaction(TODAY, -1999, payee="Brand New Shop")]), model=model)
+    [proposal] = result.review
+    assert UNASKED not in proposal.rationale

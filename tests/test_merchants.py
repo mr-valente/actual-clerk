@@ -3,7 +3,9 @@ from __future__ import annotations
 import pytest
 
 from actual_clerk.domain.merchants import (
+    identity_words,
     keys_related,
+    keys_share_words,
     merchant_label,
     normalize_merchant,
     rule_match_value,
@@ -99,3 +101,32 @@ def test_merchant_label_preserves_the_original_words():
 
 def test_accents_and_case_do_not_split_a_merchant():
     assert normalize_merchant("CAFÉ RIO 991") == normalize_merchant("cafe rio")
+
+
+# ------------------------------------------------------------- shared words
+
+
+@pytest.mark.parametrize(
+    ("left", "right", "same"),
+    [
+        # SimpleFIN's and Plaid's names for one landlord: the processor's tag
+        # leads on one side, the account holder's name trails on the other.
+        ("demattheisinv name nicholas", "pl demattheisinv", True),
+        (normalize_merchant("Demattheisinv Web Co Name Nicholas Valente"), normalize_merchant("Pl*Demattheisinv"), True),
+        ("prime video", "amazon prime video", True),
+        # One shared word is not one merchant when each has words of its own.
+        ("kam man food", "krauszers food", False),
+        ("blue bottle", "philz coffee", False),
+        # A lone short word claims nothing, and rail words say nothing.
+        ("uber", "uber eats", False),
+        ("transfer venmo", "venmo", False),
+        ("", "pl demattheisinv", False),
+    ],
+)
+def test_names_with_the_same_identifying_words_are_one_merchant(left, right, same):
+    assert keys_share_words(left, right) is same
+    assert keys_share_words(right, left) is same
+
+
+def test_tags_and_rail_words_do_not_identify_a_merchant():
+    assert identity_words("pl demattheisinv web") == frozenset({"demattheisinv"})

@@ -274,7 +274,7 @@ function budgetHero() {
         </div>
         <p class="hero-sub">${overspent
           ? `You are ${money(Math.abs(remaining))} past the free money for this month.`
-          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month, refunding a purchase from an earlier one.` : ""}${report.anticipated_cents ? ` ${money(report.anticipated_cents)} from ${report.anticipated_count} charge${report.anticipated_count === 1 ? "" : "s"} your phone has seen is counted before the bank posts it${report.anticipated_committed_cents ? `, ${money(report.anticipated_committed_cents)} of it against bills already budgeted` : ""}.` : ""}</p>
+          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month, refunding a purchase from an earlier one.` : ""}${report.anticipated_cents ? ` ${money(report.anticipated_cents)} from ${report.anticipated_count} charge${report.anticipated_count === 1 ? "" : "s"} the bank has not posted yet is counted already${report.anticipated_committed_cents ? `, ${money(report.anticipated_committed_cents)} of it against bills already budgeted` : ""}.` : ""}${report.provisional_cents ? ` ${money(report.provisional_cents)} waiting in Review counts under Clerk's suggestion until you answer.` : ""}</p>
       </div>
       <div class="hero-side">
         <div class="hero-chip"><span>Safe to spend daily</span><strong>${money(report.daily_safe_to_spend_cents)}</strong></div>
@@ -300,6 +300,7 @@ function budgetHero() {
       ${report.committed_carried_cents ? `<div><span>Set aside from earlier months</span><strong class="money positive">${money(report.committed_carried_cents)}</strong></div>` : ""}
       ${returned ? `<div><span>Refunded from earlier months</span><strong class="money positive">${money(returned)}</strong></div>` : ""}
       ${report.anticipated_cents ? `<div><span>Anticipated, not yet posted</span><strong class="money">${money(report.anticipated_cents)} · ${report.anticipated_count}</strong></div>` : ""}
+      ${report.provisional_cents ? `<div><span>In Review, counted as suggested</span><strong class="money">${money(report.provisional_cents)} · ${report.provisional_count}</strong></div>` : ""}
       <div><span>Uncategorized</span><strong class="money">${money(report.uncategorized_cents)}${(report.uncategorized_count || 0) + (report.anticipated_uncategorized_count || 0) ? ` · ${(report.uncategorized_count || 0) + (report.anticipated_uncategorized_count || 0)}` : ""}</strong></div>
     </div>
   </section>`;
@@ -366,7 +367,7 @@ const DECISION_STATUS_LABEL = {
 
 function decisionRow(item) {
   return `<article class="data-row decision-row clickable" data-action="review-detail" data-id="${escapeHtml(item.id)}">
-    <span class="mark ${escapeHtml(item.source)}">${item.anticipated_id ? "📱" : { rule: "⚡", memory: "↺", model: "✦", unresolved: "?", person: "✓" }[item.source] || "•"}</span>
+    <span class="mark ${escapeHtml(item.source)}">${item.anticipated_id ? "📱" : { rule: "⚡", memory: "↺", model: "✦", unresolved: "?", person: "✓", pending: "⇢" }[item.source] || "•"}</span>
     <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${item.anticipated_id ? "Phone charge · " : ""}${shortDate(item.transaction_date)} · <span class="money">${money(item.amount_cents)}</span>${item.account_name ? ` · ${escapeHtml(item.account_name)}` : ""}</small></div>
     <div class="row-meta"><strong>${escapeHtml(item.category_name || item.proposed_category || "—")}</strong><br /><span>${escapeHtml(sourceLabel(item.source))} · ${percent(item.confidence)}</span></div>
     <div>${item.observed === "corrected" || item.observed === "cleared" ? statusChip("warning", "Changed") : statusChip(item.status, DECISION_STATUS_LABEL[item.status])}</div>
@@ -714,7 +715,7 @@ async function renderReports({ poll = false } = {}) {
 }
 
 // Who decided, in words a person uses.
-const SOURCE_LABEL = { rule: "Rule", memory: "History", model: "Model", unresolved: "No suggestion", person: "You" };
+const SOURCE_LABEL = { rule: "Rule", memory: "History", model: "Model", unresolved: "No suggestion", person: "You", pending: "Pending charge" };
 function sourceLabel(source) { return SOURCE_LABEL[source] || titleCase(source || ""); }
 
 // A backlog is made of merchants, not transactions: the same coffee shop can
@@ -746,6 +747,7 @@ function groupReviews(reviews) {
     group.confidence = Math.min(group.confidence, item.confidence ?? 0);
     if (item.anticipated_id) group.phone += 1;
     if (item.rationale?.asking) group.asking = true;
+    if (item.rationale?.model_unasked) group.unasked = true;
     // The bank's name reads better than a notification's shouting descriptor.
     if (!group.label || (!item.anticipated_id && group.labelFromPhone)) {
       group.label = item.payee_name || item.merchant_key || "Transaction";
@@ -814,12 +816,14 @@ function reviewGroupRow(group, { skipped = false } = {}) {
     bank ? `${bank} transaction${bank === 1 ? "" : "s"}` : "",
     group.phone ? `${group.phone} phone charge${group.phone === 1 ? "" : "s"}` : "",
   ].filter(Boolean).join(" + ");
-  const phoneNote = group.phone ? `<span class="status-chip stale" title="Seen by your phone; counts as uncategorized until you choose. Nothing is written to Actual until the bank posts it, and then that row is filed the same way.">📱 Phone</span>` : "";
+  const phoneNote = group.phone ? `<span class="status-chip stale" title="Seen by your phone; counts under Clerk's suggestion, or as uncategorized without one, until you choose. Nothing is written to Actual until the bank posts it, and then that row is filed the same way.">📱 Phone</span>` : "";
   const confidence = group.suggestion_id
     ? `<span class="confidence ${group.confidence < 0.5 ? "low" : ""}">${percent(group.confidence)}</span><small>${escapeHtml(sourceLabel(group.source).toLowerCase())}</small>`
     : group.asking
       ? `<span class="confidence none">…</span><small>asking the model</small>`
-      : `<span class="confidence none">—</span><small>no suggestion</small>`;
+      : group.unasked
+        ? `<span class="confidence none">—</span><small title="The model could not be reached; Clerk asks again on its next run">asking again later</small>`
+        : `<span class="confidence none">—</span><small>no suggestion</small>`;
   const actions = skipped
     ? `<button class="button ghost small" data-action="review-detail" data-id="${escapeHtml(group.items[0].id)}">Why</button>
       <button class="button secondary small" data-action="review-restore-group" data-ids="${escapeHtml(ids)}">Ask me again</button>`
@@ -842,7 +846,7 @@ function reviewGroupRow(group, { skipped = false } = {}) {
 
 function recentRow(item) {
   const current = item.observed === "corrected" ? item.observed_category_id : item.category_id;
-  const how = { rule: "by a rule", memory: "from history", model: "on the model's suggestion, approved by you", person: "as you chose for the phone charge", unresolved: "by you" }[item.source] || "";
+  const how = { rule: "by a rule", memory: "from history", model: "on the model's suggestion, approved by you", person: "as you chose for the phone charge", pending: "as its withdrawn pending charge was", unresolved: "by you" }[item.source] || "";
   return `<article class="data-row review-row">
     <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${[shortDate(item.transaction_date), escapeHtml(item.account_name || ""), `filed ${escapeHtml(how)} ${relativeTime(item.created_at)}`].filter(Boolean).join(" · ")}</small></div>
     <div class="row-amount money">${money(item.amount_cents)}</div>
@@ -1322,12 +1326,12 @@ function chargeLabel(item) {
 function categoryChip(item) {
   if (!item.category_id) {
     if (item.review?.status === "needs_review") {
-      return `<a class="status-chip warning" href="#intelligence-review" title="Waiting in Review${item.review.suggestion ? `; Clerk suggests ${escapeHtml(item.review.suggestion)}` : item.review.asking ? "; Clerk is still asking the model, but you can choose now" : ""}. Counts as uncategorized until you choose.">${item.review.suggestion ? `Suggested: ${escapeHtml(item.review.suggestion)}` : "Needs a category"}</a>`;
+      return `<a class="status-chip warning" href="#intelligence-review" title="Waiting in Review${item.review.suggestion ? `; Clerk suggests ${escapeHtml(item.review.suggestion)}` : item.review.asking ? "; Clerk is still asking the model, but you can choose now" : ""}. Counts ${item.review.suggestion ? "under the suggestion" : "as uncategorized"} until you choose.">${item.review.suggestion ? `Suggested: ${escapeHtml(item.review.suggestion)}` : "Needs a category"}</a>`;
     }
     if (item.review?.status === "skipped") return `<span class="status-chip muted" title="You skipped it; it counts as uncategorized">Skipped</span>`;
     return `<span class="status-chip muted" title="No category yet: counted as discretionary until one is known">Uncategorized</span>`;
   }
-  const how = { taught: "you chose it, and made it a rule", approved: "you chose it", rule: "by a rule you set" }[item.category_source] || `from history · ${percent(item.category_confidence || 0)}`;
+  const how = { taught: "you chose it, and made it a rule", approved: "you chose it", rule: "by a rule you set", pending: "as its pending row was filed in Actual" }[item.category_source] || `from history · ${percent(item.category_confidence || 0)}`;
   return `<span class="status-chip ok" title="${escapeHtml(how)}">${escapeHtml(item.category_name || item.category_id)}</span>`;
 }
 
@@ -1337,16 +1341,20 @@ function aliasControl(item, aliases) {
   return `<button class="button ghost small" data-action="anticipated-teach-alias" data-id="${escapeHtml(item.id)}" data-merchant="${escapeHtml(item.merchant || "")}" title="${alias ? `Posts as ${escapeHtml(alias.merchant_label || alias.merchant_key)}` : "Name the payee the bank posts this merchant as"}">${alias ? `Posts as ${escapeHtml((alias.merchant_label || alias.merchant_key).slice(0, 18))}` : "Posts as…"}</button>`;
 }
 
+// A charge the bank itself withdrew while pending, rather than one the phone saw.
+function isHeld(item) { return item.origin === "pending"; }
+
 function anticipatedChargeRow(item, { sources = [], aliases = null } = {}) {
   const [status] = CHARGE_STATUS[item.status] || ["muted"];
   const source = sources.find((s) => s.id === item.source_id);
   const where = item.account_name || source?.account_name || "";
+  const seenBy = isHeld(item) ? "Pending charge the bank withdrew" : source?.app_label;
   const outcome = item.status === "matched"
     ? `Posted as ${escapeHtml(item.matched_payee || "a transaction")} on ${shortDate(item.matched_date)} (${escapeHtml(item.match_reason || "")})`
     : item.status === "open"
-      ? `Waiting for the bank · ${item.kind === "credit" ? "a credit, so not counted" : chargeMonthNote(item)}`
+      ? `${isHeld(item) ? "Waiting for the bank to post it again" : "Waiting for the bank"} · ${item.kind === "credit" ? "a credit, so not counted" : chargeMonthNote(item)}`
       : item.status === "expired"
-        ? "Nothing matching arrived, so it stopped counting"
+        ? (isHeld(item) ? "Never posted again, so the bank evidently released it" : "Nothing matching arrived, so it stopped counting")
         : item.status === "dismissed" ? "Dismissed by hand" : escapeHtml((item.text || "").slice(0, 110));
   const review = item.status === "open" && item.review?.status === "needs_review"
     ? `<a class="button secondary small" href="#intelligence-review">Categorize</a>`
@@ -1358,10 +1366,10 @@ function anticipatedChargeRow(item, { sources = [], aliases = null } = {}) {
       : "";
   return `<article class="data-row" style="grid-template-columns:30px minmax(0,1fr) auto auto auto" title="${escapeHtml(item.title || "")}: ${escapeHtml(item.text || "")}">
     <span class="dot ${status}"></span>
-    <div class="row-title"><strong>${escapeHtml(item.merchant || item.title || "Charge")}</strong><small>${escapeHtml([[source?.app_label, where].filter(Boolean).join(" → "), `seen ${relativeTime(item.noticed_at)}`].filter(Boolean).join(" · "))}<br />${outcome}</small></div>
+    <div class="row-title"><strong>${escapeHtml(item.merchant || item.title || "Charge")}</strong><small>${escapeHtml([[seenBy, where].filter(Boolean).join(" → "), `${isHeld(item) ? "withdrawn" : "seen"} ${relativeTime(item.noticed_at)}`].filter(Boolean).join(" · "))}<br />${outcome}</small></div>
     <span class="row-amount money ${item.amount_cents < 0 ? "" : "positive"}">${money(item.amount_cents, { sign: true })}</span>
     <div class="health-state">${item.kind === "charge" ? categoryChip(item) : ""}${statusChip(status, chargeLabel(item))}</div>
-    <div class="row-actions">${review}${aliases ? aliasControl(item, aliases) : ""}${actions}</div>
+    <div class="row-actions">${review}${aliases && !isHeld(item) ? aliasControl(item, aliases) : ""}${actions}</div>
   </article>`;
 }
 
@@ -1384,7 +1392,7 @@ function anticipatedOverviewPanel(open) {
   const earlierTotal = counted.reduce((sum, item) => sum - item.amount_cents, 0) - total;
   return `<article class="panel anticipated-panel">
     <header class="panel-head"><div><h2>Anticipated charges</h2><p>${[
-      `${counted.length} charge${counted.length === 1 ? "" : "s"} your phone has seen, waiting for the bank.`,
+      `${counted.length} charge${counted.length === 1 ? "" : "s"} ${counted.every(isHeld) ? "the bank withdrew while pending, waiting for it to post again." : counted.some(isHeld) ? "your phone has seen or the bank withdrew while pending, waiting for the bank." : "your phone has seen, waiting for the bank."}`,
       thisMonth.length ? `${money(total)} counts as spent this month.` : "",
       earlier ? `${money(earlierTotal)} was spent before this month and counts in the month it was made.` : "",
       "Nothing here is written into Actual.",
@@ -1598,10 +1606,12 @@ async function showDecision(id) {
     const actualUrl = (state.data?.actual_url || "").replace(/\/$/, "");
     const phone = rationale.phone || null;
     const phoneSection = item.anticipated_id
-      ? `<section class="detail-section"><h3>Seen by your phone</h3><div class="change-list"><div class="change"><i>📱</i><div><strong>${escapeHtml(phone?.title || "Notification")}</strong><small>“${escapeHtml(phone?.text || "")}”</small><br /><small>Nothing is written to Actual yet. It counts ${item.status === "applied" ? `against ${escapeHtml(item.category_name)}` : "as uncategorized"} until the bank posts it; then that row is filed the same way.${rationale.settled_payee ? ` It posted as ${escapeHtml(rationale.settled_payee)}.` : ""}</small></div></div></div></section>`
+      ? `<section class="detail-section"><h3>Seen by your phone</h3><div class="change-list"><div class="change"><i>📱</i><div><strong>${escapeHtml(phone?.title || "Notification")}</strong><small>“${escapeHtml(phone?.text || "")}”</small><br /><small>Nothing is written to Actual yet. It counts ${item.status === "applied" ? `against ${escapeHtml(item.category_name)}` : item.category_name ? `under the suggested ${escapeHtml(item.category_name)}` : "as uncategorized"} until the bank posts it; then that row is filed the same way.${rationale.settled_payee ? ` It posted as ${escapeHtml(rationale.settled_payee)}.` : ""}</small></div></div></div></section>`
       : rationale.from_phone
         ? `<section class="detail-section"><h3>From your phone</h3><div class="change-list"><div class="change"><i>📱</i><div><strong>${item.source === "person" ? "You categorized this when your phone saw the charge" : "Your phone saw this charge first"}</strong><small>${item.source === "person" ? "Clerk filed the bank's row the same way when it arrived." : "The question was carried over from the phone charge when the bank posted it."}</small></div></div></div></section>`
-        : "";
+        : rationale.from_pending
+          ? `<section class="detail-section"><h3>Withdrawn while pending</h3><div class="change-list"><div class="change"><i>⇢</i><div><strong>The bank took the pending charge back${rationale.pending_payee ? ` (${escapeHtml(rationale.pending_payee)})` : ""} and posted it again</strong><small>${rationale.pending_text ? `“${escapeHtml(rationale.pending_text)}”. ` : ""}It is the same purchase, so it is filed the way its pending row was.</small></div></div></div></section>`
+          : "";
     openDrawer(`${drawerHeader(escapeHtml(item.anticipated_id ? "Phone charge" : item.account_name || "Transaction"), item.payee_name || item.merchant_key || "Transaction")}<div class="drawer-body">
       <section class="detail-section"><div class="detail-grid">
         <div class="detail-stat"><span>Amount</span><strong class="money">${money(item.amount_cents)}</strong></div>
@@ -2047,6 +2057,7 @@ async function renderSettings() {
           ${settingInput("plaid_refresh_min_interval_minutes", "Refresh at most every (minutes)", s.plaid_refresh_min_interval_minutes, { type: "number", min: 1, max: 1440 })}
           ${settingInput("plaid_refresh_wait_seconds", "Wait for the refresh up to (seconds)", s.plaid_refresh_wait_seconds, { type: "number", min: 0, max: 300, note: "Clerk polls the connection for a newer update, then reads whatever is there." })}
           ${settingInput("plaid_adopt_window_days", "Cutover adoption window (days)", s.plaid_adopt_window_days, { type: "number", min: 0, max: 90, note: "How far either side of an account's import date a row from the previous provider may be adopted instead of duplicated." })}
+          ${settingInput("plaid_hold_withdrawn_days", "Keep counting a withdrawn pending charge for (days)", s.plaid_hold_withdrawn_days, { type: "number", min: 0, max: 30, note: "Some banks take a pending charge back and post it hours or days later. Until then it still counts as spent, filed the way its row was, and the posted row inherits that category. 0 stops counting it at once." })}
         </div>
         <div class="check-grid">
           ${settingCheck("plaid_delete_removed_pending", "Delete pending charges the bank withdraws", "Only while the row is still uncleared and unreconciled in Actual. A cleared row is never deleted; it is reported instead.", s.plaid_delete_removed_pending)}
@@ -2788,7 +2799,7 @@ content.addEventListener("submit", async (event) => {
   const data = new FormData(form);
   const values = {};
   const locked = new Set(state.settings?.environment_overrides || []);
-  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "memory_dispute_threshold", "income_lookback_months", "digest_good_day_percent", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "anticipated_match_window_days", "anticipated_expire_days"]);
+  const integers = new Set(["model_context_tokens", "model_max_output_tokens", "memory_min_observations", "categorize_lookback_days", "history_lookback_days", "ai_example_count", "category_candidate_limit", "rule_promote_after", "memory_dispute_threshold", "income_lookback_months", "digest_good_day_percent", "sync_interval_minutes", "health_interval_minutes", "transaction_stale_days", "balance_stale_hours", "request_timeout_seconds", "model_max_retries", "job_max_attempts", "plaid_days_requested", "plaid_refresh_min_interval_minutes", "plaid_refresh_wait_seconds", "plaid_adopt_window_days", "plaid_hold_withdrawn_days", "anticipated_match_window_days", "anticipated_expire_days"]);
   const decimals = new Set(["memory_min_confidence", "ai_min_confidence", "monthly_income_override", "balance_tolerance"]);
   const checks = ["actual_verify_ssl", "categorization_enabled", "ai_enabled", "ai_alias_questions", "rule_promotion_enabled", "memory_learn_from_actual", "tagging_enabled", "tag_provenance", "tag_anomalies", "allow_new_categories", "sync_enabled", "bank_sync_enabled", "digest_enabled", "digest_show_headline", "digest_show_spending", "digest_show_yesterday", "digest_show_safe_to_spend", "digest_show_pace", "digest_show_projection", "digest_show_commitments", "digest_show_balances", "digest_show_connections", "digest_show_attention", "notifications_enabled", "health_alerts_enabled", "review_alerts_enabled", "plaid_sync_enabled", "plaid_refresh_enabled", "plaid_delete_removed_pending", "plaid_starting_balance", "anticipated_enabled"];
 

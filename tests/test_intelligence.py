@@ -297,3 +297,41 @@ def test_alias_candidates_are_the_closest_known_keys():
     known = ["steam games", "valve corp", "shell", "starbucks", "valve"]
     assert alias_candidates("valve", known, limit=3) == ["valve corp", "shell", "starbucks"]
     assert alias_candidates("", known) == []
+
+
+def test_a_renamed_merchant_is_suggested_from_names_with_the_same_words():
+    """Plaid's `Pl*Demattheisinv` is the landlord SimpleFIN called `Demattheisinv Web Co Name...`."""
+    memory = MerchantMemory().add_transactions(
+        history(*[("demattheisinv name nicholas", "cat-housing", "Housing")] * 8), TODAY
+    )
+    found = resolve("pl demattheisinv", memory=memory, names={"cat-housing": "Housing"})
+    assert found.category_id == "cat-housing"
+    assert found.automatic is False, "the words suggest; the person decides"
+    assert found.rationale["provisional"] is True
+    assert found.rationale["siblings"] == ["demattheisinv name nicholas"]
+    assert 0.8 < found.confidence < 0.95
+
+
+def test_names_with_the_same_words_filed_two_ways_suggest_nothing():
+    memory = MerchantMemory().add_transactions(
+        history(("acme hardware", "cat-home", "Home"), ("acme hardware supply", "cat-tools", "Tools")), TODAY
+    )
+    assert resolve("pl acme hardware", memory=memory) is None
+
+
+def test_the_words_are_only_consulted_for_a_name_never_seen():
+    memory = MerchantMemory().add_transactions(
+        history(
+            ("demattheisinv name nicholas", "cat-housing", "Housing"),
+            ("pl demattheisinv", "cat-fees", "Fees"),
+        ),
+        TODAY,
+    )
+    found = resolve("pl demattheisinv", memory=memory)
+    assert found.category_id == "cat-fees", "its own history wins over a sibling's"
+
+
+def test_one_visit_under_a_name_with_the_same_words_suggests_nothing():
+    """Sack's Shell is a garage; one visit there says nothing about every Shell station."""
+    memory = MerchantMemory().add_transactions(history(("sacks shell", "cat-car", "Car Maintenance")), TODAY)
+    assert resolve("shell", memory=memory) is None

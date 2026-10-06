@@ -281,12 +281,17 @@ CREATE TABLE IF NOT EXISTS notification_sources (
 CREATE UNIQUE INDEX IF NOT EXISTS uq_notification_sources_device_package
 ON notification_sources(device_id, package_name);
 
--- One anticipated charge per notification. Never written into Actual: it
--- counts as spent until the bank feed delivers the matching transaction,
--- at which point it is settled against that row and leaves the report.
+-- One anticipated charge per notification, or per pending charge the bank
+-- withdrew without posting it. Never written into Actual: it counts as spent
+-- until the bank feed delivers the matching transaction, at which point it is
+-- settled against that row and leaves the report.
 CREATE TABLE IF NOT EXISTS anticipated_charges (
     id TEXT PRIMARY KEY,
-    source_id TEXT NOT NULL REFERENCES notification_sources(id) ON DELETE CASCADE,
+    -- The phone app that announced it; NULL for a withdrawn pending charge,
+    -- which the bank feed itself announced.
+    source_id TEXT REFERENCES notification_sources(id) ON DELETE CASCADE,
+    -- 'phone' or 'pending': who saw the purchase before the bank posted it.
+    origin TEXT NOT NULL DEFAULT 'phone',
     actual_account_id TEXT NOT NULL DEFAULT '',
     notification_key TEXT NOT NULL,
     kind TEXT NOT NULL DEFAULT 'charge',
@@ -320,6 +325,9 @@ CREATE TABLE IF NOT EXISTS anticipated_charges (
     -- Rows this charge was settled against and then reopened from, comma
     -- separated: the person said it is not them, so they are never matched again.
     rejected_transaction_ids TEXT NOT NULL DEFAULT '',
+    -- A withdrawn pending charge's posted transaction, once the bank names
+    -- it: settles the charge by identity, whatever the posted amount.
+    posted_imported_id TEXT NOT NULL DEFAULT '',
     resolved_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -328,6 +336,9 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_anticipated_notification
 ON anticipated_charges(source_id, notification_key);
 CREATE INDEX IF NOT EXISTS ix_anticipated_status ON anticipated_charges(status, noticed_at DESC);
 CREATE INDEX IF NOT EXISTS ix_anticipated_noticed ON anticipated_charges(noticed_at DESC);
+-- A withdrawn pending charge is held once per account and bank id.
+CREATE UNIQUE INDEX IF NOT EXISTS uq_anticipated_pending
+ON anticipated_charges(actual_account_id, notification_key) WHERE source_id IS NULL;
 
 -- A card app and the bank name the same shop differently ("Valve" on the
 -- phone, "Steam" on the statement). Learned when an anticipation settles, or
@@ -386,6 +397,11 @@ CREATE UNIQUE INDEX IF NOT EXISTS uq_proposal_open
 ON proposals(kind, merchant_key) WHERE status = 'open';
 CREATE INDEX IF NOT EXISTS ix_proposals_status ON proposals(status, created_at DESC);
 """
+
+
+def pending_key(imported_id: str) -> str:
+    """The ledger key of a withdrawn pending charge: the bank's own id for it."""
+    return f"pending:{imported_id}"
 
 
 def _json(value: Any) -> str:
@@ -461,6 +477,7 @@ class Database:
     def initialize(self) -> None:
         with self._init_lock, self.connect() as connection:
             self._migrate_digests(connection)
+            self._migrate_anticipated_origin(connection)
             connection.executescript(SCHEMA)
             self._migrate_health_candidates(connection)
             self._migrate_bank_links(connection)
@@ -468,6 +485,7 @@ class Database:
             self._migrate_anticipated(connection)
             self._migrate_decisions(connection)
             self._restore_digests(connection)
+            self._restore_anticipated(connection)
             now = time.time()
             # A job that was running when the process died has no worker to
             # finish it, so hand it back to the queue.
@@ -546,6 +564,63 @@ class Database:
             )
 
     @staticmethod
+    def _migrate_anticipated_origin(connection: sqlite3.Connection) -> None:
+        """Step aside for the ledger that also holds withdrawn pending charges.
+
+        SQLite cannot drop a NOT NULL constraint in place, and a charge the
+        bank feed announced has no phone source. As with the digests, the
+        old table is renamed before the schema runs, so the schema stays the
+        single definition of the new shape; its indexes go with it, since
+        their names would otherwise stop the schema creating them anew.
+        """
+
+        columns = {
+            row["name"]: row for row in connection.execute("PRAGMA table_info(anticipated_charges)")
+        }
+        if not columns or ("origin" in columns and not columns["source_id"]["notnull"]):
+            return
+        connection.execute("BEGIN IMMEDIATE")
+        for index in (
+            "uq_anticipated_notification",
+            "ix_anticipated_status",
+            "ix_anticipated_noticed",
+        ):
+            connection.execute(f"DROP INDEX IF EXISTS {index}")
+        connection.execute("ALTER TABLE anticipated_charges RENAME TO anticipated_charges_pre_origin")
+        connection.commit()
+
+    @staticmethod
+    def _restore_anticipated(connection: sqlite3.Connection) -> None:
+        """Carry the phone's charges into the new ledger, once."""
+        present = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='anticipated_charges_pre_origin'"
+        ).fetchone()
+        if not present:
+            return
+        old = {
+            row["name"]
+            for row in connection.execute("PRAGMA table_info(anticipated_charges_pre_origin)")
+        }
+        new = [
+            row["name"] for row in connection.execute("PRAGMA table_info(anticipated_charges)")
+        ]
+        shared = ",".join(column for column in new if column in old)
+        # Rows are carried exactly as they were. A ledger from before the
+        # source table existed holds charges whose source is not on record;
+        # the new table's reference must not drop them on the way across.
+        connection.execute("PRAGMA foreign_keys=OFF")
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                f"INSERT OR IGNORE INTO anticipated_charges({shared}) "
+                f"SELECT {shared} FROM anticipated_charges_pre_origin"
+            )
+            connection.execute("DROP TABLE anticipated_charges_pre_origin")
+            connection.commit()
+        finally:
+            connection.execute("PRAGMA foreign_keys=ON")
+
+    @staticmethod
     def _migrate_anticipated(connection: sqlite3.Connection) -> None:
         """Add the provisional-category columns to ledgers from the first companion builds."""
 
@@ -562,6 +637,7 @@ class Database:
             "replaced_payee": "TEXT NOT NULL DEFAULT ''",
             "renamed_to": "TEXT NOT NULL DEFAULT ''",
             "rejected_transaction_ids": "TEXT NOT NULL DEFAULT ''",
+            "posted_imported_id": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in additions.items():
             if columns and column not in columns:
@@ -1027,6 +1103,25 @@ class Database:
                 "AND anticipated_id=''"
             ).fetchall()
         return {row["transaction_id"] for row in rows}
+
+    def unasked_review_ids(self) -> set[str]:
+        """Rows in Actual waiting in Review because the model never answered."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT transaction_id FROM decisions WHERE status='needs_review' "
+                "AND anticipated_id='' AND json_extract(rationale_json,'$.model_unasked')=1"
+            ).fetchall()
+        return {row["transaction_id"] for row in rows}
+
+    def review_suggestions(self) -> list[dict[str, Any]]:
+        """Open reviews that carry a suggested category, bank rows and phone charges alike."""
+        with self.connect() as connection:
+            rows = connection.execute(
+                "SELECT transaction_id, anticipated_id, source, category_id, category_name, "
+                "confidence FROM decisions WHERE status='needs_review' "
+                "AND category_id IS NOT NULL AND category_id != ''"
+            ).fetchall()
+        return [dict(row) for row in rows]
 
     def pending_transaction_ids(self) -> set[str]:
         """Rows in Actual the filing run must leave alone: waiting, skipped, or carried."""
@@ -2383,6 +2478,73 @@ class Database:
             connection.commit()
         return dict(row), True
 
+    def hold_withdrawn_pending(self, charge: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        """Record a pending charge the bank withdrew; the same bank id twice is one hold."""
+        now = time.time()
+        charge_id = str(uuid.uuid4())
+        with self.connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = connection.execute(
+                "SELECT * FROM anticipated_charges WHERE source_id IS NULL "
+                "AND actual_account_id=? AND notification_key=?",
+                (charge["actual_account_id"], charge["notification_key"]),
+            ).fetchone()
+            if existing:
+                connection.commit()
+                return dict(existing), False
+            connection.execute(
+                "INSERT INTO anticipated_charges(id,source_id,origin,actual_account_id,"
+                "notification_key,kind,amount_cents,merchant,merchant_key,title,text,noticed_at,"
+                "noticed_date,category_id,category_name,category_source,category_confidence,status,"
+                "created_at,updated_at) VALUES(?,NULL,'pending',?,?,'charge',?,?,?,?,?,?,?,?,?,?,?,"
+                "'open',?,?)",
+                (
+                    charge_id,
+                    charge["actual_account_id"],
+                    charge["notification_key"],
+                    int(charge.get("amount_cents", 0)),
+                    (charge.get("merchant") or "")[:200],
+                    charge.get("merchant_key", ""),
+                    (charge.get("title") or "")[:400],
+                    (charge.get("text") or "")[:2000],
+                    float(charge.get("noticed_at") or now),
+                    charge["noticed_date"],
+                    charge.get("category_id") or "",
+                    (charge.get("category_name") or "")[:200],
+                    charge.get("category_source") or "",
+                    float(charge.get("category_confidence") or 0.0),
+                    now,
+                    now,
+                ),
+            )
+            row = connection.execute(
+                "SELECT * FROM anticipated_charges WHERE id=?", (charge_id,)
+            ).fetchone()
+            connection.commit()
+        return dict(row), True
+
+    def note_posted_for_pending(
+        self, actual_account_id: str, posted: Mapping[str, str]
+    ) -> int:
+        """Name the posted transaction of withdrawn pending charges still open.
+
+        `posted` maps a pending charge's bank id to its posted one, as the bank
+        reported it; the hold then settles against that row by identity.
+        """
+        if not posted:
+            return 0
+        now = time.time()
+        count = 0
+        with self.connect() as connection:
+            for pending_id, posted_id in posted.items():
+                count += connection.execute(
+                    "UPDATE anticipated_charges SET posted_imported_id=?, updated_at=? "
+                    "WHERE source_id IS NULL AND actual_account_id=? AND notification_key=? "
+                    "AND status='open'",
+                    (posted_id, now, actual_account_id, pending_key(pending_id)),
+                ).rowcount
+        return count
+
     def get_anticipated_charge(self, charge_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -2418,6 +2580,7 @@ class Database:
         *,
         status: str | None = None,
         source_ids: Sequence[str] | None = None,
+        origin: str | None = None,
         limit: int = 200,
     ) -> list[dict[str, Any]]:
         clauses: list[str] = []
@@ -2425,6 +2588,9 @@ class Database:
         if status:
             clauses.append("status=?")
             params.append(status)
+        if origin:
+            clauses.append("origin=?")
+            params.append(origin)
         if source_ids is not None:
             if not source_ids:
                 return []
@@ -2600,13 +2766,18 @@ class Database:
             )
         return cursor.rowcount > 0
 
-    def matched_transaction_ids(self) -> set[str]:
-        """Transactions already claimed by a settled anticipation."""
+    def matched_transaction_ids(self, *, origin: str | None = None) -> set[str]:
+        """Transactions already claimed by a settled anticipation (of one origin)."""
+        query = (
+            "SELECT matched_transaction_id FROM anticipated_charges "
+            "WHERE status='matched' AND matched_transaction_id != ''"
+        )
+        params: tuple[Any, ...] = ()
+        if origin:
+            query += " AND origin=?"
+            params = (origin,)
         with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT matched_transaction_id FROM anticipated_charges "
-                "WHERE status='matched' AND matched_transaction_id != ''"
-            ).fetchall()
+            rows = connection.execute(query, params).fetchall()
         return {row["matched_transaction_id"] for row in rows}
 
     def matched_charge_dates(self, *, uncarried_only: bool = False) -> list[dict[str, Any]]:
@@ -2614,7 +2785,10 @@ class Database:
         query = (
             "SELECT id, actual_account_id, matched_transaction_id, noticed_date, matched_date, "
             "date_carried "
-            "FROM anticipated_charges WHERE status='matched' AND matched_transaction_id != ''"
+            "FROM anticipated_charges WHERE status='matched' AND matched_transaction_id != '' "
+            # Only the phone saw a purchase happen; a withdrawn pending
+            # charge's date is the bank's own, and its posted row's is newer.
+            "AND origin='phone'"
         )
         if uncarried_only:
             query += " AND date_carried=0"
@@ -2639,7 +2813,8 @@ class Database:
         query = (
             "SELECT id, actual_account_id, matched_transaction_id, merchant, merchant_key, "
             "name_carried, replaced_payee, renamed_to "
-            "FROM anticipated_charges WHERE status='matched' AND matched_transaction_id != ''"
+            "FROM anticipated_charges WHERE status='matched' AND matched_transaction_id != '' "
+            "AND origin='phone'"
         )
         if uncarried_only:
             query += " AND name_carried=0"

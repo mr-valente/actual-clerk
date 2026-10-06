@@ -61,6 +61,11 @@ STATUS_REVIEW = "needs_review"
 # failed requests, not one failed request per unfamiliar merchant.
 MODEL_FAILURE_LIMIT = 3
 
+# Marks a review the model never answered -- it was down, refused, or not
+# reached -- so the next filing run asks again instead of leaving the review
+# without a suggestion for good.
+UNASKED = "model_unasked"
+
 
 @dataclass
 class Proposal:
@@ -421,6 +426,8 @@ class Categorizer:
                         "No prior example of this merchant, and the local model is unavailable."
                     ),
                     "evidence": memory.evidence(real_key)[:5] if real_key else [],
+                    # The model never answered, so a later run may ask it.
+                    UNASKED: True,
                 },
             }
 
@@ -584,12 +591,13 @@ class Categorizer:
 
     @staticmethod
     def _unresolved(reason: str) -> dict[str, Any]:
+        """The model was asked and could not answer: worth asking again later."""
         return {
             "source": SOURCE_UNRESOLVED,
             "category_id": None,
             "category_name": "",
             "confidence": 0.0,
-            "rationale": {"reason": reason},
+            "rationale": {"reason": reason, UNASKED: True},
         }
 
     def _record_model_failure(self, result: CategorizationResult) -> None:
