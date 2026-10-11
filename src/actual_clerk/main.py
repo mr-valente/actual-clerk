@@ -1326,14 +1326,28 @@ async def plaid_sandbox_item(payload: SandboxItemRequest, request: Request) -> d
 
 @app.post("/api/plaid/items/{item_id}/repaired")
 async def plaid_item_repaired(item_id: str, request: Request) -> dict[str, Any]:
-    """After Link's update mode: re-read the Item and clear its repair flag if it is healthy."""
+    """After Link's update mode: re-read the Item and clear its error if it is healthy.
+
+    The Item counts as repaired only when Plaid also returns its accounts
+    again (a NO_ACCOUNTS Item can look fine to /item/get). Mapped accounts
+    Plaid no longer returns are named, because the bank re-issued them under
+    new ids and they need mapping again.
+    """
     item = _plaid_item_or_404(request, item_id)
     client = _plaid_client(request)
+    database = _database(request)
     try:
         info = await client.get_item(item["access_token"])
+        accounts = (
+            [] if info.get("error") else (await client.get_accounts(item["access_token"]))["accounts"]
+        )
+    except PlaidError as exc:
+        database.update_plaid_item(
+            item_id, status="needs_repair" if exc.needs_repair else "error", last_error=str(exc)
+        )
+        return {"repaired": False, "error": exc.as_dict()}
     finally:
         await client.close()
-    database = _database(request)
     if info.get("error"):
         database.update_plaid_item(
             item_id,
@@ -1342,8 +1356,18 @@ async def plaid_item_repaired(item_id: str, request: Request) -> dict[str, Any]:
         )
         return {"repaired": False, "error": info["error"]}
     database.update_plaid_item(item_id, status="ok", last_error="")
+    returned = {account["id"] for account in accounts}
+    missing = [
+        {"actual_account_id": link["actual_account_id"], "external_name": link["external_name"], "mask": link["mask"]}
+        for link in database.list_bank_links(provider="plaid", enabled_only=True)
+        if link["item_id"] == item_id and link["external_account_id"] not in returned
+    ]
     await _jobs(request).enqueue("health", trigger="manual")
-    return {"repaired": True, "item": public_item(database.get_plaid_item(item_id) or item)}
+    return {
+        "repaired": True,
+        "item": public_item(database.get_plaid_item(item_id) or item),
+        "missing_links": missing,
+    }
 
 
 @app.post("/api/plaid/items/{item_id}/remove")

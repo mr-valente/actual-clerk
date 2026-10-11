@@ -1319,6 +1319,8 @@ def plaid(client, monkeypatch):
 
     async def get_accounts(self, access_token):
         calls.append(("accounts", access_token))
+        if state.get("accounts_error"):
+            raise state["accounts_error"]
         return {"item": {"item_id": "item-1"}, "accounts": state["accounts"]}
 
     async def remove_item(self, access_token):
@@ -1426,6 +1428,36 @@ async def test_a_broken_item_is_recorded_as_needing_repair_and_then_cleared(clie
     repaired = await client.post("/api/plaid/items/item-1/repaired")
     assert repaired.json()["repaired"] is True
     assert client.database.get_plaid_item("item-1")["status"] == "ok"
+
+
+async def test_reconnecting_an_item_that_lost_its_accounts(client, plaid):
+    from actual_clerk.clients.plaid import PlaidError
+
+    client.database.upsert_plaid_item({"item_id": "item-1", "access_token": "access-1"})
+    client.database.upsert_bank_link({"actual_account_id": "acct-1", "provider": "plaid", "item_id": "item-1", "external_account_id": "plaid-chk", "external_name": "Checking", "mask": "8193", "cutover_date": "2026-09-01"})
+    plaid["state"]["accounts_error"] = PlaidError(
+        "Plaid ITEM_ERROR/NO_ACCOUNTS: no valid accounts were found for this item",
+        error_type="ITEM_ERROR", error_code="NO_ACCOUNTS", display_message="No valid accounts were found.",
+    )
+    listing = await client.get("/api/plaid/items")
+    [item] = listing.json()["items"]
+    assert item["status"] == "error"
+    assert item["needs_repair"] is False, "NO_ACCOUNTS is offered Reconnect, not Repair"
+
+    still_broken = await client.post("/api/plaid/items/item-1/repaired")
+    assert still_broken.json()["repaired"] is False, "/item/get alone does not prove the accounts are back"
+    assert still_broken.json()["error"]["error_code"] == "NO_ACCOUNTS"
+    assert client.database.get_plaid_item("item-1")["status"] == "error"
+
+    plaid["state"]["accounts_error"] = None
+    plaid["state"]["accounts"] = [{**plaid["state"]["accounts"][0], "id": "plaid-chk-reissued"}]
+    churned = (await client.post("/api/plaid/items/item-1/repaired")).json()
+    assert churned["repaired"] is True
+    assert churned["missing_links"] == [{"actual_account_id": "acct-1", "external_name": "Checking", "mask": "8193"}]
+    assert client.database.get_plaid_item("item-1")["status"] == "ok"
+
+    plaid["state"]["accounts"] = [{**plaid["state"]["accounts"][0], "id": "plaid-chk"}]
+    assert (await client.post("/api/plaid/items/item-1/repaired")).json()["missing_links"] == []
 
 
 async def test_mapping_a_plaid_account_onto_an_existing_actual_account(client, plaid):

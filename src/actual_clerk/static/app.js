@@ -1441,6 +1441,15 @@ function plaidItemStatus(item) {
   return ["ok", "Connected"];
 }
 
+// Link's update mode for a broken Item: Repair re-asks for the login;
+// Reconnect also lets the accounts be chosen again, which is what a bank that
+// stopped returning accounts (NO_ACCOUNTS) needs.
+function plaidFixButton(item, classes, { always = false } = {}) {
+  if (item.needs_repair) return `<button class="${classes}" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair</button>`;
+  if (!item.error && !always) return "";
+  return `<button class="${classes}" title="Log in to the bank through Plaid again and choose which accounts to share" data-action="plaid-reconnect" data-id="${escapeHtml(item.item_id)}">Reconnect</button>`;
+}
+
 function plaidItemRow(item, { sandbox }) {
   const [status, label] = plaidItemStatus(item);
   const accounts = item.accounts || [];
@@ -1453,7 +1462,7 @@ function plaidItemRow(item, { sandbox }) {
     <div class="row-title"><strong>${escapeHtml(item.institution_name || item.institution_id || "Bank")}</strong><small>${escapeHtml(detail.slice(0, 140))}</small></div>
     <div class="health-state">${statusChip(status, label)}</div>
     <div class="row-actions">
-      ${item.needs_repair ? `<button class="button secondary small" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair</button>` : ""}
+      ${plaidFixButton(item, "button secondary small")}
       <button class="button ghost small" data-action="plaid-item-detail" data-id="${escapeHtml(item.item_id)}">Map accounts</button>
       ${sandbox ? `<button class="button ghost small" title="Sandbox only: make Plaid demand a fresh login" data-action="plaid-reset-login" data-id="${escapeHtml(item.item_id)}">Break login</button>` : ""}
       <button class="button danger small" data-action="plaid-remove-item" data-id="${escapeHtml(item.item_id)}" data-name="${escapeHtml(item.institution_name || "this bank")}">Remove</button>
@@ -1808,7 +1817,7 @@ function showPlaidItem(itemId) {
   const accounts = item.accounts || [];
   const sandbox = state.plaid?.environment === "sandbox";
   openDrawer(`${drawerHeader(label, item.institution_name || "Bank connection")}<div class="drawer-body">
-    ${item.error ? `<div class="alert-banner critical"><span>!</span><div><strong>${escapeHtml(item.error.error_code || "Plaid error")}</strong><p>${escapeHtml(item.error.display_message || item.error.error_message || item.error.message || "")}</p></div>${item.needs_repair ? `<button class="button primary small" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair</button>` : ""}</div>` : ""}
+    ${item.error ? `<div class="alert-banner critical"><span>!</span><div><strong>${escapeHtml(item.error.error_code || "Plaid error")}</strong><p>${escapeHtml(item.error.display_message || item.error.error_message || item.error.message || "")}</p></div>${plaidFixButton(item, "button primary small")}</div>` : ""}
     <section class="detail-section"><div class="detail-grid">
       <div class="detail-stat"><span>Status</span><strong>${statusChip(status, label)}</strong></div>
       <div class="detail-stat"><span>Bank data</span><strong>${item.last_successful_update ? escapeHtml(relativeTime(item.last_successful_update)) : "not yet"}</strong></div>
@@ -1821,10 +1830,10 @@ function showPlaidItem(itemId) {
     <div class="change-list">${accounts.length ? accounts.map((account) => `<div class="change" style="display:block">
       <div style="display:flex;gap:10px;align-items:center"><i>◍</i><div style="min-width:0;flex:1"><strong>${escapeHtml(plaidAccountLabel(account))}<span class="muted"> · ${escapeHtml(account.subtype || account.type || "")}</span></strong><small>${account.balance_cents === null || account.balance_cents === undefined ? "No balance" : `Balance ${money(account.balance_cents)}`}${account.link ? ` · mapped to <strong>${escapeHtml((state.plaid?.actual_accounts || []).find((candidate) => candidate.id === account.link.actual_account_id)?.name || account.link.actual_account_id)}</strong>${account.link.enabled ? "" : " (paused)"}${account.link.cutover_date ? ` from ${escapeHtml(account.link.cutover_date)}` : ""}${account.link.last_import_at ? ` · delivered ${escapeHtml(relativeTime(account.link.last_import_at))}` : ""}${account.link.last_error ? ` · <span class="negative">${escapeHtml(account.link.last_error.slice(0, 80))}</span>` : ""}` : " · not mapped"}</small></div></div>
       <div style="margin-top:10px">${plaidMappingForm(item, account)}</div>
-    </div>`).join("") : `<div class="change"><i>?</i><div><strong>No accounts returned</strong><small>${escapeHtml(item.error ? "Repair the connection, then check again." : "Plaid returned no accounts for this connection.")}</small></div></div>`}</div></section>
+    </div>`).join("") : `<div class="change"><i>?</i><div><strong>No accounts returned</strong><small>${escapeHtml(item.error ? "Reconnect the bank, then check again." : "Plaid returned no accounts for this connection.")}</small></div></div>`}</div></section>
     <div class="resolution-actions">
       <button class="button primary" data-action="sync-and-recheck">Sync now</button>
-      ${item.needs_repair ? `<button class="button secondary" data-action="plaid-repair" data-id="${escapeHtml(item.item_id)}">Repair connection</button>` : ""}
+      ${plaidFixButton(item, "button secondary", { always: true })}
       ${sandbox ? `<button class="button ghost" data-action="plaid-reset-login" data-id="${escapeHtml(item.item_id)}">Break login (sandbox)</button>` : ""}
       <button class="button danger" data-action="plaid-remove-item" data-id="${escapeHtml(item.item_id)}" data-name="${escapeHtml(item.institution_name || "this bank")}">Remove connection</button>
     </div>
@@ -1845,10 +1854,10 @@ async function refreshPlaidDrawer(itemId) {
 // resume with the same token when the browser comes back.
 const PLAID_LINK_STORAGE = "actual-clerk-plaid-link";
 
-async function startPlaidLink({ itemId = "" } = {}) {
+async function startPlaidLink({ itemId = "", accountSelection = false } = {}) {
   if (!window.Plaid) return toast("Plaid Link did not load", "This page needs to reach cdn.plaid.com to open Link.", "error");
   try {
-    const token = await api("/api/plaid/link-token", { method: "POST", body: JSON.stringify({ item_id: itemId }) });
+    const token = await api("/api/plaid/link-token", { method: "POST", body: JSON.stringify({ item_id: itemId, account_selection: accountSelection }) });
     try { sessionStorage.setItem(PLAID_LINK_STORAGE, JSON.stringify({ link_token: token.link_token, item_id: itemId })); } catch { /* no resume after OAuth */ }
     openPlaidLink(token.link_token, itemId);
   } catch (error) { toast("Could not open Plaid Link", error.message, "error"); }
@@ -1864,7 +1873,10 @@ function openPlaidLink(linkToken, itemId, receivedRedirectUri = "") {
         if (itemId) {
           // Update mode: the Item keeps its access token, so the public token is not exchanged.
           const result = await api(`/api/plaid/items/${encodeURIComponent(itemId)}/repaired`, { method: "POST" });
-          toast(result.repaired ? "Connection repaired" : "Connection still needs attention", result.repaired ? "Clerk is checking the accounts again." : (result.error?.error_message || ""), result.repaired ? "success" : "error");
+          const missing = result.missing_links || [];
+          if (!result.repaired) toast("Connection still needs attention", result.error?.display_message || result.error?.error_message || result.error?.message || "", "error");
+          else if (missing.length) toast("Reconnected, but accounts changed", `Plaid no longer returns ${missing.map((link) => `${link.external_name}${link.mask ? ` ••${link.mask}` : ""}`).join(", ")}. The bank may have re-issued ${missing.length === 1 ? "it" : "them"}; map the account again below.`, "error");
+          else toast("Connection repaired", "Clerk is checking the accounts again.", "success");
           await refreshPlaidDrawer(itemId);
         } else {
           const result = await api("/api/plaid/exchange", { method: "POST", body: JSON.stringify({
@@ -2402,6 +2414,7 @@ document.addEventListener("click", async (event) => {
   }
   if (action === "plaid-connect") { event.preventDefault(); await startPlaidLink(); }
   if (action === "plaid-repair") { event.stopPropagation(); await startPlaidLink({ itemId: target.dataset.id }); }
+  if (action === "plaid-reconnect") { event.stopPropagation(); await startPlaidLink({ itemId: target.dataset.id, accountSelection: true }); }
   if (action === "plaid-item-detail") { event.stopPropagation(); showPlaidItem(target.dataset.id); }
   if (action === "plaid-sandbox-item") {
     target.disabled = true;
