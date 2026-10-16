@@ -45,15 +45,18 @@ android {
         sourceCompatibility = JavaVersion.VERSION_17
         targetCompatibility = JavaVersion.VERSION_17
     }
-    kotlinOptions {
-        jvmTarget = "17"
-    }
     buildFeatures {
         compose = true
         buildConfig = true
     }
     packaging {
         resources.excludes += setOf("META-INF/AL2.0", "META-INF/LGPL2.1", "META-INF/*.version")
+    }
+}
+
+kotlin {
+    compilerOptions {
+        jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_17)
     }
 }
 
@@ -68,4 +71,7 @@ dependencies {
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.work:work-runtime:2.10.0")
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.9.0")
+    // Receives Clerk's review nudges through whichever UnifiedPush
+    // distributor is on the phone (the ntfy app is one); no Google services.
+    implementation("org.unifiedpush.android:connector:3.3.5")
 }

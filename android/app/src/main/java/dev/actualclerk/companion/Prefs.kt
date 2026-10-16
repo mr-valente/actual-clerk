@@ -91,6 +91,56 @@ class Prefs(context: Context) {
         get() = prefs.getString("last_budget", null)?.let { runCatching { JSONObject(it) }.getOrNull() }
         set(value) = prefs.edit().putString("last_budget", value?.toString()).apply()
 
+    // --- Category questions on this phone -----------------------------
+
+    /** Whether this phone takes Clerk's category questions instead of ntfy. */
+    var reviewsEnabled: Boolean
+        get() = prefs.getBoolean("reviews_enabled", false)
+        set(value) = prefs.edit().putBoolean("reviews_enabled", value).apply()
+
+    /** What the UnifiedPush distributor issued; blank while the phone can only poll. */
+    var pushEndpoint: String
+        get() = prefs.getString("push_endpoint", "") ?: ""
+        set(value) = prefs.edit().putString("push_endpoint", value).apply()
+
+    var pushAuth: String
+        get() = prefs.getString("push_auth", "") ?: ""
+        set(value) = prefs.edit().putString("push_auth", value).apply()
+
+    var pushKey: String
+        get() = prefs.getString("push_key", "") ?: ""
+        set(value) = prefs.edit().putString("push_key", value).apply()
+
+    /** Why there is no push, in words the home screen can show. */
+    var pushError: String
+        get() = prefs.getString("push_error", "") ?: ""
+        set(value) = prefs.edit().putString("push_error", value).apply()
+
+    /** Whether Clerk has acknowledged the current registration. */
+    var deviceRegistered: Boolean
+        get() = prefs.getBoolean("device_registered", false)
+        set(value) = prefs.edit().putBoolean("device_registered", value).apply()
+
+    var reviewsWaiting: Int
+        get() = prefs.getInt("reviews_waiting", 0)
+        set(value) = prefs.edit().putInt("reviews_waiting", value).apply()
+
+    var lastReviewCheck: Long
+        get() = prefs.getLong("last_review_check", 0L)
+        set(value) = prefs.edit().putLong("last_review_check", value).apply()
+
+    /**
+     * The review groups this phone has announced, each with the suggestion it
+     * carried at the time, so a group is announced once and updated quietly
+     * when the model's answer arrives after the first notification.
+     */
+    var announced: Map<String, String>
+        get() {
+            val json = prefs.getString("announced", null)?.let { runCatching { JSONObject(it) }.getOrNull() } ?: return emptyMap()
+            return json.keys().asSequence().associateWith { json.optString(it) }
+        }
+        set(value) = prefs.edit().putString("announced", JSONObject(value).toString()).apply()
+
     val log: List<LogEntry> get() = readArray("log").map { LogEntry.fromJson(it) }
 
     fun appendLog(entry: LogEntry) {

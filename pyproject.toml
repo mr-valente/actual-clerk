@@ -11,6 +11,9 @@ requires-python = ">=3.12"
 license = { text = "MIT" }
 authors = [{ name = "Actual Clerk contributors" }]
 dependencies = [
+  # RFC 8291 Web Push encryption for the nudge Clerk sends to the phone app
+  # through its UnifiedPush endpoint.
+  "cryptography>=44,<48",
   "fastapi>=0.116,<1",
   "httpx>=0.28,<1",
   "pydantic>=2.11,<3",

@@ -31,6 +31,7 @@ from actual_clerk.clients.actual import ActualGateway, ActualGatewayError
 from actual_clerk.clients.ntfy import NotificationError, NtfyClient
 from actual_clerk.clients.plaid import PlaidError
 from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
+from actual_clerk.clients.webpush import PushError, WebPushClient
 from actual_clerk.config import Settings, SettingsManager
 from actual_clerk.db import Database
 from actual_clerk.digest import build_digest, health_alert
@@ -796,6 +797,25 @@ class JobManager:
         return f"{settings.clerk_public_url}/#intelligence-review" if settings.clerk_public_url else ""
 
     async def _notify(self, settings: Settings, **message: Any) -> None:
+        """A review alert: to the phones that asked for them, else through ntfy.
+
+        A phone that has review notifications on takes the question whether it
+        is pushed or checks on its own schedule. ntfy carries it only when no
+        phone has asked, or when every phone that was to be pushed could not
+        be reached, so the question is never lost between the two.
+        """
+        devices = self.database.list_devices(reviews_only=True)
+        if devices:
+            delivered = await self.push_devices(
+                {
+                    "event": "review",
+                    "title": str(message.get("title") or ""),
+                    "message": str(message.get("message") or ""),
+                },
+                settings,
+            )
+            if delivered or any(not device.get("push_endpoint") for device in devices):
+                return
         if not (settings.notifications_enabled and settings.review_alerts_enabled):
             return
         client = NtfyClient(settings)
@@ -805,6 +825,61 @@ class JobManager:
             log.warning("Could not deliver the review alert: %s", exc)
         finally:
             await client.close()
+
+    async def push_devices(
+        self, payload: dict[str, Any], settings: Settings | None = None
+    ) -> int:
+        """Push `payload` to every phone with an endpoint; how many took it.
+
+        An endpoint the distributor no longer knows is forgotten, and the
+        phone registers a fresh one on its next check; any other failure is
+        recorded on the device so the Connections page can say so.
+        """
+        settings = settings or self.settings_manager.get()
+        devices = [
+            device
+            for device in self.database.list_devices(reviews_only=True)
+            if device.get("push_endpoint")
+        ]
+        if not devices:
+            return 0
+        client = WebPushClient(settings)
+        delivered = 0
+        try:
+            for device in devices:
+                name = device.get("device_name") or device["device_id"]
+                try:
+                    await client.send(device, payload)
+                except PushError as exc:
+                    log.warning("Could not push to %s: %s", name, exc)
+                    fields: dict[str, Any] = {"push_error": str(exc)[:300]}
+                    if exc.gone:
+                        fields.update(push_endpoint="", push_auth="", push_key="")
+                    self.database.upsert_device(device["device_id"], **fields)
+                else:
+                    delivered += 1
+                    self.database.upsert_device(
+                        device["device_id"],
+                        push_error="",
+                        last_pushed_at=datetime.datetime.now(datetime.UTC).timestamp(),
+                    )
+        finally:
+            await client.close()
+        return delivered
+
+    def nudge_devices(self) -> None:
+        """Tell the phones the queue changed, so a notification already answered goes away."""
+        if not any(
+            device.get("push_endpoint") for device in self.database.list_devices(reviews_only=True)
+        ):
+            return
+
+        async def nudge() -> None:
+            with contextlib.suppress(Exception):
+                await self.push_devices({"event": "sync"})
+
+        with contextlib.suppress(RuntimeError):
+            asyncio.get_running_loop().create_task(nudge())
 
     async def _alert_phone_review(
         self, row: dict[str, Any], decision: dict[str, Any], settings: Settings

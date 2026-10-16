@@ -1,10 +1,16 @@
 package dev.actualclerk.companion
 
+import android.Manifest
+import android.app.Activity
 import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Arrangement
@@ -39,6 +45,7 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.MutableState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -55,23 +62,36 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
+import org.unifiedpush.android.connector.UnifiedPush
 import java.text.DateFormat
 import java.util.Date
+import kotlin.math.abs
+import kotlin.math.roundToInt
 
 /** An Actual account Clerk offered as a target, from the hello call. */
 data class Account(val id: String, val name: String, val offBudget: Boolean)
 
-private enum class Screen { Setup, Home, Register, Log }
+private enum class Screen { Setup, Home, Register, Log, Review }
 
 class MainActivity : ComponentActivity() {
+    /** The review group a tapped notification asks for; consumed by the review screen. */
+    private val focus = mutableStateOf<String?>(null)
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        focus.value = intent?.getStringExtra(Reviews.EXTRA_GROUP)
         setContent {
             val dark = isSystemInDarkTheme()
             MaterialTheme(colorScheme = if (dark) darkColorScheme() else lightColorScheme()) {
-                App()
+                App(focus)
             }
         }
+    }
+
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        intent.getStringExtra(Reviews.EXTRA_GROUP)?.let { focus.value = it }
     }
 }
 
@@ -134,11 +154,16 @@ private fun Bar(title: String, onBack: (() -> Unit)? = null) {
 // ---------------------------------------------------------------------- app
 
 @Composable
-private fun App() {
+private fun App(focus: MutableState<String?>) {
     val context = LocalContext.current
     val prefs = remember { Prefs(context) }
     var screen by remember { mutableStateOf(if (prefs.configured) Screen.Home else Screen.Setup) }
     var accounts by remember { mutableStateOf<List<Account>>(emptyList()) }
+
+    // A tapped notification lands on the review screen, whatever was open.
+    LaunchedEffect(focus.value) {
+        if (focus.value != null && prefs.configured) screen = Screen.Review
+    }
 
     when (screen) {
         Screen.Setup -> SetupScreen(
@@ -151,10 +176,16 @@ private fun App() {
             onAccounts = { accounts = it },
             onRegister = { screen = Screen.Register },
             onLog = { screen = Screen.Log },
+            onReview = { screen = Screen.Review },
             onSettings = { screen = Screen.Setup },
         )
         Screen.Register -> RegisterScreen(prefs, accounts, onBack = { screen = Screen.Home })
         Screen.Log -> LogScreen(prefs, onBack = { screen = Screen.Home })
+        Screen.Review -> ReviewScreen(
+            prefs,
+            focusKey = focus.value,
+            onBack = { focus.value = null; screen = Screen.Home },
+        )
     }
 }
 
@@ -226,17 +257,31 @@ private fun HomeScreen(
     onAccounts: (List<Account>) -> Unit,
     onRegister: () -> Unit,
     onLog: () -> Unit,
+    onReview: () -> Unit,
     onSettings: () -> Unit,
 ) {
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     var sources by remember { mutableStateOf(prefs.sources) }
+    var reviewsWaiting by remember { mutableIntStateOf(prefs.reviewsWaiting) }
     var budget by remember { mutableStateOf(prefs.lastBudget) }
     var status by remember { mutableStateOf("Checking…") }
     var healthy by remember { mutableStateOf(true) }
     var accessGranted by remember { mutableStateOf(ClerkNotificationListener.isEnabled(context)) }
     var refreshCount by remember { mutableIntStateOf(0) }
     var removing by remember { mutableStateOf<Source?>(null) }
+
+    LaunchedEffect(Unit) {
+        // Keep the push registration alive: a distributor that was updated
+        // or restarted answers with the current endpoint, and a changed one
+        // is passed on to Clerk. The periodic check is re-asserted too.
+        if (prefs.reviewsEnabled) {
+            Reviews.schedule(context)
+            if (UnifiedPush.getAckDistributor(context) != null) {
+                runCatching { UnifiedPush.register(context, messageForDistributor = "Actual Clerk's category questions") }
+            }
+        }
+    }
 
     LaunchedEffect(refreshCount) {
         accessGranted = ClerkNotificationListener.isEnabled(context)
@@ -247,6 +292,12 @@ private fun HomeScreen(
             sources = fetched
             onAccounts(parseAccounts(hello))
             hello.optJSONObject("budget")?.let { prefs.lastBudget = it; budget = it }
+            if (hello.has("reviews_waiting")) {
+                reviewsWaiting = hello.optInt("reviews_waiting")
+                prefs.reviewsWaiting = reviewsWaiting
+            }
+            // Clerk forgot this phone (a reset, a restore): ask again.
+            if (prefs.reviewsEnabled && hello.isNull("device")) RegisterDeviceWorker.enqueue(context)
             status = "Connected to Clerk ${hello.optString("version")}"
             healthy = true
         }.onFailure {
@@ -305,6 +356,7 @@ private fun HomeScreen(
                     }
                 }
             }
+            item { ReviewsCard(prefs, reviewsWaiting, onReview) }
             item {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     SectionTitle("Sources")
@@ -468,6 +520,306 @@ private fun RegisterScreen(prefs: Prefs, knownAccounts: List<Account>, onBack: (
             }
         }
     }
+}
+
+// ------------------------------------------------------------------ reviews
+
+private fun distributorLabel(context: android.content.Context): String {
+    val packageName = UnifiedPush.getAckDistributor(context) ?: UnifiedPush.getSavedDistributor(context) ?: return "the push app"
+    val manager = context.packageManager
+    return runCatching { manager.getApplicationLabel(manager.getApplicationInfo(packageName, 0)).toString() }
+        .getOrDefault(packageName)
+}
+
+/**
+ * Ask the distributor on the phone for an endpoint. Without one the phone
+ * still takes the questions, found by its own check every quarter hour.
+ */
+private fun requestPush(activity: Activity, prefs: Prefs) {
+    if (UnifiedPush.getDistributors(activity).isEmpty()) {
+        prefs.pushError = "No push app is installed (the ntfy app is one)"
+        RegisterDeviceWorker.enqueue(activity)
+        return
+    }
+    UnifiedPush.tryUseCurrentOrDefaultDistributor(activity) { chosen ->
+        if (chosen) {
+            UnifiedPush.register(activity, messageForDistributor = "Actual Clerk's category questions")
+        } else {
+            prefs.pushError = "No push app was chosen"
+            RegisterDeviceWorker.enqueue(activity)
+        }
+    }
+}
+
+@Composable
+private fun ReviewsCard(prefs: Prefs, waiting: Int, onReview: () -> Unit) {
+    val context = LocalContext.current
+    var enabled by remember { mutableStateOf(prefs.reviewsEnabled) }
+    var refresh by remember { mutableIntStateOf(0) }
+    val permission = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { refresh++ }
+
+    fun turnOn() {
+        prefs.reviewsEnabled = true
+        prefs.pushError = ""
+        enabled = true
+        Reviews.ensureChannel(context)
+        Reviews.schedule(context)
+        if (Build.VERSION.SDK_INT >= 33 && !Reviews.canNotify(context)) permission.launch(Manifest.permission.POST_NOTIFICATIONS)
+        // Told to Clerk now, so the questions come here from this moment;
+        // the push address follows when the distributor issues one.
+        RegisterDeviceWorker.enqueue(context)
+        (context as? Activity)?.let { requestPush(it, prefs) }
+        refresh++
+    }
+
+    fun turnOff() {
+        prefs.reviewsEnabled = false
+        enabled = false
+        runCatching { UnifiedPush.unregister(context) }
+        prefs.pushEndpoint = ""
+        prefs.pushAuth = ""
+        prefs.pushKey = ""
+        prefs.pushError = ""
+        Reviews.unschedule(context)
+        Reviews.clearAll(context, prefs)
+        RegisterDeviceWorker.enqueue(context)
+        refresh++
+    }
+
+    val detail = remember(enabled, refresh) {
+        when {
+            !enabled -> "Clerk asks through ntfy, as before. Turn this on and a charge Clerk cannot place is announced by this app instead; tap it, pick a category, done."
+            !Reviews.canNotify(context) -> "Android is not letting this app show notifications. Allow them in the app's settings, or questions only appear when you open Review."
+            prefs.pushEndpoint.isNotBlank() -> "Questions arrive the moment Clerk has one, pushed through ${distributorLabel(context)}.${if (prefs.deviceRegistered) "" else " Telling Clerk about this phone…"}"
+            prefs.pushError.isNotBlank() -> "${prefs.pushError}. This phone checks Clerk every ${Reviews.CHECK_MINUTES} minutes instead."
+            else -> "Waiting for the push app to issue an address; this phone checks Clerk every ${Reviews.CHECK_MINUTES} minutes meanwhile."
+        }
+    }
+
+    Card(modifier = Modifier.fillMaxWidth()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            SectionTitle(if (enabled) "Category questions come here" else "Category questions")
+            Note(detail)
+            if (enabled && !Reviews.canNotify(context) && Build.VERSION.SDK_INT >= 33) {
+                OutlinedButton(onClick = { permission.launch(Manifest.permission.POST_NOTIFICATIONS) }) { Text("Allow notifications") }
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                if (enabled) {
+                    Button(onClick = onReview) { Text(if (waiting > 0) "Review ($waiting waiting)" else "Review") }
+                    TextButton(onClick = { turnOff() }) { Text("Turn off") }
+                } else {
+                    Button(onClick = { turnOn() }) { Text("Turn on") }
+                    TextButton(onClick = onReview) { Text("Review") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReviewScreen(prefs: Prefs, focusKey: String?, onBack: () -> Unit) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var queue by remember { mutableStateOf<ReviewQueue?>(null) }
+    var loading by remember { mutableStateOf(true) }
+    var error by remember { mutableStateOf("") }
+    var notice by remember { mutableStateOf("") }
+    var busy by remember { mutableStateOf("") }
+    var refresh by remember { mutableIntStateOf(0) }
+    // What the person picked instead of the suggestion, per group.
+    var choices by remember { mutableStateOf<Map<String, Category>>(emptyMap()) }
+    var choosing by remember { mutableStateOf<ReviewGroup?>(null) }
+
+    LaunchedEffect(refresh) {
+        loading = true
+        error = ""
+        val result = withContext(Dispatchers.IO) {
+            runCatching {
+                val fetched = Reviews.fetch(prefs)
+                if (prefs.reviewsEnabled) Reviews.reconcile(context, prefs, fetched)
+                fetched
+            }
+        }
+        loading = false
+        result.onSuccess { queue = it }.onFailure { error = "Could not read the review queue: ${it.message}" }
+    }
+
+    fun resolve(group: ReviewGroup, action: String, always: Boolean = false) {
+        val chosen = choices[group.key]
+        val categoryId = when (action) {
+            "dismiss" -> null
+            else -> chosen?.id ?: group.suggestionId.ifBlank { null }
+        }
+        if (action != "dismiss" && categoryId == null) {
+            notice = "Choose a category for ${group.label} first."
+            return
+        }
+        val send = if (action == "dismiss") "dismiss" else if (chosen != null && chosen.id != group.suggestionId) "recategorize" else "accept"
+        busy = group.key
+        notice = ""
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { ClerkApi(prefs).resolveReviews(group.ids, send, if (send == "recategorize") categoryId else null, always) }
+            }
+            busy = ""
+            result.onSuccess {
+                queue = queue?.let { current -> current.copy(groups = current.groups.filter { it.key != group.key }) }
+                choices = choices - group.key
+                Reviews.clear(context, prefs, group.key)
+                prefs.reviewsWaiting = queue?.count ?: 0
+                val name = chosen?.name ?: group.suggestionName
+                notice = when (action) {
+                    "dismiss" -> "${group.label} skipped; Clerk will not ask again."
+                    else -> "${group.label} filed as $name${if (always) ", and always will be" else ""}."
+                }
+            }.onFailure { notice = "Could not resolve ${group.label}: ${it.message}" }
+        }
+    }
+
+    choosing?.let { group ->
+        CategoryDialog(
+            categories = queue?.categories.orEmpty(),
+            selectedId = choices[group.key]?.id ?: group.suggestionId,
+            suggestedId = group.suggestionId,
+            onPick = { category -> choices = choices + (group.key to category); choosing = null },
+            onDismiss = { choosing = null },
+        )
+    }
+
+    Scaffold(topBar = { Bar("Review", onBack) }) { padding ->
+        val groups = queue?.groups.orEmpty().sortedBy { if (it.key == focusKey) 0 else 1 }
+        LazyColumn(
+            modifier = Modifier.padding(padding).fillMaxSize(),
+            contentPadding = androidx.compose.foundation.layout.PaddingValues(20.dp),
+            verticalArrangement = Arrangement.spacedBy(12.dp),
+        ) {
+            if (notice.isNotBlank()) item { Note(notice, error = notice.startsWith("Could not") || notice.startsWith("Choose")) }
+            if (error.isNotBlank()) item { Note(error, error = true) }
+            if (loading && queue == null) item { CircularProgressIndicator() }
+            if (!loading && error.isBlank() && groups.isEmpty()) {
+                item { Text("Nothing is waiting", style = MaterialTheme.typography.titleMedium) }
+                item { Note("Known merchants are filed by themselves. A first-time merchant, from the bank or this phone, appears here with Clerk's suggestion.") }
+            }
+            items(groups, key = { it.key }) { group ->
+                ReviewGroupCard(
+                    group = group,
+                    symbol = queue?.symbol ?: "$",
+                    chosen = choices[group.key],
+                    busy = busy == group.key,
+                    highlighted = group.key == focusKey,
+                    onChoose = { choosing = group },
+                    onApply = { resolve(group, "accept") },
+                    onAlways = { resolve(group, "accept", always = true) },
+                    onSkip = { resolve(group, "dismiss") },
+                )
+            }
+            item {
+                Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedButton(onClick = { refresh++ }, enabled = !loading) { Text("Refresh") }
+                    val url = queue?.reviewUrl.orEmpty()
+                    if (url.isNotBlank()) TextButton(onClick = { context.startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url))) }) { Text("Open in Clerk") }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ReviewGroupCard(
+    group: ReviewGroup,
+    symbol: String,
+    chosen: Category?,
+    busy: Boolean,
+    highlighted: Boolean,
+    onChoose: () -> Unit,
+    onApply: () -> Unit,
+    onAlways: () -> Unit,
+    onSkip: () -> Unit,
+) {
+    val bank = group.items.size - group.phoneCount
+    val counted = listOfNotNull(
+        if (bank > 0) "$bank transaction${if (bank == 1) "" else "s"}" else null,
+        if (group.phoneCount > 0) "${group.phoneCount} phone charge${if (group.phoneCount == 1) "" else "s"}" else null,
+    ).joinToString(" + ")
+    val dates = group.items.map { it.date }.filter { it.isNotBlank() }.sorted()
+    val span = when {
+        dates.size > 1 -> "${dates.first()} – ${dates.last()}"
+        dates.size == 1 -> dates.first()
+        else -> ""
+    }
+    val accounts = group.items.map { it.account }.filter { it.isNotBlank() }.distinct().take(2).joinToString(", ")
+    val selected = chosen?.name ?: group.suggestionName
+    val selectionLine = when {
+        chosen != null && chosen.id != group.suggestionId -> "Filing as ${chosen.name}" + if (group.suggestionName.isNotBlank()) " (Clerk suggested ${group.suggestionName})" else ""
+        group.suggestionName.isNotBlank() -> "Suggested: ${group.suggestionName} · ${(group.confidence * 100).roundToInt()}% sure"
+        group.asking -> "Clerk is still asking the model…"
+        group.proposed.isNotBlank() -> "Clerk found no fitting category and suggests a new one: ${group.proposed}"
+        else -> "No suggestion; choose a category"
+    }
+    Card(modifier = Modifier.fillMaxWidth(), colors = if (highlighted) androidx.compose.material3.CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.secondaryContainer) else androidx.compose.material3.CardDefaults.cardColors()) {
+        Column(Modifier.padding(16.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(group.label + if (group.phoneCount > 0) " 📱" else "", fontWeight = FontWeight.SemiBold, style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                Text(ForwardWorker.formatCents(abs(group.totalCents), symbol), fontWeight = FontWeight.SemiBold)
+            }
+            Note(listOf(counted, span, accounts).filter { it.isNotBlank() }.joinToString(" · "))
+            group.items.firstOrNull { it.phoneText.isNotBlank() }?.let { Note("“${it.phoneText.take(200)}”") }
+            if (group.reason.isNotBlank()) Note(group.reason.take(240))
+            Text(selectionLine, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.clickable(enabled = !busy) { onChoose() })
+            TextButton(onClick = onChoose, enabled = !busy) { Text(if (selected.isBlank()) "Choose a category" else "Change category") }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                TextButton(onClick = onSkip, enabled = !busy) { Text("Skip") }
+                Spacer(Modifier.weight(1f))
+                OutlinedButton(onClick = onAlways, enabled = !busy && selected.isNotBlank()) { Text("Always") }
+                Button(onClick = onApply, enabled = !busy && selected.isNotBlank()) { Text(if (group.items.size > 1) "Apply ${group.items.size}" else "Apply") }
+            }
+            if (busy) CircularProgressIndicator()
+        }
+    }
+}
+
+@Composable
+private fun CategoryDialog(
+    categories: List<Category>,
+    selectedId: String,
+    suggestedId: String,
+    onPick: (Category) -> Unit,
+    onDismiss: () -> Unit,
+) {
+    var search by remember { mutableStateOf("") }
+    val shown = categories
+        .filter { !it.income || it.id == selectedId }
+        .filter { search.isBlank() || "${it.groupName} ${it.name}".contains(search.trim(), ignoreCase = true) }
+    AlertDialog(
+        onDismissRequest = onDismiss,
+        title = { Text("Which category?") },
+        text = {
+            Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                OutlinedTextField(
+                    value = search, onValueChange = { search = it }, singleLine = true,
+                    placeholder = { Text("Search categories") }, modifier = Modifier.fillMaxWidth(),
+                )
+                if (categories.isEmpty()) Note("No categories were offered. Run a sync in Clerk first.", error = true)
+                LazyColumn(modifier = Modifier.fillMaxWidth().height(360.dp)) {
+                    val grouped = shown.groupBy { it.groupName.ifBlank { "Other" } }
+                    grouped.forEach { (groupName, members) ->
+                        item(key = "group:$groupName") { Note(groupName); }
+                        items(members, key = { it.id }) { category ->
+                            Text(
+                                category.name + when (category.id) { suggestedId -> "  · suggested"; else -> "" },
+                                fontWeight = if (category.id == selectedId) FontWeight.SemiBold else FontWeight.Normal,
+                                modifier = Modifier.fillMaxWidth().clickable { onPick(category) }.padding(vertical = 10.dp, horizontal = 4.dp),
+                                style = MaterialTheme.typography.bodyLarge,
+                            )
+                        }
+                    }
+                    if (shown.isEmpty() && categories.isNotEmpty()) item { Note("No matching categories") }
+                }
+            }
+        },
+        confirmButton = {},
+        dismissButton = { TextButton(onClick = onDismiss) { Text("Cancel") } },
+    )
 }
 
 // ---------------------------------------------------------------------- log

@@ -427,6 +427,40 @@ class RegisterSourceRequest(BaseModel):
         return " ".join(value.split())
 
 
+class RegisterDeviceRequest(BaseModel):
+    """The phone asks for category questions to reach it, pushed when it has an endpoint."""
+
+    device_id: str = Field(min_length=1, max_length=100)
+    device_name: str = Field(default="", max_length=120)
+    reviews_enabled: bool = True
+    # What the phone's UnifiedPush distributor issued, and the Web Push keys
+    # the app generated for it. Blank means the phone can only poll.
+    push_endpoint: str = Field(default="", max_length=600)
+    push_auth: str = Field(default="", max_length=100)
+    push_key: str = Field(default="", max_length=200)
+
+    @field_validator("device_name")
+    @classmethod
+    def collapse_name(cls, value: str) -> str:
+        return " ".join(value.split())
+
+    @field_validator("push_endpoint")
+    @classmethod
+    def http_endpoint(cls, value: str) -> str:
+        value = value.strip()
+        if value and not value.lower().startswith(("http://", "https://")):
+            raise ValueError("a push endpoint must be an http(s) URL")
+        return value
+
+    @model_validator(mode="after")
+    def keys_come_together(self) -> RegisterDeviceRequest:
+        if bool(self.push_auth) != bool(self.push_key):
+            raise ValueError("a push key and its auth secret go together")
+        if self.push_key and not self.push_endpoint:
+            raise ValueError("push keys need a push endpoint")
+        return self
+
+
 class UpdateSourceRequest(BaseModel):
     actual_account_id: str | None = Field(default=None, max_length=100)
     enabled: bool | None = None

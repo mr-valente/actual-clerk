@@ -57,8 +57,10 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
    Review** with the model's suggestion, next to bank rows from the same
    merchant. An ntfy message says it is waiting (Settings → Notifications →
    *Alert when something needs a category*; with *Clerk's address* set,
-   tapping it opens the Review tab). Until you answer, the charge counts as
-   uncategorized: the model never moves money by itself.
+   tapping it opens the Review tab), or, when the phone app has taken the
+   questions over, the phone announces it itself (see [Category questions on
+   the phone](#category-questions-on-the-phone)). Until you answer, the
+   charge counts as uncategorized: the model never moves money by itself.
 
    In Review, **Apply** files this charge and the bank row it settles into,
    and is remembered as evidence; **Always** also declares a rule for the
@@ -114,6 +116,57 @@ hand, and a wrong match reopened: the charge counts again, is never matched
 to that row again, and the row goes back to the bank's date unless you have
 dated it yourself since. The only change this feature makes in
 Actual is the date of a row a charge settled, as above.
+
+## Category questions on the phone
+
+The question "where does this charge go?" is quicker to answer on the phone
+that saw the charge than on a web page. Turning on **Category questions** in
+the phone app moves that one kind of notification from ntfy to the app
+itself: a charge Clerk cannot place arrives as the app's own notification,
+one per merchant, with Clerk's suggestion in it; tapping it opens a review
+screen where **Apply** files it, **Always** also declares the rule, **Skip**
+leaves it, and a category other than the suggestion can be chosen from a
+searchable list. Bank rows a scheduled filing run could not place are
+announced the same way. Every other notification (the morning report,
+connection alerts) still goes through ntfy exactly as before.
+
+How the phone hears about it:
+
+1. **Pushed, through the ntfy app.** The app registers with whatever
+   [UnifiedPush](https://unifiedpush.org) distributor is on the phone, and
+   the ntfy app is one (it offers itself as the push service the first time
+   the app asks). The distributor issues an endpoint, an `up…` topic on the
+   ntfy server the ntfy app is configured for, and the app hands it to
+   Clerk with the Web Push keys it generated. When a question arises Clerk
+   encrypts a small nudge for those keys (RFC 8291, `aes128gcm`) and POSTs it
+   to the endpoint; the ntfy app wakes the companion app, which reads the
+   review queue over its own connection and posts the notification. The
+   nudge carries nothing the app relies on: any push means "look now". On a
+   self-hosted ntfy server that refuses anonymous writes, Clerk sends its
+   ntfy access token with the nudge, and only to that server; the server
+   can instead allow writes to `up*` topics (`ntfy access '*' 'up*'
+   write-only`).
+2. **Checked, every fifteen minutes.** Whether or not a push app is on the
+   phone, the app looks at the queue on a schedule, which is what catches a
+   push that never arrived, and withdraws a notification for a question
+   answered elsewhere (Clerk also nudges the phone when the queue changes,
+   so a question answered on the web disappears from the phone at once).
+
+Clerk sends the ntfy message only when no phone has asked for the
+questions, or when every phone that was to be pushed could not be reached;
+a phone that polls keeps the question off ntfy, since it will see it
+within the quarter hour. The ntfy switches in Settings govern the ntfy
+message alone; the phone's own switch governs the phone. An endpoint the
+distributor has forgotten (the server answers 404 or 410) is dropped, the
+phone registers a new one on its next check, and that one question goes
+through ntfy. A push that fails for any other reason is recorded on the
+phone's row on the Connections page, where a phone can also be forgotten,
+which sends the questions back through ntfy.
+
+The phone answers through the same resolver the Review tab uses: a bank
+row is written to Actual and remembered as evidence, a phone charge is
+answered in Clerk until the bank's row arrives, and *Always* declares the
+rule under the merchant's key and its alias.
 
 ## Pending charges the bank withdraws
 
@@ -208,6 +261,10 @@ that source). Then:
 1. **Connect.** Enter the URL you open Clerk at from the phone and the device
    token. The app checks the connection and lists the Actual accounts Clerk
    knows about.
+1. **Turn on Category questions** (optional). The home screen's *Category
+   questions* card moves that notification from ntfy to the app, as
+   described above. Allow the app to post notifications when Android asks,
+   and let it use the ntfy app as its push service if that dialog appears.
 2. **Grant notification access.** The home screen links to the system page.
    On Android 13 and later an app installed outside the Play Store first needs
    *Allow restricted settings* from its App info menu (the three dots, top
@@ -242,7 +299,9 @@ itself once access is granted.
 
 ## Data
 
-Three tables in Clerk's SQLite: `notification_sources` (one app on one phone,
+Four tables in Clerk's SQLite: `devices` (one phone that asked for the
+category questions, with its push endpoint and Web Push keys when it has
+them), `notification_sources` (one app on one phone,
 pointed at an Actual account), `anticipated_charges` (one per notification, or per
 withdrawn pending charge, told apart by `origin`, with the parsed amount, merchant, the raw title and text, the provisional
 category and where it came from, and how it was settled: `open`, `matched`,
@@ -265,6 +324,10 @@ Phone (gated by the device token when one is set):
 | `DELETE` | `/api/anticipated/device/sources/{id}?device_id=` | Unregister it |
 | `POST` | `/api/anticipated/device/notifications` | Forward one notification; replies with the charge and the budget as it now stands (the budget re-read is bounded to twenty seconds so the phone never times out; a slower read finishes in the background and `refreshed` is false) |
 | `GET` | `/api/anticipated/device/charges?device_id=` | This device's recent charges |
+| `POST` | `/api/anticipated/device/register` | Ask for category questions on this phone, with the push endpoint and Web Push keys when there are any |
+| `DELETE` | `/api/anticipated/device/register?device_id=` | Send them back through ntfy |
+| `GET` | `/api/anticipated/device/reviews?device_id=` | The open review queue, grouped by merchant through aliases, with the categories to choose from |
+| `POST` | `/api/anticipated/device/reviews/resolve?device_id=` | Answer, with the same body as `POST /api/reviews/resolve` |
 
 Web UI:
 
@@ -277,3 +340,4 @@ Web UI:
 | `POST` | `/api/anticipated/charges/{id}/reopen` | Count it again after a wrong match |
 | `POST` | `/api/anticipated/charges/{id}/alias` | Teach the payee the bank posts this merchant as |
 | `DELETE` | `/api/anticipated/aliases/{alias_key}` | Forget an alias |
+| `DELETE` | `/api/anticipated/devices/{device_id}` | Forget a phone that asked for the category questions |

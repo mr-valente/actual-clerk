@@ -1,5 +1,6 @@
 package dev.actualclerk.companion
 
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 import java.net.HttpURLConnection
@@ -59,6 +60,36 @@ class ClerkApi(private val prefs: Prefs) {
 
     fun charges(limit: Int = 60): JSONObject =
         request("GET", "/api/anticipated/device/charges?device_id=${encode(prefs.deviceId)}&limit=$limit")
+
+    /** Ask Clerk to send category questions here: pushed to [endpoint] when there is one. */
+    fun registerDevice(enabled: Boolean, endpoint: String, auth: String, key: String): JSONObject = request(
+        "POST",
+        "/api/anticipated/device/register",
+        JSONObject()
+            .put("device_id", prefs.deviceId)
+            .put("device_name", prefs.deviceName)
+            .put("reviews_enabled", enabled)
+            .put("push_endpoint", endpoint)
+            .put("push_auth", auth)
+            .put("push_key", key),
+    )
+
+    fun unregisterDevice(): JSONObject =
+        request("DELETE", "/api/anticipated/device/register?device_id=${encode(prefs.deviceId)}")
+
+    /** What waits on the person, as the Review tab lists it, with the categories to choose from. */
+    fun reviews(): JSONObject =
+        request("GET", "/api/anticipated/device/reviews?device_id=${encode(prefs.deviceId)}")
+
+    fun resolveReviews(ids: List<String>, action: String, categoryId: String?, always: Boolean): JSONObject = request(
+        "POST",
+        "/api/anticipated/device/reviews/resolve?device_id=${encode(prefs.deviceId)}",
+        JSONObject()
+            .put("ids", JSONArray(ids))
+            .put("action", action)
+            .put("category_id", categoryId ?: JSONObject.NULL)
+            .put("always", always),
+    )
 
     private fun request(method: String, path: String, body: JSONObject? = null): JSONObject {
         val base = prefs.serverUrl.ifBlank { throw ApiException("No Clerk server URL is set") }

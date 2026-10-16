@@ -340,6 +340,24 @@ CREATE INDEX IF NOT EXISTS ix_anticipated_noticed ON anticipated_charges(noticed
 CREATE UNIQUE INDEX IF NOT EXISTS uq_anticipated_pending
 ON anticipated_charges(actual_account_id, notification_key) WHERE source_id IS NULL;
 
+-- The phones running the companion app that asked for category questions
+-- to reach them there rather than through ntfy. The push endpoint is what
+-- the phone's UnifiedPush distributor issued, with the app's Web Push keys;
+-- a phone without one checks for reviews on a schedule instead.
+CREATE TABLE IF NOT EXISTS devices (
+    device_id TEXT PRIMARY KEY,
+    device_name TEXT NOT NULL DEFAULT '',
+    reviews_enabled INTEGER NOT NULL DEFAULT 1,
+    push_endpoint TEXT NOT NULL DEFAULT '',
+    push_auth TEXT NOT NULL DEFAULT '',
+    push_key TEXT NOT NULL DEFAULT '',
+    push_error TEXT NOT NULL DEFAULT '',
+    last_seen_at REAL,
+    last_pushed_at REAL,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
 -- A card app and the bank name the same shop differently ("Valve" on the
 -- phone, "Steam" on the statement). Learned when an anticipation settles, or
 -- taught by hand, so the next notification matches by merchant and inherits
@@ -2424,6 +2442,69 @@ class Database:
                 "DELETE FROM notification_sources WHERE id=?", (source_id,)
             )
         return cursor.rowcount > 0
+
+    # ------------------------------------------------------------- devices
+
+    DEVICE_FIELDS = (
+        "device_name",
+        "reviews_enabled",
+        "push_endpoint",
+        "push_auth",
+        "push_key",
+        "push_error",
+        "last_seen_at",
+        "last_pushed_at",
+    )
+
+    def upsert_device(self, device_id: str, **fields: Any) -> dict[str, Any]:
+        """Record a phone's wish to be asked, or refresh what is known about it."""
+        if not device_id:
+            raise ValueError("A device needs an id")
+        unknown = set(fields) - set(self.DEVICE_FIELDS)
+        if unknown:
+            raise ValueError(f"Unknown device fields: {', '.join(sorted(unknown))}")
+        if "reviews_enabled" in fields:
+            fields["reviews_enabled"] = 1 if fields["reviews_enabled"] else 0
+        now = time.time()
+        with self.connect() as connection:
+            connection.execute(
+                "INSERT INTO devices(device_id, created_at, updated_at) VALUES(?,?,?) "
+                "ON CONFLICT(device_id) DO NOTHING",
+                (device_id, now, now),
+            )
+            if fields:
+                assignments = ", ".join(f"{name}=?" for name in fields)
+                connection.execute(
+                    f"UPDATE devices SET {assignments}, updated_at=? WHERE device_id=?",
+                    [*fields.values(), now, device_id],
+                )
+        return self.get_device(device_id) or {"device_id": device_id, **fields}
+
+    def get_device(self, device_id: str) -> dict[str, Any] | None:
+        with self.connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM devices WHERE device_id=?", (device_id,)
+            ).fetchone()
+        return self._device_row(row) if row else None
+
+    def list_devices(self, *, reviews_only: bool = False) -> list[dict[str, Any]]:
+        query = "SELECT * FROM devices"
+        if reviews_only:
+            query += " WHERE reviews_enabled=1"
+        with self.connect() as connection:
+            rows = connection.execute(query + " ORDER BY created_at").fetchall()
+        return [self._device_row(row) for row in rows]
+
+    def delete_device(self, device_id: str) -> bool:
+        with self.connect() as connection:
+            cursor = connection.execute("DELETE FROM devices WHERE device_id=?", (device_id,))
+        return cursor.rowcount > 0
+
+    @staticmethod
+    def _device_row(row: sqlite3.Row) -> dict[str, Any]:
+        item = dict(row)
+        item["reviews_enabled"] = bool(item.get("reviews_enabled"))
+        return item
 
     @staticmethod
     def _source_row(row: sqlite3.Row) -> dict[str, Any]:

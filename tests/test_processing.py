@@ -1425,3 +1425,137 @@ async def test_spending_waiting_in_review_counts_under_its_suggestion_in_the_rep
     assert report["uncategorized_cents"] == 700, "only the fixture's unfiled coffee"
     assert report["committed_spent_cents"] >= 255000, "rent draws on its own budget"
     assert manager.gateway.updates == [], "nothing is written to Actual"
+
+
+# ------------------------------------------------------ reviews on the phone
+
+
+@pytest.fixture
+def pushes(monkeypatch):
+    """Accept every push to a phone without leaving the machine."""
+    sent: list[tuple[str, dict[str, Any]]] = []
+
+    async def send(self, device, payload):
+        sent.append((device["device_id"], payload))
+
+    monkeypatch.setattr("actual_clerk.clients.webpush.WebPushClient.send", send)
+    return sent
+
+
+def phone_device(database, device_id="phone-1", **fields):
+    return database.upsert_device(
+        device_id,
+        device_name="Pixel",
+        push_endpoint="https://ntfy.example/upAbc",
+        push_key="BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+        push_auth="BTBZMqHH6r4Tts7J_aSIgg",
+        **fields,
+    )
+
+
+async def test_a_phone_that_asked_for_reviews_is_pushed_instead_of_ntfy(
+    manager, database, settings_manager, delivers, pushes, model
+):
+    settings_manager.update({"notifications_enabled": True, "ntfy_topic": "clerk"})
+    phone_device(database)
+    phone_charge(database, settings_manager)
+    await run_job(manager, "phone", trigger="phone")
+    assert delivers == []
+    [(device_id, payload)] = pushes
+    assert device_id == "phone-1"
+    assert payload["event"] == "review"
+    assert payload["title"] == "Needs a category: Valve"
+    assert "Clerk suggests Coffee" in payload["message"]
+    assert database.get_device("phone-1")["last_pushed_at"]
+
+
+async def test_bank_rows_from_a_scheduled_run_are_pushed_too(
+    manager, database, settings_manager, delivers, pushes
+):
+    settings_manager.update({"ai_enabled": False, "notifications_enabled": True, "ntfy_topic": "clerk"})
+    phone_device(database)
+    manager.gateway.snap = budget_snapshot([
+        transaction(TODAY, -4399, payee="Kam Man Supermarket", transaction_id="txn-km"),
+    ])
+    await run_job(manager, "categorize", trigger="sync")
+    assert delivers == []
+    assert pushes[0][1]["title"] == "1 transaction needs a category"
+
+
+async def test_the_phone_takes_the_question_whatever_the_ntfy_switches_say(
+    manager, database, settings_manager, delivers, pushes, model
+):
+    settings_manager.update({"notifications_enabled": False, "review_alerts_enabled": False})
+    phone_device(database)
+    phone_charge(database, settings_manager)
+    await run_job(manager, "phone", trigger="phone")
+    assert len(pushes) == 1 and delivers == []
+
+
+async def test_a_phone_that_only_polls_still_keeps_the_question_off_ntfy(
+    manager, database, settings_manager, delivers, pushes, model
+):
+    settings_manager.update({"notifications_enabled": True, "ntfy_topic": "clerk"})
+    database.upsert_device("phone-1", device_name="Pixel")
+    phone_charge(database, settings_manager)
+    await run_job(manager, "phone", trigger="phone")
+    assert pushes == [] and delivers == []
+
+
+async def test_a_phone_that_turned_reviews_off_leaves_them_to_ntfy(
+    manager, database, settings_manager, delivers, pushes, model
+):
+    settings_manager.update({"notifications_enabled": True, "ntfy_topic": "clerk"})
+    phone_device(database, reviews_enabled=False)
+    phone_charge(database, settings_manager)
+    await run_job(manager, "phone", trigger="phone")
+    assert pushes == []
+    assert [alert["title"] for alert in delivers] == ["Needs a category: Valve"]
+
+
+async def test_a_push_that_fails_falls_back_to_ntfy_and_is_recorded(
+    manager, database, settings_manager, delivers, model, monkeypatch
+):
+    from actual_clerk.clients.webpush import PushError
+
+    settings_manager.update({"notifications_enabled": True, "ntfy_topic": "clerk"})
+    phone_device(database)
+
+    async def refuse(self, device, payload):
+        raise PushError("the push endpoint returned 500: busy", status=500)
+
+    monkeypatch.setattr("actual_clerk.clients.webpush.WebPushClient.send", refuse)
+    phone_charge(database, settings_manager)
+    await run_job(manager, "phone", trigger="phone")
+    assert [alert["title"] for alert in delivers] == ["Needs a category: Valve"]
+    device = database.get_device("phone-1")
+    assert device["push_error"].startswith("the push endpoint returned 500")
+    assert device["push_endpoint"] == "https://ntfy.example/upAbc", "a passing failure keeps the endpoint"
+
+
+async def test_an_endpoint_the_distributor_forgot_is_dropped(
+    manager, database, settings_manager, delivers, model, monkeypatch
+):
+    from actual_clerk.clients.webpush import PushError
+
+    settings_manager.update({"notifications_enabled": True, "ntfy_topic": "clerk"})
+    phone_device(database)
+
+    async def gone(self, device, payload):
+        raise PushError("the push endpoint returned 404: topic gone", status=404)
+
+    monkeypatch.setattr("actual_clerk.clients.webpush.WebPushClient.send", gone)
+    phone_charge(database, settings_manager)
+    await run_job(manager, "phone", trigger="phone")
+    device = database.get_device("phone-1")
+    assert device["push_endpoint"] == "" and device["push_key"] == ""
+    assert device["reviews_enabled"], "the phone still wants the questions; it registers a new endpoint"
+    assert len(delivers) == 1
+
+
+async def test_a_nudge_reaches_every_pushed_phone(manager, database, pushes):
+    phone_device(database)
+    phone_device(database, device_id="phone-2")
+    database.upsert_device("phone-3", reviews_enabled=False)
+    assert await manager.push_devices({"event": "sync"}) == 2
+    assert sorted(device for device, _ in pushes) == ["phone-1", "phone-2"]

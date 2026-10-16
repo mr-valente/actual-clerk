@@ -26,6 +26,7 @@ from actual_clerk.clients.ntfy import NotificationError, NtfyClient
 from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleClient
 from actual_clerk.clients.plaid import PlaidClient, PlaidError
 from actual_clerk.clients.simplefin import SimpleFinClient, SimpleFinError
+from actual_clerk.clients.webpush import valid_keys
 from actual_clerk.config import TIMEZONE_CHOSEN_KEY, SettingsManager, data_directory
 from actual_clerk.db import Database
 from actual_clerk.diagnostics import build_report
@@ -52,6 +53,7 @@ from actual_clerk.schemas import (
     MigrateToSimpleFinRequest,
     MonitoringRequest,
     RedateImportsRequest,
+    RegisterDeviceRequest,
     RegisterSourceRequest,
     ResolveDecisionRequest,
     ResolveProposalRequest,
@@ -574,6 +576,8 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
             for decision_id in payload.ids
             if database.resolve_decision(decision_id, "skipped")
         ]
+        if skipped:
+            _jobs(request).nudge_devices()
         return {"status": "skipped", "resolved": len(skipped)}
     if payload.action == "restore":
         restored = [
@@ -633,6 +637,8 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
             await _jobs(request).refresh_now()
 
     if not updates:
+        if phone_answered:
+            _jobs(request).nudge_devices()
         return {
             "status": "applied" if phone_answered else "skipped",
             "resolved": phone_answered,
@@ -667,6 +673,7 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
                 category_id=category_id,
                 category_name=category_name,
             )
+    _jobs(request).nudge_devices()
     return {
         "status": "applied",
         "resolved": len(applied) + phone_answered,
@@ -721,6 +728,7 @@ async def resolve_review(
     if payload.action == "dismiss":
         if not database.resolve_decision(decision_id, "skipped"):
             raise HTTPException(status_code=409, detail="This review has already been resolved")
+        _jobs(request).nudge_devices()
         return {"status": "skipped"}
 
     category_id = payload.category_id if payload.action == "recategorize" else pending["category_id"]
@@ -744,6 +752,7 @@ async def resolve_review(
             raise HTTPException(status_code=409, detail="This review has already been resolved")
         with contextlib.suppress(Exception):
             await _jobs(request).refresh_now()
+        _jobs(request).nudge_devices()
         return {
             "status": "applied",
             "category_id": category_id,
@@ -804,6 +813,7 @@ async def resolve_review(
             category_id=category_id,
             category_name=category_name,
         )
+    _jobs(request).nudge_devices()
     return {
         "status": "applied",
         "category_id": category_id,
@@ -1867,11 +1877,14 @@ async def anticipated_hello(request: Request, device_id: str = Query(default="")
     _require_device(request)
     database = _database(request)
     sources = database.list_notification_sources(device_id=device_id) if device_id else []
+    device = database.get_device(device_id) if device_id else None
     return {
         "ok": True,
         "version": __version__,
         "accounts": _anticipated_accounts(request),
         "sources": [_serialize_source(source) for source in sources],
+        "device": _serialize_device(device) if device else None,
+        "reviews_waiting": database.counts()["needs_review"],
         "budget": _budget_summary(request),
     }
 
@@ -2003,6 +2016,145 @@ async def anticipated_device_charges(
     }
 
 
+# --------------------------------------------- reviews on the phone
+#
+# The phone can take the category questions itself: it registers once, with
+# the push endpoint its UnifiedPush distributor issued when it has one, and
+# from then on a review alert is pushed to it (or found by its own periodic
+# check) instead of going out through ntfy. The phone reads the same queue
+# the Review tab shows and answers through the same resolver.
+
+
+def _serialize_device(device: dict[str, Any]) -> dict[str, Any]:
+    """A device as the web and the phone see it: the keys stay in the database."""
+    item = {
+        key: value
+        for key, value in device.items()
+        if key not in ("push_auth", "push_key")
+    }
+    item["push"] = bool(device.get("push_endpoint"))
+    item["push_endpoint"] = device.get("push_endpoint") or ""
+    item["last_seen_at"] = _timestamp(device.get("last_seen_at"))
+    item["last_pushed_at"] = _timestamp(device.get("last_pushed_at"))
+    return _serialize_record({**item, "last_seen": device.get("last_seen_at")})
+
+
+@app.post("/api/anticipated/device/register")
+async def anticipated_register_device(
+    payload: RegisterDeviceRequest, request: Request
+) -> dict[str, Any]:
+    """Ask for category questions on this phone, pushed when it has an endpoint."""
+    _require_device(request)
+    if payload.push_key and not valid_keys(payload.push_key, payload.push_auth):
+        raise HTTPException(status_code=422, detail="The push keys are not a P-256 key and a 16-byte secret")
+    database = _database(request)
+    previous = database.get_device(payload.device_id) or {}
+    changed = (
+        payload.push_endpoint != previous.get("push_endpoint", "")
+        or payload.push_key != previous.get("push_key", "")
+    )
+    fields: dict[str, Any] = {
+        "reviews_enabled": payload.reviews_enabled,
+        "push_endpoint": payload.push_endpoint,
+        "push_auth": payload.push_auth,
+        "push_key": payload.push_key,
+        "last_seen_at": datetime.now(UTC).timestamp(),
+    }
+    if payload.device_name:
+        fields["device_name"] = payload.device_name
+    if changed:
+        fields["push_error"] = ""
+    device = database.upsert_device(payload.device_id, **fields)
+    return {"device": _serialize_device(device)}
+
+
+@app.delete("/api/anticipated/device/register")
+async def anticipated_unregister_device(
+    request: Request, device_id: str = Query(default="")
+) -> dict[str, Any]:
+    """The phone no longer wants the questions; they go back through ntfy."""
+    _require_device(request)
+    return {"deleted": _database(request).delete_device(device_id)}
+
+
+def _device_categories(request: Request) -> list[dict[str, Any]]:
+    snapshot = _database(request).get_snapshot(OVERVIEW_SNAPSHOT) or {}
+    return [
+        {
+            "id": category["id"],
+            "name": category["name"],
+            "group_name": category.get("group_name") or "",
+            "is_income": bool(category.get("is_income")),
+        }
+        for category in snapshot.get("categories") or []
+    ]
+
+
+@app.get("/api/anticipated/device/reviews")
+async def anticipated_device_reviews(
+    request: Request, device_id: str = Query(default="")
+) -> dict[str, Any]:
+    """What waits on the person, as the Review tab lists it, with the categories to choose from."""
+    _require_device(request)
+    database = _database(request)
+    settings = _settings_manager(request).get()
+    if device_id and database.get_device(device_id):
+        database.upsert_device(device_id, last_seen_at=datetime.now(UTC).timestamp())
+    aliases = database.alias_map()
+    reviews = []
+    for item in database.list_decisions(status="needs_review", limit=500):
+        record = _review_record(database, item, aliases)
+        rationale = record.get("rationale") or {}
+        reviews.append(
+            {
+                "id": record["id"],
+                "group_key": record.get("group_key") or "",
+                "merchant_key": record.get("merchant_key") or "",
+                "payee_name": record.get("payee_name") or "",
+                "account_name": record.get("account_name") or "",
+                "transaction_date": record.get("transaction_date") or "",
+                "amount_cents": int(record.get("amount_cents") or 0),
+                "category_id": record.get("category_id") or "",
+                "category_name": record.get("category_name") or "",
+                "proposed_category": record.get("proposed_category") or "",
+                "confidence": float(record.get("confidence") or 0),
+                "source": record.get("source") or "",
+                "asking": bool(rationale.get("asking")),
+                "reason": str(rationale.get("reason") or ""),
+                "phone": record.get("phone"),
+                "created_at": record.get("created_at"),
+            }
+        )
+    return {
+        "reviews": reviews,
+        "categories": _device_categories(request),
+        "currency": settings.budget_currency,
+        "review_url": (
+            f"{settings.clerk_public_url}/#intelligence-review" if settings.clerk_public_url else ""
+        ),
+    }
+
+
+@app.post("/api/anticipated/device/reviews/resolve")
+async def anticipated_device_resolve(
+    payload: BulkResolveRequest, request: Request, device_id: str = Query(default="")
+) -> dict[str, Any]:
+    """Answer from the phone: the same resolver the Review tab uses."""
+    _require_device(request)
+    database = _database(request)
+    if device_id and database.get_device(device_id):
+        database.upsert_device(device_id, last_seen_at=datetime.now(UTC).timestamp())
+    return await resolve_reviews(payload, request)
+
+
+@app.delete("/api/anticipated/devices/{device_id}")
+async def anticipated_forget_device(device_id: str, request: Request) -> dict[str, Any]:
+    """From the web: stop sending category questions to this phone."""
+    if not _database(request).delete_device(device_id):
+        raise HTTPException(status_code=404, detail="Device not found")
+    return {"deleted": True}
+
+
 @app.get("/api/anticipated")
 async def anticipated_overview(request: Request) -> dict[str, Any]:
     """Sources, what is still anticipated, and what was settled recently."""
@@ -2038,6 +2190,7 @@ async def anticipated_overview(request: Request) -> dict[str, Any]:
             if not category.get("is_income")
         ],
         "aliases": [_serialize_record(alias) for alias in database.list_aliases()],
+        "devices": [_serialize_device(device) for device in database.list_devices()],
         "budget": _budget_summary(request),
     }
 

@@ -429,3 +429,108 @@ async def test_a_slow_budget_read_does_not_hold_the_phone(client, monkeypatch):
     # The read carries on in the background rather than being cancelled.
     await asyncio.wait_for(finished.wait(), timeout=2)
     assert len((await client.get("/api/anticipated")).json()["open"]) == 1
+
+
+# ------------------------------------------------------- reviews on the phone
+
+KEYS = {
+    "push_endpoint": "https://ntfy.example/upAbc123",
+    "push_key": "BCVxsr7N_eNgVRqvHtD0zTZsEc6-VV-JvLexhqUzORcxaOzi6-AYWXvTBHm4bjyPjs7Vd8pZGH6SRpkNtoIAiw4",
+    "push_auth": "BTBZMqHH6r4Tts7J_aSIgg",
+}
+
+
+async def test_a_phone_registers_for_reviews_and_its_keys_stay_private(client):
+    response = await client.post("/api/anticipated/device/register", json={**DEVICE, **KEYS})
+    assert response.status_code == 200
+    device = response.json()["device"]
+    assert device["push"] is True
+    assert device["push_endpoint"] == KEYS["push_endpoint"]
+    assert "push_key" not in device and "push_auth" not in device
+    # The web sees the same, keys withheld; the hello tells the phone it is registered.
+    listed = (await client.get("/api/anticipated")).json()["devices"]
+    assert [d["device_id"] for d in listed] == ["phone-1"]
+    assert "push_key" not in listed[0]
+    hello = (await client.get("/api/anticipated/device/hello", params={"device_id": "phone-1"})).json()
+    assert hello["device"]["push"] is True
+    assert hello["reviews_waiting"] == 0
+    stored = client.database.get_device("phone-1")
+    assert stored["push_key"] == KEYS["push_key"]
+
+
+async def test_bad_push_keys_are_refused(client):
+    bad = await client.post("/api/anticipated/device/register", json={**DEVICE, **KEYS, "push_key": "nope"})
+    assert bad.status_code == 422
+    half = await client.post("/api/anticipated/device/register", json={**DEVICE, "push_endpoint": KEYS["push_endpoint"], "push_key": KEYS["push_key"]})
+    assert half.status_code == 422
+    plain = await client.post("/api/anticipated/device/register", json={**DEVICE, "push_endpoint": "ftp://x"})
+    assert plain.status_code == 422
+
+
+async def test_a_phone_without_push_can_still_register_to_poll(client):
+    response = await client.post("/api/anticipated/device/register", json=DEVICE)
+    assert response.json()["device"]["push"] is False
+    assert client.database.list_devices(reviews_only=True)[0]["device_id"] == "phone-1"
+    gone = await client.delete("/api/anticipated/device/register", params={"device_id": "phone-1"})
+    assert gone.json() == {"deleted": True}
+    assert client.database.list_devices() == []
+
+
+async def test_a_new_endpoint_clears_an_old_push_error(client):
+    await client.post("/api/anticipated/device/register", json={**DEVICE, **KEYS})
+    client.database.upsert_device("phone-1", push_error="the push endpoint returned 500")
+    await client.post("/api/anticipated/device/register", json={**DEVICE, **KEYS})
+    assert client.database.get_device("phone-1")["push_error"] == "the push endpoint returned 500"
+    await client.post("/api/anticipated/device/register", json={**DEVICE, **KEYS, "push_endpoint": "https://ntfy.example/upNew"})
+    assert client.database.get_device("phone-1")["push_error"] == ""
+
+
+async def test_the_phone_reads_the_queue_and_answers_through_the_same_resolver(client, gateway):
+    seed_overview(client.database)
+    seed_categories(client.database)
+    await register(client)
+    charge = (await client.post("/api/anticipated/device/notifications", json=notification("Your purchase for $3.19 at Valve was approved."))).json()["charge"]
+    client.database.add_decision({
+        "transaction_id": f"phone:{charge['id']}", "anticipated_id": charge["id"], "payee_name": "Valve",
+        "merchant_key": "valve", "amount_cents": -319, "source": "model", "status": "needs_review",
+        "category_id": "cat-games", "category_name": "Games", "confidence": 0.8, "rationale": {"reason": "A shop."},
+    })
+    client.database.add_decision({
+        "transaction_id": "txn-bank", "payee_name": "Steam", "merchant_key": "steam", "amount_cents": -2000,
+        "account_name": "Venture", "transaction_date": "2026-08-20", "source": "unresolved", "status": "needs_review",
+        "rationale": {"asking": True},
+    })
+    client.database.upsert_alias("valve", "steam", source="taught")
+    body = (await client.get("/api/anticipated/device/reviews", params={"device_id": "phone-1"})).json()
+    assert body["currency"] == "USD"
+    assert [c["id"] for c in body["categories"]] == ["cat-games", "cat-pay"]
+    by_key = {item["merchant_key"]: item for item in body["reviews"]}
+    assert by_key["valve"]["group_key"] == "steam" and by_key["steam"]["group_key"] == "steam"
+    assert by_key["valve"]["phone"]["merchant"] == "Valve"
+    assert by_key["valve"]["category_name"] == "Games" and by_key["valve"]["asking"] is False
+    assert by_key["steam"]["asking"] is True
+    assert "rationale" not in by_key["valve"]
+
+    answered = await client.post(
+        "/api/anticipated/device/reviews/resolve",
+        params={"device_id": "phone-1"},
+        json={"ids": [by_key["valve"]["id"], by_key["steam"]["id"]], "action": "recategorize", "category_id": "cat-games", "always": True},
+    )
+    assert answered.json() == {"status": "applied", "resolved": 2, "skipped": 0, "rules": 2}
+    # The bank row went to Actual; the phone charge is answered in Clerk until its row arrives.
+    assert gateway.updates == [{"transaction_id": "txn-bank", "category_id": "cat-games", "add_tags": ["clerk"]}]
+    assert client.database.get_anticipated_charge(charge["id"])["category_id"] == "cat-games"
+    assert (await client.get("/api/anticipated/device/reviews")).json()["reviews"] == []
+
+
+async def test_the_phone_review_endpoints_are_behind_the_device_token(client):
+    client.settings_manager.update({"anticipated_device_token": "s3cret"})
+    assert (await client.get("/api/anticipated/device/reviews")).status_code == 401
+    assert (await client.post("/api/anticipated/device/register", json=DEVICE)).status_code == 401
+    assert (await client.post("/api/anticipated/device/reviews/resolve", json={"ids": ["x"], "action": "dismiss"})).status_code == 401
+
+
+async def test_the_web_can_forget_a_phone(client):
+    await client.post("/api/anticipated/device/register", json=DEVICE)
+    assert (await client.delete("/api/anticipated/devices/phone-1")).json() == {"deleted": True}
+    assert (await client.delete("/api/anticipated/devices/phone-1")).status_code == 404

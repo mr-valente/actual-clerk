@@ -1413,9 +1413,24 @@ function sourceRow(source, accounts) {
   </article>`;
 }
 
+// A phone that takes the category questions itself. Pushed when its push app
+// issued an address; otherwise it looks on its own every quarter hour.
+function deviceRow(device) {
+  const how = device.push
+    ? `pushed the moment a question arises${device.last_pushed_at ? ` · last pushed ${escapeHtml(relativeTime(device.last_pushed_at))}` : ""}`
+    : "checks every 15 minutes (no push app on the phone)";
+  const trouble = device.push_error ? ` · last push failed: ${escapeHtml(device.push_error)}` : "";
+  return `<article class="data-row" style="grid-template-columns:30px minmax(0,1fr) auto">
+    <span class="dot ${device.reviews_enabled ? (device.push_error ? "warning" : "ok") : "muted"}"></span>
+    <div class="row-title"><strong>${escapeHtml(device.device_name || device.device_id)}</strong><small>${device.reviews_enabled ? `Category questions go to this phone: ${how}${trouble}` : "Category questions turned off on the phone; they go through ntfy"}${device.last_seen ? ` · last seen ${escapeHtml(relativeTime(device.last_seen))}` : ""}</small></div>
+    <div class="row-actions"><button class="button ghost small" data-action="anticipated-device-forget" data-id="${escapeHtml(device.device_id)}" data-name="${escapeHtml(device.device_name || device.device_id)}" title="Clerk forgets this phone; the questions go back through ntfy until the phone turns them on again">Forget</button></div>
+  </article>`;
+}
+
 function phonePanel(phone) {
   if (!phone) return "";
   const sources = phone.sources || [];
+  const devices = phone.devices || [];
   const open = phone.open || [];
   const recent = (phone.recent || []).slice(0, 8);
   const accounts = phone.accounts || [];
@@ -1428,6 +1443,8 @@ function phonePanel(phone) {
     <div class="status-list">${sources.length
       ? sources.map((source) => sourceRow(source, accounts)).join("")
       : emptyState("📱", "No phone sources yet", "Install the Actual Clerk phone app, point it at this server, and use Register a source to pick the card app's notification.")}</div>
+    <header class="panel-head" style="margin-top:12px"><div><h3>Category questions on the phone</h3><p>A phone that turned this on in the app is told itself when something needs a category, instead of the ntfy message, and answers from a review screen of its own. Everything else Clerk sends still goes through ntfy.</p></div></header>
+    <div class="status-list">${devices.length ? devices.map(deviceRow).join("") : emptyState("🔔", "No phone has asked for the questions", "In the phone app, turn on Category questions. With the ntfy app installed they are pushed instantly; without it the phone checks every 15 minutes.")}</div>
     ${open.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Waiting for the bank</h3><p>Counted as spent now: against its category when a rule, your history, or your answer in Review gives one, and as uncategorized otherwise. Each settles against the matching transaction when it is imported, and that row is filed the same way.</p></div></header><div class="status-list">${open.map((item) => anticipatedChargeRow(item, { sources, aliases })).join("")}</div>` : ""}
     ${recent.length ? `<header class="panel-head" style="margin-top:12px"><div><h3>Recently settled</h3><p>What the last notifications became.</p></div></header><div class="status-list">${recent.map((item) => anticipatedChargeRow(item, { sources })).join("")}</div>` : ""}
     ${aliases.length ? `<p class="muted" style="margin:12px 20px;font-size:11px">${aliases.length} merchant alias${aliases.length === 1 ? "" : "es"} known · <a href="#intelligence">manage them under Intelligence</a></p>` : ""}
@@ -2159,7 +2176,7 @@ async function renderSettings() {
         <section class="panel settings-section" id="settings-notifications"><header class="panel-head"><div><h3>Notifications</h3><p class="section-description">ntfy delivers the morning digest, connection alerts, and a note when something needs a category.</p></div><button class="button ghost small" type="button" data-action="test-connection" data-target="notifications">Send test</button></header><div class="panel-body">
           ${settingToggle("notifications_enabled", "Enable ntfy notifications", "Without this, Clerk still builds the digest and shows it on the overview.", s.notifications_enabled)}
           ${settingToggle("health_alerts_enabled", "Alert when a bank connection changes", "One message when a connection breaks and one when it recovers, never a repeat every hour.", s.health_alerts_enabled)}
-          ${settingToggle("review_alerts_enabled", "Alert when something needs a category", "Each phone charge Clerk cannot place, as it arrives, and one message per scheduled filing run for bank rows. Nothing for runs you start yourself.", s.review_alerts_enabled)}
+          ${settingToggle("review_alerts_enabled", "Alert when something needs a category", "Each phone charge Clerk cannot place, as it arrives, and one message per scheduled filing run for bank rows. Nothing for runs you start yourself. When the phone app has Category questions turned on, these go to the phone instead of ntfy, whatever this switch says.", s.review_alerts_enabled)}
           <div class="form-grid">
             ${settingInput("ntfy_url", "ntfy server URL", s.ntfy_url, { full: true, note: "Use https://ntfy.sh unless you run your own." })}
             ${settingInput("ntfy_topic", "Topic", s.ntfy_topic, { full: true, note: "Pick something hard to guess: anyone who knows the topic can read it." })}
@@ -2515,6 +2532,15 @@ document.addEventListener("click", async (event) => {
       toast("Source removed", "The phone will need to register it again to forward from it.");
       await renderRoute({ quiet: true });
     } catch (error) { toast("Could not remove the source", error.message, "error"); }
+  }
+  if (action === "anticipated-device-forget") {
+    event.stopPropagation();
+    if (!window.confirm(`Forget ${target.dataset.name}? Category questions go back through ntfy until the phone turns them on again.`)) return;
+    try {
+      await api(`/api/anticipated/devices/${encodeURIComponent(target.dataset.id)}`, { method: "DELETE" });
+      toast("Phone forgotten", "Category questions go through ntfy again.");
+      await renderRoute({ quiet: true });
+    } catch (error) { toast("Could not forget the phone", error.message, "error"); }
   }
   if (action === "job-detail") showJob(target.dataset.id);
   if (action === "review-detail") showDecision(target.dataset.id);
