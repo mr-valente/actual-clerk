@@ -97,6 +97,17 @@ differently named payee is an alias the user curated without calling it
 one. Only unambiguous pairs are read, and the table never chains: an alias
 points at a merchant, never at another alias.
 
+A refund skips the merchant question altogether (`domain/refunds.py`). Money
+coming back on the same account, from the same shop (by key, alias, or the
+same words), for exactly the amount of a charge filed in the last 60 days is
+filed under that charge's category, at confidence 1.0 and under `apply_mode`
+like history. The budget only cancels a charge and its refund when they share
+a category, so this is what makes a reversed charge, a duplicate taken back,
+or a full return disappear from spending instead of leaving one category
+overspent and the refund showing as money returned from an earlier month.
+Identical charges filed different ways decide nothing, and a partial refund
+names no charge; both go through the cascade as usual.
+
 ### Proposals
 
 The cascade runs in reverse too. When Clerk has filed the same merchant the

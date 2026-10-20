@@ -59,7 +59,7 @@ Unspent budget carries forward to its own category for up to a year, so a variab
 
 A purchase counts in the month you made it, not the month the bank posted it: rows from Plaid are dated by the card's authorisation date, and a charge your phone saw is dated by the phone. **Reports** shows every month since you started budgeting — what it had to spend, what it spent, what was saved or overspent — with a chart of the trend. A month that has just ended is marked *settling* for a week (or while a phone charge from it is still waiting on the bank), because late-posting purchases still land in it; after that it is *final*.
 
-A refund settles against the month that paid for the purchase. Return something you bought this month and the two cancel; when the purchase belongs to a month already reported, that report stands and the money comes back as yours to spend now — never as spending pushed below zero, which is how a budget ends up claiming you have more than a whole month left.
+A refund settles against the month that paid for the purchase, and a refund for exactly a recent charge at the same shop is filed under that charge's category, so a reversed or returned purchase leaves its category where it started. Return something you bought this month and the two cancel; when the purchase belongs to a month already reported, that report stands and the money comes back as yours to spend now — never as spending pushed below zero, which is how a budget ends up claiming you have more than a whole month left.
 
 ### Counts a card charge the moment it happens
 

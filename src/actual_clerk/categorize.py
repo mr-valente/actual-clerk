@@ -14,6 +14,10 @@ that fails:
 4. **Review.** Anything the first three cannot settle confidently is queued for
    a human instead of guessed at.
 
+Ahead of all four, a refund for exactly a filed charge from the same shop
+takes that charge's category (`domain.refunds`): where it belongs is a fact
+about the purchase it undoes, not a question about the merchant.
+
 Rules and memory are read through one resolver (`domain.intelligence`), which
 anticipated charges share. The reverse direction exists too: a merchant Clerk
 has filed the same way several times becomes a *proposal* to make a rule, so
@@ -33,6 +37,7 @@ from actual_clerk.config import Settings
 from actual_clerk.domain import tagging
 from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, alias_candidates, resolve
 from actual_clerk.domain.memory import MerchantMemory, similar_examples
+from actual_clerk.domain.refunds import refunded_charge
 from actual_clerk.prompts import (
     ALIAS_SYSTEM_PROMPT,
     SYSTEM_PROMPT,
@@ -51,6 +56,7 @@ ALIAS_MIN_CONFIDENCE = 0.7
 
 SOURCE_MEMORY = "memory"
 SOURCE_MODEL = "model"
+SOURCE_REFUND = "refund"
 # SOURCE_RULE is defined with the resolver and re-exported here for callers.
 SOURCE_UNRESOLVED = "unresolved"
 
@@ -327,7 +333,27 @@ class Categorizer:
             if item.get("category_id") and item.get("merchant_key")
         ]
 
-        grouped = group_by_merchant(targets)
+        # A refund of a filed charge is settled by that charge, before the
+        # merchant is asked about at all.
+        refunded: dict[str, Mapping[str, Any]] = {}
+        for target in targets:
+            charge = refunded_charge(target, snapshot["transactions"], aliases=aliases)
+            if charge is not None and charge["category_id"] in candidate_ids:
+                refunded[target["id"]] = charge
+        for target in targets:
+            charge = refunded.get(target["id"])
+            if charge is not None:
+                result.proposals.append(
+                    self._build_proposal(
+                        target,
+                        resolution=self._refund_resolution(charge, names),
+                        stats=stats.get(target.get("merchant_key", "")),
+                    )
+                )
+
+        grouped = group_by_merchant(
+            [target for target in targets if target["id"] not in refunded]
+        )
         result.merchants_seen = len(grouped)
 
         for merchant_key, items in grouped.items():
@@ -588,6 +614,27 @@ class Categorizer:
                 "reason": choice.reason,
             }
         )
+
+    @staticmethod
+    def _refund_resolution(charge: Mapping[str, Any], names: Mapping[str, str]) -> dict[str, Any]:
+        return {
+            "source": SOURCE_REFUND,
+            "category_id": charge["category_id"],
+            "category_name": names.get(charge["category_id"], ""),
+            "confidence": 1.0,
+            # As certain as the charge's own filing, and held to the apply
+            # mode the same way history is.
+            "automatic_eligible": True,
+            "rationale": {
+                "reason": "It gives back a charge filed here.",
+                "refunds": {
+                    "transaction_id": charge.get("id", ""),
+                    "date": charge["date"].isoformat(),
+                    "payee_name": charge.get("payee_name") or charge.get("merchant_label", ""),
+                    "amount_cents": charge.get("amount_cents", 0),
+                },
+            },
+        }
 
     @staticmethod
     def _unresolved(reason: str) -> dict[str, Any]:

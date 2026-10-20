@@ -367,7 +367,7 @@ const DECISION_STATUS_LABEL = {
 
 function decisionRow(item) {
   return `<article class="data-row decision-row clickable" data-action="review-detail" data-id="${escapeHtml(item.id)}">
-    <span class="mark ${escapeHtml(item.source)}">${item.anticipated_id ? "📱" : { rule: "⚡", memory: "↺", model: "✦", unresolved: "?", person: "✓", pending: "⇢" }[item.source] || "•"}</span>
+    <span class="mark ${escapeHtml(item.source)}">${item.anticipated_id ? "📱" : { rule: "⚡", memory: "↺", model: "✦", unresolved: "?", person: "✓", pending: "⇢", refund: "↩" }[item.source] || "•"}</span>
     <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${item.anticipated_id ? "Phone charge · " : ""}${shortDate(item.transaction_date)} · <span class="money">${money(item.amount_cents)}</span>${item.account_name ? ` · ${escapeHtml(item.account_name)}` : ""}</small></div>
     <div class="row-meta"><strong>${escapeHtml(item.category_name || item.proposed_category || "—")}</strong><br /><span>${escapeHtml(sourceLabel(item.source))} · ${percent(item.confidence)}</span></div>
     <div>${item.observed === "corrected" || item.observed === "cleared" ? statusChip("warning", "Changed") : statusChip(item.status, DECISION_STATUS_LABEL[item.status])}</div>
@@ -715,7 +715,7 @@ async function renderReports({ poll = false } = {}) {
 }
 
 // Who decided, in words a person uses.
-const SOURCE_LABEL = { rule: "Rule", memory: "History", model: "Model", unresolved: "No suggestion", person: "You", pending: "Pending charge" };
+const SOURCE_LABEL = { rule: "Rule", memory: "History", model: "Model", unresolved: "No suggestion", person: "You", pending: "Pending charge", refund: "Its charge" };
 function sourceLabel(source) { return SOURCE_LABEL[source] || titleCase(source || ""); }
 
 // A backlog is made of merchants, not transactions: the same coffee shop can
@@ -846,7 +846,7 @@ function reviewGroupRow(group, { skipped = false } = {}) {
 
 function recentRow(item) {
   const current = item.observed === "corrected" ? item.observed_category_id : item.category_id;
-  const how = { rule: "by a rule", memory: "from history", model: "on the model's suggestion, approved by you", person: "as you chose for the phone charge", pending: "as its withdrawn pending charge was", unresolved: "by you" }[item.source] || "";
+  const how = { rule: "by a rule", memory: "from history", model: "on the model's suggestion, approved by you", person: "as you chose for the phone charge", pending: "as its withdrawn pending charge was", refund: "as the charge it refunds was", unresolved: "by you" }[item.source] || "";
   return `<article class="data-row review-row">
     <div class="row-title"><strong>${escapeHtml(item.payee_name || item.merchant_key || "Transaction")}</strong><small>${[shortDate(item.transaction_date), escapeHtml(item.account_name || ""), `filed ${escapeHtml(how)} ${relativeTime(item.created_at)}`].filter(Boolean).join(" · ")}</small></div>
     <div class="row-amount money">${money(item.amount_cents)}</div>
@@ -1663,6 +1663,7 @@ async function showDecision(id) {
         ${item.status === "skipped" ? `<button class="button secondary" data-action="review-restore" data-id="${escapeHtml(item.id)}">Ask me again</button>` : ""}
       </div>
       ${item.observed && item.observed !== "standing" ? `<section class="detail-section"><h3>Seen in Actual afterwards</h3><div class="change-list"><div class="change"><i>${item.observed === "corrected" ? "✎" : "×"}</i><div><strong>${item.observed === "corrected" ? `Moved by hand to ${escapeHtml(item.observed_category_name || item.observed_category_id)}` : item.observed === "cleared" ? "Category cleared by hand" : "The transaction is gone or became a transfer"}</strong><small>Noticed ${escapeHtml(relativeTime(item.observed_at))}.${item.observed === "corrected" ? " Counted as a correction in memory" + (item.source === "rule" ? ", and as a dispute against the rule." : ".") : ""}</small></div></div></div></section>` : ""}
+      ${rationale.refunds ? `<section class="detail-section"><h3>Refund</h3><div class="change-list"><div class="change"><i>↩</i><div><strong>Gives back ${money(-(rationale.refunds.amount_cents || 0))} charged ${escapeHtml(shortDate(rationale.refunds.date))}${rationale.refunds.payee_name ? ` at ${escapeHtml(rationale.refunds.payee_name)}` : ""}</strong><small>Filed where that charge was, so the two cancel in the budget.</small></div></div></div></section>` : ""}
       ${rationale.rule ? `<section class="detail-section"><h3>Rule</h3><div class="change-list"><div class="change"><i>⚡</i><div><strong>Filed by a rule you set${rationale.rule.account_id ? " for this account" : ""}</strong><small>Matches “${escapeHtml(rationale.matched_key || rationale.rule.merchant_key)}”${rationale.rule.match === "family" ? " and its store variants" : ""}${rationale.alias ? `, reached through the alias “${escapeHtml(rationale.alias)}”` : ""}. <a href="#intelligence">Manage rules</a></small></div></div></div></section>` : ""}
       ${memory ? `<section class="detail-section"><h3>Memory evidence</h3><div class="change-list"><div class="change"><i>↺</i><div><strong>${memory.observations} prior sighting(s), ${percent(memory.share)} agreement</strong><small>Matched on “${escapeHtml(memory.matched_key)}”${memory.exact ? "" : " by merchant prefix"}. Confidence ${percent(memory.confidence)}.</small></div></div>${evidence.map((entry) => `<div class="change"><i>·</i><div><strong>${escapeHtml(entry.category_name || entry.category_id)}</strong><small>${percent(entry.share)} of this merchant's history · ${entry.sightings} sighting(s)</small></div></div>`).join("")}</div></section>` : ""}
       ${(rationale.examples || []).length ? `<section class="detail-section"><h3>Examples given to the model</h3><p class="muted" style="font-size:10px">${escapeHtml(rationale.examples.filter(Boolean).join(", "))}</p></section>` : ""}
