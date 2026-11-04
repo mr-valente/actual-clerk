@@ -126,6 +126,11 @@ class Settings(BaseModel):
     # the rule should change.
     memory_learn_from_actual: bool = True
     memory_dispute_threshold: int = Field(default=2, ge=1, le=20)
+    # Categories the user files by hand and nothing else: never offered to the
+    # model, never learned from, and a row moved into one is not a correction.
+    # For money that is expected back -- a Reimbursable category -- where the
+    # merchant says nothing about where the next charge from it belongs.
+    protected_categories: list[str] = Field(default_factory=list)
 
     # --- Tagging ----------------------------------------------------------
     tagging_enabled: bool = True
@@ -245,16 +250,16 @@ class Settings(BaseModel):
             raise ValueError("the Clerk tag may not contain spaces")
         return value
 
-    @field_validator("committed_groups", mode="before")
+    @field_validator("committed_groups", "protected_categories", mode="before")
     @classmethod
-    def split_groups(cls, value: Any) -> Any:
+    def split_names(cls, value: Any) -> Any:
         if isinstance(value, str):
             return [part.strip() for part in value.split(",") if part.strip()]
         return value
 
-    @field_validator("committed_groups")
+    @field_validator("committed_groups", "protected_categories")
     @classmethod
-    def normalize_groups(cls, value: list[str]) -> list[str]:
+    def normalize_names(cls, value: list[str]) -> list[str]:
         seen: dict[str, str] = {}
         for item in value:
             name = " ".join(str(item).split())
@@ -456,6 +461,7 @@ ENVIRONMENT_FIELDS = {
     "CLERK_RULE_PROMOTE_AFTER": "rule_promote_after",
     "CLERK_MEMORY_LEARN_FROM_ACTUAL": "memory_learn_from_actual",
     "CLERK_MEMORY_DISPUTE_THRESHOLD": "memory_dispute_threshold",
+    "CLERK_PROTECTED_CATEGORIES": "protected_categories",
     "CLERK_TAGGING_ENABLED": "tagging_enabled",
     "CLERK_TAG": "clerk_tag",
     "CLERK_TAG_PROVENANCE": "tag_provenance",

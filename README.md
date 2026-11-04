@@ -61,6 +61,8 @@ A purchase counts in the month you made it, not the month the bank posted it: ro
 
 A refund settles against the month that paid for the purchase, and a refund for exactly a recent charge at the same shop is filed under that charge's category, so a reversed or returned purchase leaves its category where it started. Return something you bought this month and the two cancel; when the purchase belongs to a month already reported, that report stands and the money comes back as yours to spend now — never as spending pushed below zero, which is how a budget ends up claiming you have more than a whole month left.
 
+Money you expect back works the same way. File the purchase and the repayment in one unbudgeted category you keep by hand, such as *Reimbursable*: the two net within the month, a repayment that arrives later comes back as money to spend then, and whatever is never repaid stays as what fronting it cost you.
+
 ### Counts a card charge the moment it happens
 
 Some card feeds are slow by design: a purchase made this morning reaches Actual a day or three later, and some issuers never expose it as pending at all. The card's own phone app, though, announces the charge instantly. A small Android companion app forwards those notifications to Clerk, which counts each as an **anticipated charge**: spent as far as the budget is concerned, held in Clerk's own ledger, and never written into Actual. Each charge goes through the same filing cascade as a bank row: a merchant a rule or your history already knows is categorized on the spot, so an anticipated bill draws on its own budget rather than on free money; an unknown one is asked about in Review with the model's suggestion (and an ntfy message, or a notification from the phone app itself once you turn its *Category questions* on: tap it, pick the category, done), and counts as uncategorized until you answer. Whatever you decide carries over to the bank's row, so each purchase is decided once. When the bank's transaction arrives through the ordinary feed, Clerk settles the anticipation against it and the real row takes over; one that never posts stops counting after two weeks. [How it works and how to build the app](docs/anticipated-charges.md).
@@ -189,6 +191,7 @@ Clerk is deliberately conservative:
 - **It never makes a rule without asking.** Rules are yours; Clerk only proposes them.
 - **It never auto-files a first-time merchant.** Model confidence is useful for ranking a proposal, not for granting permission to write it.
 - **It never touches a transaction it is unsure about.** Below the confidence threshold, the proposal goes to the review queue instead of into your budget.
+- **It never learns from a category you keep by hand.** Name one under **Settings → Filing → Categories you file by hand** and Clerk neither suggests it nor draws conclusions from what you file there, so a *Reimbursable* category never teaches it that your grocery store is reimbursable.
 - **Everything it does is reversible from inside Actual**, because everything it touches carries the `#clerk` tag.
 
 Set **Settings → Filing → For merchants Clerk already knows** to *Propose every category for review* if you would rather approve established merchants too. First-time merchants always require approval.
@@ -256,6 +259,7 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_RULE_PROMOTE_AFTER` | `3` | Consistent decisions before proposing |
 | `CLERK_MEMORY_LEARN_FROM_ACTUAL` | `true` | Read categories changed by hand in Actual as corrections |
 | `CLERK_MEMORY_DISPUTE_THRESHOLD` | `2` | Corrections against a rule before Clerk asks to change it |
+| `CLERK_PROTECTED_CATEGORIES` | — | Comma-separated categories you file by hand: never suggested, never learned from, no rule made for them |
 
 ### Tags
 

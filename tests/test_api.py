@@ -1841,3 +1841,73 @@ async def test_reopening_a_wrong_match_puts_the_bank_s_date_back(client, gateway
     written.clear()
     await client.post(f"/api/anticipated/charges/{charge['id']}/reopen")
     assert written == []
+
+
+# ------------------------------------------------------- protected categories
+
+
+def protected_budget(client):
+    client.settings_manager.update({"protected_categories": "Reimbursable"})
+    client.database.set_snapshot(OVERVIEW_SNAPSHOT, {"categories": [
+        {"id": "cat-coffee", "name": "Coffee", "group_name": "Food"},
+        {"id": "cat-reimbursable", "name": "Reimbursable", "group_name": "Float"},
+    ]})
+
+
+async def test_filing_a_review_into_a_protected_category_is_not_learned_and_makes_no_rule(client, gateway):
+    protected_budget(client)
+    client.database.add_decision(decision())
+    [review] = (await client.get("/api/reviews")).json()
+
+    refused = await client.post(
+        f"/api/reviews/{review['id']}/resolve",
+        json={"action": "recategorize", "category_id": "cat-reimbursable", "always": True},
+    )
+    assert refused.status_code == 422
+    assert "Reimbursable" in refused.json()["detail"]
+    assert gateway.updates == []
+    assert client.database.get_decision(review["id"])["status"] == "needs_review"
+
+    response = await client.post(
+        f"/api/reviews/{review['id']}/resolve",
+        json={"action": "recategorize", "category_id": "cat-reimbursable"},
+    )
+    assert response.json()["status"] == "applied"
+    assert gateway.updates[0]["category_id"] == "cat-reimbursable"
+    assert client.database.memory_for("blue bottle") == []
+    assert client.database.active_rules() == []
+
+
+async def test_a_batch_cannot_make_a_rule_into_a_protected_category(client, gateway):
+    protected_budget(client)
+    first = client.database.add_decision(decision(transaction_id="txn-1"))
+    second = client.database.add_decision(decision(transaction_id="txn-2"))
+    refused = await client.post(
+        "/api/reviews/resolve",
+        json={"ids": [first, second], "action": "recategorize", "category_id": "cat-reimbursable", "always": True},
+    )
+    assert refused.status_code == 422
+    assert gateway.updates == []
+    assert {d["status"] for d in client.database.list_decisions()} == {"needs_review"}
+
+    response = await client.post(
+        "/api/reviews/resolve",
+        json={"ids": [first, second], "action": "recategorize", "category_id": "cat-reimbursable"},
+    )
+    assert response.json()["resolved"] == 2
+    assert client.database.memory_for("blue bottle") == []
+
+
+async def test_moving_a_filing_into_a_protected_category_is_not_learned(client, gateway):
+    protected_budget(client)
+    rule = client.database.upsert_rule(merchant_key="blue bottle", category_id="cat-coffee", category_name="Coffee")
+    decision_id = client.database.add_decision(decision(
+        status="applied", source="rule", rationale={"rule": {"id": rule["id"]}},
+    ))
+    response = await client.post(f"/api/decisions/{decision_id}/change", json={"category_id": "cat-reimbursable"})
+    assert response.json()["status"] == "changed"
+    assert gateway.updates == [{"transaction_id": "txn-1", "category_id": "cat-reimbursable"}]
+    stored = client.database.get_decision(decision_id)
+    assert (stored["observed"], stored["observed_category_id"]) == ("corrected", "cat-reimbursable")
+    assert client.database.memory_for("blue bottle") == []
+    assert client.database.get_rule(rule["id"])["disputed_count"] == 0

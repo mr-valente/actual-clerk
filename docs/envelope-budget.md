@@ -237,4 +237,6 @@ Tell Clerk which groups are bills: **Settings → Budget report → Committed ca
 
 **One of my accounts is a credit card.** Card spending is on-budget and counts normally. Paying the card is a transfer between your own accounts, and transfers are ignored, so nothing counts twice.
 
+**I paid for something other people will pay me back for.** Make an unbudgeted category such as *Reimbursable*, outside any committed group, and file both the purchase and the repayment there, never as income. Clerk nets money coming back against that category's spending for the month; a repayment that arrives in a later month comes back as *Refunded from earlier months*, and whatever is never repaid stays as spending. Name the category under **Settings → Filing → Categories you file by hand** so Clerk never learns that the grocery store belongs there.
+
 **An annual bill is too large to accrue in twelve months.** It is an irregular purchase rather than a recurring bill. Budget it in the month it falls due and accept that the month has less free money.

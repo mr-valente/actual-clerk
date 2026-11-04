@@ -11,7 +11,7 @@ from actual_clerk.clients.actual import ActualGatewayError
 from actual_clerk.clients.simplefin import SimpleFinError
 from actual_clerk.processing import OVERVIEW_SNAPSHOT, JobManager, digest_is_due
 
-from .factories import account, snapshot, transaction
+from .factories import account, category, snapshot, transaction
 
 # The jobs read the clock themselves, so the fixtures are dated from it too:
 # a fixed date drifts out of the filing window as the calendar moves on.
@@ -1559,3 +1559,42 @@ async def test_a_nudge_reaches_every_pushed_phone(manager, database, pushes):
     database.upsert_device("phone-3", reviews_enabled=False)
     assert await manager.push_devices({"event": "sync"}) == 2
     assert sorted(device for device, _ in pushes) == ["phone-1", "phone-2"]
+
+
+# ------------------------------------------------------- protected categories
+
+
+async def test_a_move_into_a_protected_category_teaches_nothing_and_disputes_no_rule(manager, settings_manager):
+    settings_manager.update({"ai_enabled": False, "memory_dispute_threshold": 1, "protected_categories": "Reimbursable"})
+    manager.gateway.snap["categories"].append(category("Reimbursable", "Float"))
+    rule = manager.database.upsert_rule(merchant_key="blue bottle coffee", category_id="cat-coffee", category_name="Coffee")
+    # A row the rule filed, which the user has since moved to Reimbursable in Actual.
+    manager.gateway.snap["transactions"].append(
+        transaction(TODAY - datetime.timedelta(days=1), -700, payee="Blue Bottle Coffee", category_id="cat-reimbursable", category_name="Reimbursable", transaction_id="txn-moved")
+    )
+    manager.database.add_decision({
+        "transaction_id": "txn-moved", "merchant_key": "blue bottle coffee", "payee_name": "Blue Bottle Coffee",
+        "transaction_date": (TODAY - datetime.timedelta(days=1)).isoformat(), "source": "rule", "status": "applied",
+        "category_id": "cat-coffee", "category_name": "Coffee", "confidence": 1.0,
+        "rationale": {"rule": {"id": rule["id"]}},
+    })
+    job = await run_job(manager, "categorize")
+    assert job["result"]["corrections"] == 1
+    assert job["result"]["disputes"] == 0
+    assert manager.database.memory_for("blue bottle coffee") == []
+    assert manager.database.get_rule(rule["id"])["disputed_count"] == 0
+    assert manager.database.list_proposals() == []
+    # Settled: the next run does not read the move again.
+    [recorded] = [d for d in manager.database.list_decisions() if d["transaction_id"] == "txn-moved"]
+    assert recorded["observed"] == "corrected"
+    again = await run_job(manager, "categorize")
+    assert again["result"]["corrections"] == 0
+
+
+async def test_a_history_run_proposes_no_rule_into_a_protected_category(manager, settings_manager):
+    settings_manager.update({"ai_enabled": False, "rule_promote_after": 3, "protected_categories": "Coffee"})
+    job = await run_job(manager, "categorize", {"propose_rules": True})
+    assert job["result"]["history_proposals"] == 0
+    assert manager.database.list_proposals() == []
+    # And the three Coffee filings are not evidence either: the new row waits.
+    assert job["result"]["needs_review"] == 1

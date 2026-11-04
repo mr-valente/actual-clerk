@@ -15,9 +15,9 @@ from actual_clerk.categorize import (
     select_targets,
 )
 from actual_clerk.clients.openai_compatible import ModelError
-from actual_clerk.domain.intelligence import RuleBook
+from actual_clerk.domain.intelligence import RuleBook, protected_category_ids
 
-from .factories import FakeModel, account, category, snapshot, transaction
+from .factories import FakeModel, account, category, default_categories, snapshot, transaction
 
 TODAY = datetime.date(2026, 8, 21)
 
@@ -718,3 +718,74 @@ async def test_a_review_the_model_did_answer_is_not_asked_again(settings):
     result = await run(settings, snapshot(transactions=[transaction(TODAY, -1999, payee="Brand New Shop")]), model=model)
     [proposal] = result.review
     assert UNASKED not in proposal.rationale
+
+
+# ------------------------------------------------------- protected categories
+
+
+def reimbursable_budget(transactions):
+    return snapshot(
+        categories=[*default_categories(), category("Reimbursable", "Float")],
+        transactions=transactions,
+    )
+
+
+def fronted_coffee(count=4):
+    """Blue Bottle filed under Reimbursable, by hand, several times."""
+    return [
+        transaction(
+            TODAY - datetime.timedelta(days=20 * index + 5),
+            -650,
+            payee="Blue Bottle Coffee",
+            description="SQ *BLUE BOTTLE COFFEE 4471",
+            category_id="cat-reimbursable",
+            category_name="Reimbursable",
+        )
+        for index in range(count)
+    ]
+
+
+def test_protected_categories_are_matched_by_name_and_never_offered(settings):
+    snap = reimbursable_budget([])
+    protected = protected_category_ids(snap["categories"], ["  reimbursable ", "Nothing Here"])
+    assert protected == {"cat-reimbursable"}
+    assert protected_category_ids(snap["categories"], []) == set()
+    offered = {item["id"] for item in candidate_categories(snap, limit=20, exclude=protected)}
+    assert "cat-reimbursable" not in offered
+    assert "cat-coffee" in offered
+
+
+async def test_filings_in_a_protected_category_teach_nothing_about_the_merchant(settings):
+    answer = {"category_number": 1, "confidence": 0.9, "reason": "ok", "suggested_new_category": ""}
+
+    # Unprotected, four hand filings are reliable history: filed on sight.
+    control = await run(settings, reimbursable_budget(fronted_coffee() + pending_coffee()), model=FakeModel([answer]))
+    assert [item.category_id for item in control.applied] == ["cat-reimbursable"]
+
+    settings.protected_categories = ["Reimbursable"]
+    model = FakeModel([answer])
+    result = await run(settings, reimbursable_budget(fronted_coffee() + pending_coffee()), model=model)
+    # The merchant is unknown again, so the model is asked -- without the
+    # category in its list or those filings among its examples.
+    assert len(model.calls) == 1
+    assert "Reimbursable" not in model.calls[0]["user"]
+    assert result.applied == []
+    [proposal] = result.review
+    assert proposal.category_id != "cat-reimbursable"
+
+
+async def test_a_refund_of_a_charge_filed_by_hand_still_follows_its_charge(settings):
+    settings.protected_categories = ["Reimbursable"]
+    bought = transaction(TODAY - datetime.timedelta(days=3), -15000, payee="Kroger", category_id="cat-reimbursable", category_name="Reimbursable")
+    back = transaction(TODAY, 15000, payee="Kroger")
+    result = await run(settings, reimbursable_budget([bought, back]), model=FakeModel())
+    [proposal] = result.proposals
+    assert (proposal.source, proposal.category_id) == ("refund", "cat-reimbursable")
+
+
+async def test_a_rule_the_user_wrote_for_a_protected_category_still_files(settings):
+    settings.protected_categories = ["Reimbursable"]
+    rules = RuleBook.from_rows([{"id": "r1", "merchant_key": "blue bottle coffee", "category_id": "cat-reimbursable", "category_name": "Reimbursable"}])
+    result = await run(settings, reimbursable_budget(pending_coffee()), rules=rules)
+    [item] = result.proposals
+    assert (item.status, item.source, item.category_id) == ("applied", "rule", "cat-reimbursable")

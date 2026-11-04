@@ -38,7 +38,13 @@ from actual_clerk.domain.anticipated import (
     parse_notification,
     same_merchant,
 )
-from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, canonical_key, resolve
+from actual_clerk.domain.intelligence import (
+    SOURCE_RULE,
+    RuleBook,
+    canonical_key,
+    protected_category_ids,
+    resolve,
+)
 from actual_clerk.domain.merchants import normalize_merchant
 from actual_clerk.domain.plaid_import import short_payee
 
@@ -641,7 +647,14 @@ def classify(
                     ).date(),
                 }
             )
-    memory = build_memory(snapshot, stored, today=today)
+    memory = build_memory(
+        snapshot,
+        stored,
+        today=today,
+        protected=protected_category_ids(
+            snapshot.get("categories") or [], settings.protected_categories
+        ),
+    )
     known = {
         str(category.get("id") or ""): str(category.get("name") or "")
         for category in snapshot.get("categories") or []
@@ -700,6 +713,7 @@ def apply_answer(
     category_name: str,
     always: bool = False,
     correction: bool = False,
+    protected: bool = False,
 ) -> dict[str, Any] | None:
     """The user answers a phone charge's review: this is where it goes.
 
@@ -709,9 +723,12 @@ def apply_answer(
     name for the shop is known, under that key too -- so the real row files
     itself when it lands and the next notification is categorized on sight.
     Without it, only this charge (and the bank row it settles into) is filed.
+    A `protected` category is one the user keeps by hand: the answer stands
+    for this charge alone, with no evidence recorded and no rule declared.
     Returns the rule declared, if any.
     """
 
+    always = always and not protected
     database.set_anticipated_category(
         row["id"],
         category_id=category_id,
@@ -720,7 +737,7 @@ def apply_answer(
         confidence=1.0,
     )
     key = str(row.get("merchant_key") or "")
-    if not key:
+    if not key or protected:
         return None
     database.record_memory(key, category_id, category_name, correction=correction)
     if not always:

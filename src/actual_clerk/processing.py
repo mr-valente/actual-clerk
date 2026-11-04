@@ -47,6 +47,7 @@ from actual_clerk.domain.intelligence import (
     history_rule_candidates,
     observe_decisions,
     payee_aliases,
+    protected_category_ids,
     rules_needing_repair,
 )
 from actual_clerk.domain.merchants import merchant_label, normalize_merchant
@@ -537,6 +538,7 @@ class JobManager:
         applied_ids = set(write_result["applied"])
         skipped = {item["id"]: item["reason"] for item in write_result["skipped"]}
 
+        protected = self._protected_ids(settings, snapshot)
         rules_applied: dict[str, int] = {}
         for proposal in result.proposals:
             if proposal.transaction_id in unasked and proposal.rationale.get(UNASKED):
@@ -555,6 +557,10 @@ class JobManager:
                 # bookkeeping for the Intelligence page, not evidence.
                 if proposal.rule_id:
                     rules_applied[proposal.rule_id] = rules_applied.get(proposal.rule_id, 0) + 1
+                continue
+            if proposal.category_id in protected:
+                # A refund following its charge into a category kept by
+                # hand: filed, but no evidence about the merchant.
                 continue
             self.database.record_memory(
                 proposal.merchant_key, proposal.category_id or "", proposal.category_name
@@ -744,6 +750,7 @@ class JobManager:
         pending = self.database.approved_decisions()
         if not pending:
             return 0
+        protected = self._protected_ids(settings)
         tags = [settings.clerk_tag] if settings.tag_provenance and settings.clerk_tag else []
         try:
             outcome = await self.gateway.apply_updates(
@@ -775,7 +782,11 @@ class JobManager:
                     # read by.
                     rationale = item.get("rationale") or {}
                     earlier = str(rationale.get("phone_key") or rationale.get("earlier_key") or "")
-                    if item["merchant_key"] and item["merchant_key"] != earlier:
+                    if (
+                        item["merchant_key"]
+                        and item["merchant_key"] != earlier
+                        and item["category_id"] not in protected
+                    ):
                         self.database.record_memory(
                             item["merchant_key"], item["category_id"], item["category_name"]
                         )
@@ -930,6 +941,15 @@ class JobManager:
             click=self._review_link(settings),
         )
 
+    def _protected_ids(
+        self, settings: Settings, snapshot: dict[str, Any] | None = None
+    ) -> set[str]:
+        """The categories the user files by hand, by id, from the budget last seen."""
+        source = snapshot or self.database.get_snapshot(OVERVIEW_SNAPSHOT) or {}
+        return protected_category_ids(
+            source.get("categories") or [], settings.protected_categories
+        )
+
     def _learn_from_actual(
         self, snapshot: dict[str, Any], settings: Settings, *, job_id: str
     ) -> dict[str, int]:
@@ -939,6 +959,7 @@ class JobManager:
         decisions = self.database.decisions_to_observe(since_date=since)
         if not decisions:
             return {}
+        protected = self._protected_ids(settings, snapshot)
         counts = {"standing": 0, "corrections": 0, "cleared": 0, "gone": 0, "disputes": 0}
         proposals = 0
         names = {
@@ -960,6 +981,11 @@ class JobManager:
             merchant_key = str(decision.get("merchant_key") or "")
             if observation.status == OBSERVED_CORRECTED:
                 counts["corrections"] += 1
+                if observation.category_id in protected:
+                    # Moved into a category the user keeps by hand: that is
+                    # this row's answer and says nothing about the merchant,
+                    # so it is no dispute against the rule that filed it.
+                    continue
                 self.database.record_memory(
                     merchant_key,
                     observation.category_id,
@@ -1000,10 +1026,12 @@ class JobManager:
         """
         settings = self.settings_manager.get()
         merchant_key = str(decision.get("merchant_key") or "")
-        self.database.record_memory(merchant_key, category_id, category_name, correction=True)
         self.database.mark_observed(
             decision["id"], OBSERVED_CORRECTED, category_id=category_id, category_name=category_name
         )
+        if category_id in self._protected_ids(settings):
+            return
+        self.database.record_memory(merchant_key, category_id, category_name, correction=True)
         rule_id = str(((decision.get("rationale") or {}).get("rule") or {}).get("id") or "")
         if decision.get("source") != SOURCE_RULE or not rule_id:
             return
@@ -1092,7 +1120,9 @@ class JobManager:
         self, snapshot: dict[str, Any], settings: Settings, today: datetime.date, rules: RuleBook
     ) -> int:
         """Ask for a rule wherever the history alone is unanimous and deep enough."""
-        memory = build_memory(snapshot, today=today)
+        memory = build_memory(
+            snapshot, today=today, protected=self._protected_ids(settings, snapshot)
+        )
         created = 0
         for candidate in history_rule_candidates(
             memory, rules=rules, min_sightings=settings.rule_promote_after

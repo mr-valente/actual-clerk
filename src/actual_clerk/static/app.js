@@ -2129,6 +2129,7 @@ async function renderSettings() {
           <div class="form-grid">${settingInput("rule_promote_after", "Consistent decisions before proposing a rule", s.rule_promote_after, { type: "number", min: 2, max: 25, full: true })}</div>
           ${settingToggle("memory_learn_from_actual", "Learn from corrections made in Actual", "Every filing run compares what Clerk applied with what the transaction holds now. A category you changed by hand counts as a correction, and a correction to a rule's decision counts as a dispute against that rule.", s.memory_learn_from_actual)}
           <div class="form-grid">${settingInput("memory_dispute_threshold", "Disputes before Clerk asks to change a rule", s.memory_dispute_threshold, { type: "number", min: 1, max: 20, full: true })}</div>
+          <div class="form-grid">${settingInput("protected_categories", "Categories you file by hand", (s.protected_categories || []).join(", "), { full: true, note: "Comma-separated category names. Clerk never suggests one of these, learns nothing from what you file there, and treats moving a transaction into one as neither a correction nor a dispute. For money you expect back, such as a Reimbursable category." })}</div>
         </div></section>
 
         <section class="panel settings-section" id="settings-tags"><header class="panel-head"><div><h3>Tags</h3><p class="section-description">Written into transaction notes as #tags, which is how Actual stores them.</p></div></header><div class="panel-body">

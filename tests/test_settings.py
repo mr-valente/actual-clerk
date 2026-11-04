@@ -273,3 +273,14 @@ def test_the_include_switches_reach_the_builder_by_block_name(database):
     assert sections["headline"] is True
     # Every switch is offered, and none is named after its field.
     assert not any(name.startswith("digest_show_") for name in sections)
+
+
+def test_protected_categories_accept_a_list_or_a_comma_string():
+    assert Settings(protected_categories="Reimbursable, Fronted").protected_categories == [
+        "Reimbursable",
+        "Fronted",
+    ]
+    assert Settings(
+        protected_categories=["Reimbursable", "reimbursable", " Reimbursable "]
+    ).protected_categories == ["Reimbursable"]
+    assert Settings().protected_categories == []

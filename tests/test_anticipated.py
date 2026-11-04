@@ -987,3 +987,28 @@ def test_with_filing_off_the_review_opens_without_waiting_on_a_model(database, s
     summary = anticipated.reconcile(database, snapshot(accounts=[account("Card", account_id="acct-card")]), settings.model_copy(update={"categorization_enabled": False}), today=TODAY)
     assert summary["asking"] == 0
     assert database.phone_decision(row["id"])["rationale"]["asking"] is False
+
+
+def test_an_answer_into_a_protected_category_is_this_charge_s_alone(database, settings):
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000), title="", text="Your purchase for $3.19 at Valve was approved.",
+    )
+    rule = anticipated.apply_answer(database, row, category_id="cat-reimbursable", category_name="Reimbursable", always=True, protected=True)
+    assert rule is None
+    current = database.get_anticipated_charge(row["id"])
+    assert (current["category_id"], current["category_source"]) == ("cat-reimbursable", "approved")
+    assert database.memory_for("valve") == []
+    assert database.active_rules() == []
+
+
+def test_a_merchant_filed_by_hand_in_a_protected_category_is_not_anticipated_there(database, settings):
+    settings.protected_categories = ["Dining"]
+    src = source(database)
+    row, _ = anticipated.record_notification(
+        database, settings, source=src, posted_at_ms=int(datetime.datetime(2026, 8, 21, tzinfo=datetime.UTC).timestamp() * 1000),
+        title="", text="Your purchase for $19.99 at Steam was approved.",
+    )
+    summary = anticipated.reconcile(database, steam_history(), settings, today=TODAY)
+    assert summary["categorized"] == 0
+    assert database.get_anticipated_charge(row["id"])["category_id"] in ("", None)

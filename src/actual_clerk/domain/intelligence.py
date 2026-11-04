@@ -446,6 +446,31 @@ def rules_needing_repair(
     ]
 
 
+def protected_category_ids(
+    categories: Iterable[Mapping[str, Any]], names: Iterable[str]
+) -> set[str]:
+    """The categories the user files by hand and Clerk leaves alone, by id.
+
+    Named in settings and matched to the budget by name. Nothing is suggested
+    into one, nothing filed there is evidence about the merchant, and a row
+    moved into one is neither a correction nor a dispute. The protection is
+    against Clerk learning, not against the user's own word: a rule the user
+    wrote for one still stands, and a refund of a charge filed there still
+    follows its charge.
+    """
+
+    wanted = {" ".join(str(name).split()).casefold() for name in names}
+    wanted.discard("")
+    if not wanted:
+        return set()
+    return {
+        str(category.get("id"))
+        for category in categories
+        if category.get("id")
+        and " ".join(str(category.get("name") or "").split()).casefold() in wanted
+    }
+
+
 def history_rule_candidates(
     memory: MerchantMemory,
     *,

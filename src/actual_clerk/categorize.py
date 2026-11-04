@@ -28,14 +28,20 @@ on its own.
 from __future__ import annotations
 
 import datetime
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
 from actual_clerk.clients.openai_compatible import ModelError, OpenAICompatibleClient
 from actual_clerk.config import Settings
 from actual_clerk.domain import tagging
-from actual_clerk.domain.intelligence import SOURCE_RULE, RuleBook, alias_candidates, resolve
+from actual_clerk.domain.intelligence import (
+    SOURCE_RULE,
+    RuleBook,
+    alias_candidates,
+    protected_category_ids,
+    resolve,
+)
 from actual_clerk.domain.memory import MerchantMemory, similar_examples
 from actual_clerk.domain.refunds import refunded_charge
 from actual_clerk.prompts import (
@@ -154,9 +160,18 @@ class CategorizationResult:
 
 
 def build_memory(
-    snapshot: dict[str, Any], stored: Sequence[dict[str, Any]] = (), *, today: datetime.date
+    snapshot: dict[str, Any],
+    stored: Sequence[dict[str, Any]] = (),
+    *,
+    today: datetime.date,
+    protected: Collection[str] = (),
 ) -> MerchantMemory:
-    """Evidence from the user's own filed history plus Clerk's applied decisions."""
+    """Evidence from the user's own filed history plus Clerk's applied decisions.
+
+    Rows in a protected category are left out of both: where a grocery run
+    that friends will pay back was filed says nothing about where the next
+    grocery run belongs.
+    """
     history = [
         {
             "merchant_key": item["merchant_key"],
@@ -167,21 +182,29 @@ def build_memory(
         for item in snapshot["transactions"]
         if item.get("category_id")
         and item.get("merchant_key")
+        and item["category_id"] not in protected
         and not item.get("is_transfer")
         and not item.get("is_starting_balance")
     ]
     memory = MerchantMemory().add_transactions(history, today)
-    return memory.add_stored(stored, today)
+    return memory.add_stored(
+        [row for row in stored if str(row.get("category_id") or "") not in protected], today
+    )
 
 
 def candidate_categories(
-    snapshot: dict[str, Any], *, limit: int, include_income: bool = True
+    snapshot: dict[str, Any],
+    *,
+    limit: int,
+    include_income: bool = True,
+    exclude: Collection[str] = (),
 ) -> list[dict[str, Any]]:
     """The categories offered to the model, most-used first and bounded.
 
     A large budget can hold more categories than a local model's context can
     absorb, so the list is trimmed by how much the person actually uses each
     one, which is also the order in which they are most likely to be right.
+    `exclude` names categories that are never offered at all.
     """
 
     usage: dict[str, int] = {}
@@ -194,6 +217,7 @@ def candidate_categories(
         for category in snapshot["categories"]
         if str(category.get("name") or "").strip()
         and not category["hidden"]
+        and category["id"] not in exclude
         and (include_income or not category["is_income"])
     ]
     candidates.sort(key=lambda item: (-usage.get(item["id"], 0), item["name"].casefold()))
@@ -322,15 +346,27 @@ class Categorizer:
         if not targets:
             return result
 
-        memory = build_memory(snapshot, stored_memory, today=today)
-        candidates = candidate_categories(snapshot, limit=settings.category_candidate_limit)
-        candidate_ids = {candidate["id"] for candidate in candidates}
-        names = {candidate["id"]: candidate["name"] for candidate in candidates}
+        protected = protected_category_ids(snapshot["categories"], settings.protected_categories)
+        memory = build_memory(snapshot, stored_memory, today=today, protected=protected)
+        candidates = candidate_categories(
+            snapshot, limit=settings.category_candidate_limit, exclude=protected
+        )
+        # A protected category is never offered, but it is still a category
+        # in the budget: a rule the user wrote for it is not broken, and a
+        # refund of a charge filed there follows its charge.
+        candidate_ids = {candidate["id"] for candidate in candidates} | protected
+        names = {
+            category["id"]: category["name"]
+            for category in snapshot["categories"]
+            if category["id"] in candidate_ids
+        }
         stats = merchant_amount_stats(snapshot)
         history = [
             item
             for item in snapshot["transactions"]
-            if item.get("category_id") and item.get("merchant_key")
+            if item.get("category_id")
+            and item.get("merchant_key")
+            and item["category_id"] not in protected
         ]
 
         # A refund of a filed charge is settled by that charge, before the

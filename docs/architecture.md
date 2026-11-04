@@ -136,6 +136,19 @@ transaction that is gone or became a transfer teaches nothing. Each
 decision is looked at until a correction settles it, so a category changed
 weeks later is still noticed.
 
+A category named in `protected_categories` is the user's alone. It is
+left out of the candidates offered to the model and out of memory, both
+the history read from Actual and Clerk's own stored decisions
+(`protected_category_ids` in `domain/intelligence.py`, applied wherever
+memory is built or recorded). A move into it is marked observed but is
+neither evidence nor a dispute; a review answered with it records nothing,
+and *Always* is refused for it. The budget counts it like any other
+category, and two things deliberately still reach it: a refund of a charge
+filed there, which follows its charge, and a rule the user wrote for it.
+This is what makes a category such as *Reimbursable* usable for money that
+is expected back, where the merchant says nothing about where its next
+charge belongs.
+
 A rule whose category has left the budget files nothing and becomes a
 *repair* proposal, which asks for the replacement. Actual used to rewrite
 its own rules when a category was deleted; that choice is now the user's to

@@ -30,7 +30,7 @@ from actual_clerk.clients.webpush import valid_keys
 from actual_clerk.config import TIMEZONE_CHOSEN_KEY, SettingsManager, data_directory
 from actual_clerk.db import Database
 from actual_clerk.diagnostics import build_report
-from actual_clerk.domain.intelligence import canonical_key
+from actual_clerk.domain.intelligence import canonical_key, protected_category_ids
 from actual_clerk.domain.merchants import merchant_label, normalize_merchant
 from actual_clerk.plaid_links import describe, public_item, read_items
 from actual_clerk.plaid_sync import PlaidSyncEngine, redate_imports, retidy_imports
@@ -586,6 +586,16 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
         return {"status": "restored", "resolved": len(restored)}
 
     recategorized = payload.action == "recategorize"
+    protected = _protected_ids(request)
+    if payload.always:
+        # A rule into a category kept by hand would file there on sight,
+        # which is the one thing such a category exists to prevent. Refused
+        # before anything is claimed, so a mixed batch is left whole.
+        for decision_id in payload.ids:
+            pending = database.get_decision(decision_id)
+            chosen = payload.category_id if recategorized else (pending or {}).get("category_id")
+            if chosen in protected:
+                raise HTTPException(status_code=422, detail=_manual_only(database, chosen))
     updates: list[dict[str, Any]] = []
     claimed: list[tuple[str, dict[str, Any], str]] = []
     phone: list[tuple[dict[str, Any], str]] = []
@@ -626,7 +636,12 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
     phone_answered = 0
     for pending, category_id in phone:
         rule = _answer_phone(
-            database, pending, category_id, recategorized=recategorized, always=payload.always
+            database,
+            pending,
+            category_id,
+            recategorized=recategorized,
+            always=payload.always,
+            protected=category_id in protected,
         )
         if rule is not False:
             phone_answered += 1
@@ -658,12 +673,13 @@ async def resolve_reviews(payload: BulkResolveRequest, request: Request) -> dict
         if pending["transaction_id"] not in applied:
             continue
         category_name = _category_name(database, category_id) or pending["category_name"]
-        database.record_memory(
-            pending["merchant_key"],
-            category_id,
-            category_name,
-            correction=recategorized,
-        )
+        if category_id not in protected:
+            database.record_memory(
+                pending["merchant_key"],
+                category_id,
+                category_name,
+                correction=recategorized,
+            )
         if payload.always and pending["merchant_key"] and pending["merchant_key"] not in declared:
             declared.add(pending["merchant_key"])
             _declare_rule(
@@ -689,6 +705,7 @@ def _answer_phone(
     *,
     recategorized: bool,
     always: bool,
+    protected: bool = False,
 ) -> dict[str, Any] | None | bool:
     """Apply a review answer to a phone charge. False when it was already answered."""
     category_name = _category_name(database, category_id) or pending["category_name"]
@@ -706,6 +723,7 @@ def _answer_phone(
         category_name=category_name,
         always=always,
         correction=recategorized,
+        protected=protected,
     )
 
 
@@ -739,6 +757,9 @@ async def resolve_review(
     category_name = pending["category_name"]
     if payload.action == "recategorize":
         category_name = _category_name(database, category_id) or category_name
+    protected = category_id in _protected_ids(request)
+    if payload.always and protected:
+        raise HTTPException(status_code=422, detail=_manual_only(database, category_id))
 
     if pending.get("anticipated_id"):
         rule = _answer_phone(
@@ -747,6 +768,7 @@ async def resolve_review(
             category_id,
             recategorized=payload.action == "recategorize",
             always=payload.always,
+            protected=protected,
         )
         if rule is False:
             raise HTTPException(status_code=409, detail="This review has already been resolved")
@@ -798,12 +820,13 @@ async def resolve_review(
         )
         if reason == "deleted":
             return {"status": "skipped", "reason": reason}
-    database.record_memory(
-        pending["merchant_key"],
-        category_id,
-        category_name,
-        correction=payload.action == "recategorize",
-    )
+    if not protected:
+        database.record_memory(
+            pending["merchant_key"],
+            category_id,
+            category_name,
+            correction=payload.action == "recategorize",
+        )
     rule = None
     if payload.always and pending["merchant_key"]:
         rule = _declare_rule(
@@ -848,6 +871,19 @@ async def change_filing(
     with contextlib.suppress(Exception):
         await _jobs(request).refresh_now()
     return {"status": "changed", "category_id": payload.category_id, "category_name": category_name}
+
+
+def _protected_ids(request: Request) -> set[str]:
+    """Categories the user files by hand: no evidence is taken from them and no rule made for them."""
+    categories = (_database(request).get_snapshot(OVERVIEW_SNAPSHOT) or {}).get("categories") or []
+    return protected_category_ids(
+        categories, _settings_manager(request).get().protected_categories
+    )
+
+
+def _manual_only(database: Database, category_id: str) -> str:
+    name = _category_name(database, category_id) or "That category"
+    return f"{name} is a category you file by hand; Clerk makes no rule for it"
 
 
 def _category_name(database: Database, category_id: str) -> str:
