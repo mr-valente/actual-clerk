@@ -3,7 +3,7 @@ FROM ghcr.io/astral-sh/uv:0.12.3 AS uv
 
 FROM node:22-bookworm-slim AS node
 WORKDIR /node-app
-COPY package.json package-lock.json ./
+COPY package.json package-lock.json .npmrc ./
 RUN npm ci --omit=dev
 
 FROM python:3.12-slim-bookworm AS runtime

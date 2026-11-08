@@ -5,12 +5,12 @@
   "description": "Official Actual Budget API worker for Actual Clerk",
   "type": "module",
   "engines": {
-    "node": ">=20"
+    "node": ">=22"
   },
   "scripts": {
     "test": "node --test tests/actual_worker.test.mjs"
   },
   "dependencies": {
-    "@actual-app/api": "26.9.0"
+    "@actual-app/api": "26.11.0"
   }
 }

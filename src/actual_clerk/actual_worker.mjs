@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url';
 import readline from 'node:readline';
 
 export const RPC_PREFIX = '@@actual-clerk-rpc@@';
-export const ACTUAL_API_VERSION = '26.9.0';
+export const ACTUAL_API_VERSION = '26.11.0';
 
 function isoDate(value) {
   if (!value) return '';

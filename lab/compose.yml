@@ -9,7 +9,7 @@
 # load the model server.
 services:
   actual-lab:
-    image: actualbudget/actual-server:26.9.0
+    image: actualbudget/actual-server:26.11.0
     container_name: actual-lab
     volumes:
       - ./data/actual:/data

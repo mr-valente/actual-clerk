@@ -71,7 +71,7 @@ def fake_worker(path: Path, *, fail_method: str = "", oversized_snapshot: bool =
                 "    if method == FAIL_METHOD:",
                 "        response = {'id': request['id'], 'ok': False, 'error': {'message': 'bank refused', 'code': 'connection-failed'}}",
                 "    elif method == 'initialize':",
-                "        response = {'id': request['id'], 'ok': True, 'result': {'apiVersion': '26.9.0', 'serverVersion': '26.9.0'}}",
+                "        response = {'id': request['id'], 'ok': True, 'result': {'apiVersion': '26.11.0', 'serverVersion': '26.11.0'}}",
                 "    elif method == 'snapshot':",
                 "        response = {'id': request['id'], 'ok': True, 'result': SNAPSHOT}",
                 "    else:",
@@ -151,7 +151,7 @@ async def test_gateway_starts_one_worker_and_uses_framed_rpc(
     try:
         snapshot = await gateway.snapshot(today=datetime.date(2026, 9, 1))
         assert snapshot["accounts"][0]["cleared_balance_cents"] == 7500
-        assert gateway.status()["api_version"] == "26.9.0"
+        assert gateway.status()["api_version"] == "26.11.0"
         assert gateway.connected is True
     finally:
         await gateway.close()

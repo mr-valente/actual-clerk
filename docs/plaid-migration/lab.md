@@ -8,7 +8,7 @@ touching the live one.
 
 | Container | Image | Port | Data |
 | --- | --- | --- | --- |
-| `actual-lab` | `actualbudget/actual-server:26.9.0` (matches the pinned API) | `30130` | `lab/data/actual`, a copy of the live server directory |
+| `actual-lab` | `actualbudget/actual-server:26.11.0` (matches the pinned API) | `30130` | `lab/data/actual`, a copy of the live server directory |
 | `clerk-lab` | built from this checkout | `30131` | `lab/data/clerk`, a copy of the live Clerk data directory |
 
 `lab/data/` and `lab/.env` are ignored by git. `lab/.env` carries the Actual

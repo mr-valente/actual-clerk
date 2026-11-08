@@ -271,7 +271,7 @@ test('the handler bridge prefers the object init() returned and falls back to ap
     getBudgets: async () => [{ id: 'local', groupId: 'sync-id', name: 'Budget' }],
     loadBudget: async () => {},
     sync: async () => {},
-    getServerVersion: async () => ({ version: '26.9.0' }),
+    getServerVersion: async () => ({ version: '26.11.0' }),
     internal: { send: async (handler, args) => { calls.push(['internal', handler, args]); return 'ok'; } },
   };
   const service = new ActualService(api);
