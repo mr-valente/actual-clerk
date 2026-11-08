@@ -32,10 +32,12 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
    figure it quotes is not a new purchase; *credit*, *refund*, *returned*,
    *payment received* and the like are credits, recorded and shown but not
    counted as spending; anything else with an amount is a charge. An explicit
-   "purchase … approved" is always a charge, whatever remark follows it. The
-   merchant is the phrase after "at" (or "from"), or the name that leads a
-   "Geico charged you" sentence, trimmed of the card, the time, and the
-   outcome. The wording is the issuer's, so the parser is generous about form
+   "purchase … approved" is always a charge, whatever remark follows it, and
+   a payment to the card is a credit in either word order ("your payment was
+   received", "we received your payment"). The merchant is the phrase after
+   "at", after "with" in a "transaction with" sentence (Chase), or after
+   "from", or the name that leads a "Geico charged you" sentence, trimmed of
+   the card, the time, and the outcome. The wording is the issuer's, so the parser is generous about form
    and strict about substance: no amount, nothing anticipated.
 2. **Stores it once.** The phone sends a stable key per notification, so a
    retry or a reboot never produces a second charge. A card app that

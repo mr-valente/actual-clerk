@@ -61,25 +61,38 @@ _NOTICE = re.compile(
 # charge." is the purchase, with a remark attached.
 _AUTHORISED = re.compile(r"\b(?:purchase|transaction|charge)\b.{0,80}?\bapproved\b")
 # "Credit card" names the instrument, not the direction: the Capital One
-# title is "Venture Credit Card…4273" on an ordinary purchase.
+# title is "Venture Credit Card…4273" on an ordinary purchase. A payment to
+# the card is a credit in either word order ("your payment was received",
+# "we received your $500.00 payment", "you made a $500.00 payment"); read as
+# a purchase it would count the whole payment as spending.
 _CREDIT = re.compile(
     r"\b(credit(?:ed)?(?!\s+card)|refund(?:ed)?|returned|reversal|reversed|"
     r"payment\b.{0,80}?\b(?:received|posted|processed|scheduled|applied)|"
-    r"thank you for your payment|deposit(?:ed)?|cash ?back)\b"
+    r"(?:received|scheduled) (?:your |a )?(?:\S+ )?payment|made an? (?:\S+ )?payment|"
+    r"thank you for (?:scheduling )?your (?:\S+ )?payment|deposit(?:ed)?|cash ?back)\b"
 )
 # Preposition-led merchant phrases. Each ends at a connective that introduces
 # the card, the time, or the outcome rather than more of the merchant's name.
 # A sentence-ending mark only ends the merchant when a space or the end of the
 # text follows it: "AMAZON.COM" keeps its dot, "AMAZON. Thank you" does not.
 _MERCHANT_END = (
-    r"(?=\s+(?:on|with|using|for|was|has|is|ending|from|in the amount|to your|"
+    r"(?=\s+(?:on|with|using|for|was|has|is|posted|ending|from|in the amount|to your|"
     r"at \d)\b|\s+\(|[.!,;](?=\s|$)|\s*$)"
 )
-# "at 3:45 PM" names a time, not a shop; refusing it here lets the search move
-# on to the next "at" in the same sentence.
-_NOT_A_TIME = r"(?!\d{1,2}(?::\d{2})?\s*(?:am|pm)\b)"
+# "at 3:45 PM", "at 5 p.m." and "at 17:12" name a time, not a shop; refusing
+# it here lets the search move on to the next "at" in the same sentence.
+_NOT_A_TIME = r"(?!\d{1,2}(?::\d{2}|\s*[ap]\.?m\b))"
 _MERCHANT_PATTERNS = (
     re.compile(r"\bat\s+" + _NOT_A_TIME + r"(.+?)" + _MERCHANT_END, re.IGNORECASE),
+    # "You made a $16.99 transaction with AMAZON MKTPLACE PMTS on Nov 8, 2026
+    # at 5:12 PM ET." (Chase): the shop follows "with" right after the word for
+    # the purchase. Ahead of "from", which in this wording names the card.
+    # "with your card ending in 1234" names the card, not a shop.
+    re.compile(
+        r"\b(?:transaction|purchase|charge)\b(?:\s+(?:of|for)\s+\S+)?\s+with\s+"
+        r"(?!(?:your|my)\b|(?:a\s+|the\s+)?card\b)(.+?)" + _MERCHANT_END,
+        re.IGNORECASE,
+    ),
     re.compile(r"\bfrom\s+(.+?)" + _MERCHANT_END, re.IGNORECASE),
     # "Geico charged you $152.40": the merchant leads the sentence.
     re.compile(r"(?:^|[.!?]\s+)([^.!?]+?)\s+(?:charged|billed)\s+you\b", re.IGNORECASE),

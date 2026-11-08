@@ -59,6 +59,28 @@ TODAY = datetime.date(2026, 8, 21)
             "Geico charged you $152.40. That's $16.46 more than last month. Tap to manage this service.",
             KIND_NOTICE, -15240, "Geico",
         ),
+        # Real (2026-11-08): Chase names the shop after "with", and its only
+        # "at" is the time.
+        (
+            "You have received a notification",
+            "Prime Visa: You made a $16.99 transaction with AMAZON MKTPLACE PMTS on Nov 8, 2026 at 5:12 PM ET.",
+            KIND_CHARGE, -1699, "AMAZON MKTPLACE PMTS",
+        ),
+        (
+            "You have received a notification",
+            "Prime Visa: You made a $45.00 online, phone, or mail transaction with NETFLIX.COM on Nov 8, 2026 at 9:01 AM ET.",
+            KIND_CHARGE, -4500, "NETFLIX.COM",
+        ),
+        (
+            "You have received a notification",
+            "Prime Visa: Your $250.00 transaction with BEST BUY 00012 was declined on Nov 8, 2026 at 5:12 PM ET.",
+            KIND_DECLINED, -25000, "BEST BUY 00012",
+        ),
+        (
+            "You have received a notification",
+            "Prime Visa: A $16.99 refund from AMAZON MKTPLACE PMTS posted on Nov 9, 2026.",
+            KIND_CREDIT, 1699, "AMAZON MKTPLACE PMTS",
+        ),
     ],
 )
 def test_notifications_are_read_for_amount_direction_and_merchant(title, text, kind, cents, merchant):
@@ -115,9 +137,38 @@ def test_the_merchant_key_follows_clerk_s_own_normalization():
     assert parsed.merchant_key == "blue bottle"
 
 
-def test_a_time_after_at_is_not_mistaken_for_a_merchant():
-    parsed = parse_notification("", "$8.00 was spent at 3:45 PM at BLUE BOTTLE COFFEE.")
+@pytest.mark.parametrize("time", ["3:45 PM", "5 p.m.", "17:12"])
+def test_a_time_after_at_is_not_mistaken_for_a_merchant(time):
+    parsed = parse_notification("", f"$8.00 was spent at {time} at BLUE BOTTLE COFFEE.")
     assert parsed.merchant == "BLUE BOTTLE COFFEE"
+
+
+def test_the_card_after_with_is_not_mistaken_for_a_merchant():
+    assert parse_notification("", "A $5.00 purchase with your card ending in 1234 was approved.").merchant == ""
+    assert parse_notification("", "A $5.00 transaction with card ending in 1234 was approved.").merchant == ""
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Prime Visa: We received your $500.00 payment on Nov 8, 2026.",
+        "Prime Visa: You made a $500.00 payment on Nov 8, 2026.",
+        "Thank you for scheduling your $500.00 payment.",
+    ],
+)
+def test_a_payment_to_the_card_is_a_credit_in_either_word_order(text):
+    parsed = parse_notification("You have received a notification", text)
+    assert parsed.kind == KIND_CREDIT
+    assert parsed.counts is False
+
+
+def test_a_shop_named_for_payments_is_still_a_purchase():
+    parsed = parse_notification(
+        "You have received a notification",
+        "Prime Visa: You made a $9.99 transaction with GOOGLE *PAYMENTS on Nov 8, 2026 at 1:00 PM ET.",
+    )
+    assert parsed.kind == KIND_CHARGE
+    assert parsed.merchant == "GOOGLE *PAYMENTS"
 
 
 # ------------------------------------------------------------------- matching
