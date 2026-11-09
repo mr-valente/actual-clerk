@@ -18,6 +18,14 @@ a charge from a month that has already been reported and closed: that report
 stands, and the money is not spending driven below zero now -- it is money this
 month has back to spend. Free money itself is left alone, so it remains the
 figure Actual shows as Projected Savings, and the returned money sits beside it.
+
+Money fronted for someone else is spent until it comes back. The user tags the
+purchase as reimbursable and the repayment as a reimbursement, and the two
+form one pool: a repayment cancels this month's fronts first, then reaches
+back to fronts from earlier months, which come back the way a refund of a
+closed month's purchase does, and only what is left after nothing fronted is
+outstanding is ordinary income. The purchase keeps its category in Actual; in
+the report it leaves that category's figure for a line of its own.
 """
 
 from __future__ import annotations
@@ -59,6 +67,11 @@ class TransactionInfo:
     # Uncategorized in Actual, but waiting in Review with a suggestion the
     # report counts it under until the person answers.
     provisional: bool = False
+    # Tagged by the user in Actual: a purchase made for someone else that is
+    # expected back, and money coming back to repay such a purchase. Clerk
+    # reads these tags and never writes them.
+    reimbursable: bool = False
+    reimbursement: bool = False
 
     @property
     def spend_cents(self) -> int:
@@ -109,10 +122,21 @@ class BudgetReport:
     # category. Free money was already reduced by it at the time.
     committed_carried_cents: int
     free_cents: int
-    # Refunded beyond what this month spent in that category, so it reverses a
-    # charge an earlier report already counted. Money back, not negative spend.
+    # Refunded beyond what this month spent in that category, or repaid for
+    # something fronted in an earlier month: either way it reverses a charge
+    # an earlier report already counted. Money back, not negative spend.
     returned_cents: int
     available_cents: int
+    # Spent this month for someone else and tagged as expected back. Counted
+    # as spent until it is repaid, and never part of any category's figure.
+    fronted_cents: int
+    # Repayments that arrived this month and cancelled something fronted:
+    # this month's fronts first, then earlier months' (those come back inside
+    # returned_cents). Anything beyond that was ordinary income.
+    reimbursed_cents: int
+    # Fronted in any month and still not repaid once this month's repayments
+    # have been counted.
+    fronted_open_cents: int
     discretionary_spent_cents: int
     uncategorized_cents: int
     uncategorized_count: int
@@ -225,6 +249,32 @@ def _is_budget_spending(transaction: TransactionInfo) -> bool:
     )
 
 
+def fronted_carryover(transactions: Sequence[TransactionInfo], *, start: datetime.date) -> int:
+    """What was fronted for others before `start` and is still owed.
+
+    Month by month, fronts add to the pool and repayments drain it. A month
+    whose repayments ran past everything outstanding leaves the pool empty
+    rather than in credit: the excess was income then, not a loan against the
+    next front. No window applies. A front stays owed until it is repaid or
+    its tag is taken off, which is how one is written off.
+    """
+
+    fronted: dict[str, int] = {}
+    repaid: dict[str, int] = {}
+    for transaction in transactions:
+        if transaction.date >= start or not _is_budget_spending(transaction):
+            continue
+        key = month_key(transaction.date)
+        if transaction.reimbursable and transaction.amount_cents < 0:
+            fronted[key] = fronted.get(key, 0) - transaction.amount_cents
+        elif transaction.reimbursement and transaction.amount_cents > 0:
+            repaid[key] = repaid.get(key, 0) + transaction.amount_cents
+    pool = 0
+    for key in sorted(set(fronted) | set(repaid)):
+        pool = max(0, pool + fronted.get(key, 0) - repaid.get(key, 0))
+    return pool
+
+
 def average_monthly_income(
     history: Sequence[tuple[datetime.date, int]], *, months: int, before: datetime.date
 ) -> int:
@@ -309,6 +359,10 @@ def build_budget_report(
     # for the month is known.
     discretionary_charges: dict[str, int] = {}
     discretionary_refunds: dict[str, int] = {}
+    # Fronted for someone else this month, and repaid this month. Held apart
+    # for the same reason as refunds: they net once the month is in hand.
+    fronted_month = 0
+    repaid_month = 0
     uncategorized_count = 0
     provisional_cents = 0
     provisional_count = 0
@@ -326,6 +380,17 @@ def build_budget_report(
         # in front of you instead of silently swelling discretionary spending.
         if category_id and category_id not in by_id:
             category_id = ""
+        if (
+            transaction.reimbursement
+            and transaction.amount_cents > 0
+            and not transaction.off_budget
+            and not transaction.is_transfer
+        ):
+            # Money back for something fronted fills that pool before it is
+            # anything else, whatever it was filed under: in Actual it is
+            # usually income, where the budget would otherwise never see it.
+            repaid_month += transaction.amount_cents
+            continue
         if category_id and category_id in income_ids:
             # Income lands on-budget only; a transfer is not new money.
             if not transaction.off_budget and not transaction.is_transfer:
@@ -334,6 +399,11 @@ def build_budget_report(
         if not _is_budget_spending(transaction):
             continue
         spend = transaction.spend_cents
+        if transaction.reimbursable and spend > 0:
+            # Spent for someone else. It leaves its category's figure, bill
+            # or not, and is spent on a line of its own until it comes back.
+            fronted_month += spend
+            continue
         if transaction.provisional and category_id and spend > 0:
             provisional_cents += spend
             provisional_count += 1
@@ -419,6 +489,22 @@ def build_budget_report(
         else:
             uncategorized_cents = net
     discretionary_total = sum(discretionary_by_category.values()) + uncategorized_cents
+
+    # Money fronted for someone else is spent until it comes back. A repayment
+    # cancels this month's fronts first. What is left reaches back to fronts
+    # from earlier months, which were counted as spent then and so come back
+    # as money this month has to spend, exactly like a refund of a closed
+    # month's purchase. Only once nothing fronted is outstanding is a repayment
+    # ordinary income. It is one pool: a repayment is not matched to a
+    # particular front, so an even twenty for a nineteen-fifty dinner settles
+    # an older front before its last fifty cents reach income.
+    fronted_before = fronted_carryover(transactions, start=start)
+    repaid_now = min(repaid_month, fronted_month)
+    repaid_earlier = min(repaid_month - repaid_now, fronted_before)
+    income_received += repaid_month - repaid_now - repaid_earlier
+    returned_cents += repaid_earlier
+    fronted_open = fronted_before + fronted_month - repaid_now - repaid_earlier
+    discretionary_total += fronted_month - repaid_now
 
     committed_spent_total = sum(committed_spent.values())
     carried = committed_carryover(
@@ -546,6 +632,9 @@ def build_budget_report(
         free_cents=free_cents,
         returned_cents=returned_cents,
         available_cents=available_cents,
+        fronted_cents=fronted_month,
+        reimbursed_cents=repaid_now + repaid_earlier,
+        fronted_open_cents=fronted_open,
         discretionary_spent_cents=discretionary_total,
         uncategorized_cents=uncategorized_cents,
         uncategorized_count=uncategorized_count,

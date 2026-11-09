@@ -21,7 +21,11 @@ from actual_clerk import __version__
 from actual_clerk.config import Settings, tz_database_available
 from actual_clerk.domain.budget import build_budget_report, month_bounds
 from actual_clerk.processing import DIGEST_WINDOW_HOURS
-from actual_clerk.reporting import to_category_infos, to_transaction_infos
+from actual_clerk.reporting import (
+    reimbursement_tags,
+    to_category_infos,
+    to_transaction_infos,
+)
 
 WIDTH = 78
 # Tracking budgets keep their numbers in reflect_budgets; envelope budgets in
@@ -503,7 +507,9 @@ def build_report(
         )
 
     # ---------------------------------------------------------------- 5
-    month_transactions = to_transaction_infos(snapshot, start=start, end=end)
+    month_transactions = to_transaction_infos(
+        snapshot, start=start, end=end, **reimbursement_tags(settings)
+    )
     spent_by_category: dict[str, int] = {}
     for transaction in month_transactions:
         if transaction.off_budget or transaction.is_transfer or transaction.is_starting_balance:
@@ -758,7 +764,9 @@ def build_report(
         today=today,
         categories=categories,
         budgeted=budgeted,
-        transactions=to_transaction_infos(snapshot, start=datetime.date.min, end=end),
+        transactions=to_transaction_infos(
+            snapshot, start=datetime.date.min, end=end, **reimbursement_tags(settings)
+        ),
         income_history=snapshot["income_history"],
         budgeted_history=budgeted_history,
         committed_groups=settings.committed_groups,
@@ -794,6 +802,9 @@ def build_report(
         "free_cents",
         "returned_cents",
         "available_cents",
+        "fronted_cents",
+        "reimbursed_cents",
+        "fronted_open_cents",
         "discretionary_spent_cents",
         "uncategorized_cents",
         "spent_cents",
@@ -808,6 +819,8 @@ def build_report(
     r.text("  available = free + returned")
     r.text("  spent     = discretionary_spent + committed_overspend")
     r.text("  remain    = available - spent")
+    r.text("  (discretionary_spent includes money fronted for others this month and")
+    r.text("   not yet repaid; returned includes earlier months' fronts repaid now)")
 
     r.sub("stored snapshot vs live recompute")
     drifted = 0

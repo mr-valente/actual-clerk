@@ -29,6 +29,7 @@ from actual_clerk.domain.health import (
     StuckImportInfo,
     UnconfirmedTransferInfo,
 )
+from actual_clerk.domain.tagging import parse_tags
 
 
 def apply_bank_links(
@@ -111,19 +112,38 @@ def provisional_categories(
     }
 
 
+def reimbursement_tags(settings: Settings) -> dict[str, str]:
+    """The two user-written tags the budget reads, as `to_transaction_infos` takes them."""
+    return {
+        "reimbursable_tag": settings.reimbursable_tag,
+        "reimbursement_tag": settings.reimbursement_tag,
+    }
+
+
 def to_transaction_infos(
     snapshot: dict[str, Any],
     *,
     start: datetime.date,
     end: datetime.date,
     provisional: Mapping[str, str] | None = None,
+    reimbursable_tag: str = "",
+    reimbursement_tag: str = "",
 ) -> list[TransactionInfo]:
+    """The snapshot's rows as the budget reads them.
+
+    A row carrying `reimbursable_tag` in its notes was spent for someone else
+    and is expected back; one carrying `reimbursement_tag` is that money
+    coming back. Either tag left empty is not looked for.
+    """
+
     provisional = provisional or {}
     income = {
         str(category.get("id") or "")
         for category in snapshot.get("categories") or []
         if category.get("is_income")
     }
+    fronted_tag = reimbursable_tag.casefold()
+    repaid_tag = reimbursement_tag.casefold()
     infos = []
     for item in snapshot["transactions"]:
         if not start <= item["date"] <= end:
@@ -134,6 +154,11 @@ def to_transaction_infos(
         # would otherwise vanish from the month instead of counting.
         if suggested in income and item["amount_cents"] < 0:
             suggested = ""
+        tags = (
+            {tag.casefold() for tag in parse_tags(item.get("notes"))}
+            if (fronted_tag or repaid_tag) and item.get("notes")
+            else set()
+        )
         infos.append(
             TransactionInfo(
                 id=item["id"],
@@ -147,6 +172,8 @@ def to_transaction_infos(
                 is_transfer=item.get("is_transfer", False),
                 is_starting_balance=item.get("is_starting_balance", False),
                 provisional=bool(suggested),
+                reimbursable=bool(fronted_tag) and fronted_tag in tags,
+                reimbursement=bool(repaid_tag) and repaid_tag in tags,
             )
         )
     return infos
@@ -311,7 +338,11 @@ def budget_report(
         # Earlier months are needed to work out what a committed category still
         # holds; the report itself only counts spending inside the month.
         transactions=to_transaction_infos(
-            snapshot, start=datetime.date.min, end=end, provisional=provisional
+            snapshot,
+            start=datetime.date.min,
+            end=end,
+            provisional=provisional,
+            **reimbursement_tags(settings),
         ),
         income_history=snapshot["income_history"],
         budgeted_history=snapshot.get("budgeted_history") or {},
@@ -356,7 +387,11 @@ def yesterday_allowance(
             return None
     categories = to_category_infos(snapshot)
     transactions = to_transaction_infos(
-        snapshot, start=datetime.date.min, end=yesterday, provisional=provisional
+        snapshot,
+        start=datetime.date.min,
+        end=yesterday,
+        provisional=provisional,
+        **reimbursement_tags(settings),
     )
     charges = to_anticipated_infos(snapshot, anticipated, provisional)
     income_history = [
@@ -433,7 +468,11 @@ def monthly_reports(
         history_start = datetime.date.fromisoformat(history_start[:10])
     categories = to_category_infos(snapshot)
     transactions = to_transaction_infos(
-        snapshot, start=datetime.date.min, end=datetime.date.max, provisional=provisional
+        snapshot,
+        start=datetime.date.min,
+        end=datetime.date.max,
+        provisional=provisional,
+        **reimbursement_tags(settings),
     )
     charges = to_anticipated_infos(snapshot, anticipated, provisional)
     current = month_key(today)

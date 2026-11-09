@@ -274,7 +274,7 @@ function budgetHero() {
         </div>
         <p class="hero-sub">${overspent
           ? `You are ${money(Math.abs(remaining))} past the free money for this month.`
-          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month, refunding a purchase from an earlier one.` : ""}${report.anticipated_cents ? ` ${money(report.anticipated_cents)} from ${report.anticipated_count} charge${report.anticipated_count === 1 ? "" : "s"} the bank has not posted yet is counted already${report.anticipated_committed_cents ? `, ${money(report.anticipated_committed_cents)} of it against bills already budgeted` : ""}.` : ""}${report.provisional_cents ? ` ${money(report.provisional_cents)} waiting in Review counts under Clerk's suggestion until you answer.` : ""}</p>
+          : `${money(spent)} of ${money(available)} spent since the 1st.`} Free money is ${money(report.expected_income_cents)} expected income (${escapeHtml(incomeNote)}) minus ${money(report.committed_cents)} already budgeted for bills.${returned ? ` A further ${money(returned)} came back this month for purchases made in earlier months.` : ""}${report.anticipated_cents ? ` ${money(report.anticipated_cents)} from ${report.anticipated_count} charge${report.anticipated_count === 1 ? "" : "s"} the bank has not posted yet is counted already${report.anticipated_committed_cents ? `, ${money(report.anticipated_committed_cents)} of it against bills already budgeted` : ""}.` : ""}${report.provisional_cents ? ` ${money(report.provisional_cents)} waiting in Review counts under Clerk's suggestion until you answer.` : ""}${report.fronted_open_cents ? ` ${money(report.fronted_open_cents)} you fronted for others is still owed to you.` : ""}</p>
       </div>
       <div class="hero-side">
         <div class="hero-chip"><span>Safe to spend daily</span><strong>${money(report.daily_safe_to_spend_cents)}</strong></div>
@@ -298,7 +298,10 @@ function budgetHero() {
       <div><span>Discretionary spent</span><strong class="money">${money(report.discretionary_spent_cents)}</strong></div>
       <div><span>Committed overspend</span><strong class="money ${report.committed_overspend_cents ? "negative" : ""}">${money(report.committed_overspend_cents)}</strong></div>
       ${report.committed_carried_cents ? `<div><span>Set aside from earlier months</span><strong class="money positive">${money(report.committed_carried_cents)}</strong></div>` : ""}
-      ${returned ? `<div><span>Refunded from earlier months</span><strong class="money positive">${money(returned)}</strong></div>` : ""}
+      ${returned ? `<div><span>Returned from earlier months</span><strong class="money positive">${money(returned)}</strong></div>` : ""}
+      ${report.fronted_cents ? `<div><span>Fronted for others</span><strong class="money">${money(report.fronted_cents)}</strong></div>` : ""}
+      ${report.reimbursed_cents ? `<div><span>Reimbursed</span><strong class="money positive">${money(report.reimbursed_cents)}</strong></div>` : ""}
+      ${report.fronted_open_cents ? `<div><span>Awaiting repayment</span><strong class="money">${money(report.fronted_open_cents)}</strong></div>` : ""}
       ${report.anticipated_cents ? `<div><span>Anticipated, not yet posted</span><strong class="money">${money(report.anticipated_cents)} · ${report.anticipated_count}</strong></div>` : ""}
       ${report.provisional_cents ? `<div><span>In Review, counted as suggested</span><strong class="money">${money(report.provisional_cents)} · ${report.provisional_count}</strong></div>` : ""}
       <div><span>Uncategorized</span><strong class="money">${money(report.uncategorized_cents)}${(report.uncategorized_count || 0) + (report.anticipated_uncategorized_count || 0) ? ` · ${(report.uncategorized_count || 0) + (report.anticipated_uncategorized_count || 0)}` : ""}</strong></div>
@@ -2129,7 +2132,7 @@ async function renderSettings() {
           <div class="form-grid">${settingInput("rule_promote_after", "Consistent decisions before proposing a rule", s.rule_promote_after, { type: "number", min: 2, max: 25, full: true })}</div>
           ${settingToggle("memory_learn_from_actual", "Learn from corrections made in Actual", "Every filing run compares what Clerk applied with what the transaction holds now. A category you changed by hand counts as a correction, and a correction to a rule's decision counts as a dispute against that rule.", s.memory_learn_from_actual)}
           <div class="form-grid">${settingInput("memory_dispute_threshold", "Disputes before Clerk asks to change a rule", s.memory_dispute_threshold, { type: "number", min: 1, max: 20, full: true })}</div>
-          <div class="form-grid">${settingInput("protected_categories", "Categories you file by hand", (s.protected_categories || []).join(", "), { full: true, note: "Comma-separated category names. Clerk never suggests one of these, learns nothing from what you file there, and treats moving a transaction into one as neither a correction nor a dispute. For money you expect back, such as a Reimbursable category." })}</div>
+          <div class="form-grid">${settingInput("protected_categories", "Categories you file by hand", (s.protected_categories || []).join(", "), { full: true, note: "Comma-separated category names. Clerk never suggests one of these, learns nothing from what you file there, and treats moving a transaction into one as neither a correction nor a dispute." })}</div>
         </div></section>
 
         <section class="panel settings-section" id="settings-tags"><header class="panel-head"><div><h3>Tags</h3><p class="section-description">Written into transaction notes as #tags, which is how Actual stores them.</p></div></header><div class="panel-body">
@@ -2139,6 +2142,7 @@ async function renderSettings() {
             ${settingCheck("tag_anomalies", "Tag refunds and outsized charges", "#refund for money coming back, #unusual for a charge far above a merchant's normal size.", s.tag_anomalies)}
           </div>
           <div class="form-grid">${settingInput("clerk_tag", "Clerk tag", s.clerk_tag, { full: true, note: "Written without the leading #." })}</div>
+          <div class="form-grid">${settingInput("reimbursable_tag", "Fronted for others", s.reimbursable_tag, { note: "Tag a purchase you expect to be paid back for. It keeps its category and counts as spent until the money comes back." })}${settingInput("reimbursement_tag", "Paid back", s.reimbursement_tag, { note: "Tag the money when it arrives, however it is filed. It cancels what you fronted before any of it counts as income. Leave either blank to turn this off." })}</div>
         </div></section>
 
         <section class="panel settings-section" id="settings-sync"><header class="panel-head"><div><h3>Sync</h3><p class="section-description">How often Clerk pulls from Actual and checks your bank connections.</p></div></header><div class="panel-body">

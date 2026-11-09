@@ -25,7 +25,7 @@ Once Clerk has filed the same merchant the same way a few times, it **proposes a
 
 ### Tags what a category cannot express
 
-A category says which budget line. A tag says what kind of spending it was. Clerk writes `#subscription`, `#recurring`, `#annual`, `#unusual`, and `#refund` — almost all derived from your transaction history rather than from a model — plus a `#clerk` marker so everything it touched is findable and reversible from inside Actual.
+A category says which budget line. A tag says what kind of spending it was. Clerk writes `#subscription`, `#recurring`, `#annual`, `#unusual`, and `#refund` — almost all derived from your transaction history rather than from a model — plus a `#clerk` marker so everything it touched is findable and reversible from inside Actual. It also reads two tags you write yourself: `#reimbursable` on a purchase made for someone else, and `#reimbursement` on the money when it comes back.
 
 ### Tells you when a bank connection breaks
 
@@ -47,7 +47,7 @@ An account that has merely gone quiet is never treated as broken. It gets a nudg
 
 ```
 free money = expected income - what you have already committed
-available  = free money + anything refunded from a month already reported
+available  = free money + anything that came back from a month already reported
 remaining  = available - what you have spent since the 1st
 ```
 
@@ -61,7 +61,7 @@ A purchase counts in the month you made it, not the month the bank posted it: ro
 
 A refund settles against the month that paid for the purchase, and a refund for exactly a recent charge at the same shop is filed under that charge's category, so a reversed or returned purchase leaves its category where it started. Return something you bought this month and the two cancel; when the purchase belongs to a month already reported, that report stands and the money comes back as yours to spend now — never as spending pushed below zero, which is how a budget ends up claiming you have more than a whole month left.
 
-Money you expect back works the same way. File the purchase and the repayment in one unbudgeted category you keep by hand, such as *Reimbursable*: the two net within the month, a repayment that arrives later comes back as money to spend then, and whatever is never repaid stays as what fronting it cost you.
+Money you expect back is a tag, not a category. Tag the purchase `#reimbursable` in Actual and leave it in Dining or Groceries where it belongs; tag the money `#reimbursement` when it arrives, however it is filed. The purchase counts as spent until it is repaid. A repayment cancels this month's fronts first, then anything still owed from earlier months, which comes back as money to spend now; only when nothing is owed does the rest count as income. Whatever is never repaid stays as what fronting it cost you, and taking the tag off a purchase writes it off.
 
 ### Counts a card charge the moment it happens
 
@@ -191,7 +191,7 @@ Clerk is deliberately conservative:
 - **It never makes a rule without asking.** Rules are yours; Clerk only proposes them.
 - **It never auto-files a first-time merchant.** Model confidence is useful for ranking a proposal, not for granting permission to write it.
 - **It never touches a transaction it is unsure about.** Below the confidence threshold, the proposal goes to the review queue instead of into your budget.
-- **It never learns from a category you keep by hand.** Name one under **Settings → Filing → Categories you file by hand** and Clerk neither suggests it nor draws conclusions from what you file there, so a *Reimbursable* category never teaches it that your grocery store is reimbursable.
+- **It never learns from a category you keep by hand.** Name one under **Settings → Filing → Categories you file by hand** and Clerk neither suggests it nor draws conclusions from what you file there.
 - **Everything it does is reversible from inside Actual**, because everything it touches carries the `#clerk` tag.
 
 Set **Settings → Filing → For merchants Clerk already knows** to *Propose every category for review* if you would rather approve established merchants too. First-time merchants always require approval.
@@ -270,6 +270,8 @@ Everything is configurable in the UI. Any value set as an environment variable b
 | `CLERK_TAG_PROVENANCE` | `true` | Mark Clerk's own work |
 | `CLERK_TAG_CADENCE` | `true` | `#subscription`, `#recurring`, `#annual` |
 | `CLERK_TAG_ANOMALIES` | `true` | `#unusual`, `#refund` |
+| `CLERK_REIMBURSABLE_TAG` | `reimbursable` | Tag you write on a purchase made for someone else; blank turns the reading off |
+| `CLERK_REIMBURSEMENT_TAG` | `reimbursement` | Tag you write on the money when it comes back |
 
 ### Budget report
 

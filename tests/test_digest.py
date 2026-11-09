@@ -100,11 +100,17 @@ def test_money_refunded_from_an_earlier_month_is_named_beside_the_spending():
         }
     )
     assert "Spent $175.00 of $2,154.00 since the 1st" in payload["message"]
-    assert "Plus $74.00 refunded from an earlier month" in payload["message"]
+    assert "Plus $74.00 back from an earlier month" in payload["message"]
 
 
 def test_nothing_is_said_about_refunds_when_none_came_back():
-    assert "refunded from an earlier month" not in digest()["message"]
+    assert "back from an earlier month" not in digest()["message"]
+    assert "fronted for others" not in digest()["message"]
+
+
+def test_money_still_owed_for_a_front_is_named():
+    payload = digest({"fronted_open_cents": 2950})
+    assert "$29.50 you fronted for others is still owed to you" in payload["message"]
 
 
 def test_a_refund_is_reported_even_when_the_bills_eat_the_income():

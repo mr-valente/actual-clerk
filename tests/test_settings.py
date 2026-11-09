@@ -284,3 +284,17 @@ def test_protected_categories_accept_a_list_or_a_comma_string():
         protected_categories=["Reimbursable", "reimbursable", " Reimbursable "]
     ).protected_categories == ["Reimbursable"]
     assert Settings().protected_categories == []
+
+
+def test_reimbursement_tags_are_plain_tags_that_differ():
+    settings = Settings(reimbursable_tag="#Fronted", reimbursement_tag=" paid-back ")
+    assert settings.reimbursable_tag == "Fronted"
+    assert settings.reimbursement_tag == "paid-back"
+    assert Settings().reimbursable_tag == "reimbursable"
+    assert Settings().reimbursement_tag == "reimbursement"
+    # Either one left blank turns the reading off.
+    assert Settings(reimbursable_tag="", reimbursement_tag="").reimbursement_tag == ""
+    with pytest.raises(ValidationError):
+        Settings(reimbursement_tag="paid back")
+    with pytest.raises(ValidationError):
+        Settings(reimbursable_tag="owed", reimbursement_tag="Owed")

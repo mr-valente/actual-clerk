@@ -138,6 +138,9 @@ FREE MONEY · 2026-08 · day 21 of 31
 | **Projected month end** | Where the month lands if the rest matches so far |
 | **Received so far** | Income that has actually arrived, beside what was expected |
 | **Set aside from earlier months** | Budgeted to a bill previously and not yet spent |
+| **Returned from earlier months** | Refunded, or repaid for something you fronted, after the month that paid for it was reported |
+| **Fronted for others** | Spent this month for someone else, tagged `#reimbursable`, and counted as spent until it is repaid |
+| **Awaiting repayment** | Fronted in any month and not yet paid back |
 
 The pace marker is the one to watch. Behind pace on the 8th is a nudge; behind pace on the 24th is nearly over.
 
@@ -180,13 +183,21 @@ The dashboard always names the basis used, and shows what has arrived beside wha
 | Transfers between your own accounts | No |
 | Off-budget accounts such as a brokerage | No |
 | Refunds | Subtracted from what the same category spent this month; anything left over comes back as money to spend |
+| A purchase tagged `#reimbursable` | **Yes**, on a line of its own rather than its category's, until money tagged `#reimbursement` pays it back |
+| Money tagged `#reimbursement` | Cancels what you fronted this month, then what you fronted earlier; only the rest counts as income |
 | Income | Counted as income, never as spending |
 
 ### Refunds
 
 A refund settles against the month that paid for the purchase. Return something you bought this month and the two cancel, leaving that category where it started.
 
-When the purchase belongs to a month already reported, that report stands — it was true when it was sent, and the money is not available back then, it is available now. So the refund comes back as money this month has to spend, shown as **Refunded from earlier months**, rather than as spending pushed below zero. Free money itself does not move, which is what keeps it equal to Actual's Projected Savings.
+When the purchase belongs to a month already reported, that report stands — it was true when it was sent, and the money is not available back then, it is available now. So the refund comes back as money this month has to spend, shown as **Returned from earlier months**, rather than as spending pushed below zero. Free money itself does not move, which is what keeps it equal to Actual's Projected Savings.
+
+### Money fronted for others
+
+Tag a purchase you made for someone else `#reimbursable` in Actual and leave it in the category it belongs to. It counts as spent, on a line of its own rather than its category's, until the money comes back. When it does, tag the deposit `#reimbursement`, whatever category it is filed under. Repayments and fronts form one pool rather than matched pairs: a repayment cancels this month's fronts first, then anything still owed from earlier months, which comes back as **Returned from earlier months**, and only when nothing is owed does the rest count as income. An even $20 for a $19.50 dinner therefore settles an older front before its last fifty cents reach income.
+
+Whatever is never repaid stays as what fronting it cost you. To write a front off, take the tag off it. Tag only the share that is someone else's: a whole bill tagged leaves its budget untouched and counts against free money instead, so split the receipt in Actual and tag the part that is theirs.
 
 ### Carried budget
 
@@ -246,6 +257,6 @@ Leave this Actual option alone. It pushes a category's deficit into the next mon
 
 **One of my accounts is a credit card.** Card spending is on-budget and counts normally. Paying the card is a transfer between your own accounts, and transfers are ignored, so nothing counts twice.
 
-**I paid for something other people will pay me back for.** Make an unbudgeted category such as *Reimbursable*, outside any committed group, and file both the purchase and the repayment there, never as income. Clerk nets money coming back against that category's spending for the month; a repayment that arrives in a later month comes back as *Refunded from earlier months*, and whatever is never repaid stays as spending. Name the category under **Settings → Filing → Categories you file by hand** so Clerk never learns that the grocery store belongs there.
+**I paid for something other people will pay me back for.** Leave the purchase in its category and tag it `#reimbursable` in Actual, splitting the receipt first if part of it was yours. When the money arrives, tag it `#reimbursement`, however it is filed. Clerk counts the purchase as spent until it is repaid; a repayment cancels it, reaching back to earlier months as *Returned from earlier months*, and whatever is never repaid stays as spending. See [Money fronted for others](#money-fronted-for-others).
 
 **An annual bill is too large to accrue in twelve months.** It is an irregular purchase rather than a recurring bill. Budget it in the month it falls due and accept that the month has less free money.

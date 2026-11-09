@@ -285,6 +285,54 @@ def test_yesterday_is_measured_against_the_allowance_it_started_with(settings):
     assert result["grade"] == "green"
 
 
+def test_reimbursement_tags_are_read_from_the_notes(settings):
+    snap = snapshot(
+        transactions=[
+            transaction(datetime.date(2026, 7, 20), -3000, payee="Market", category_id="cat-groceries", notes="party #reimbursable"),
+            transaction(datetime.date(2026, 8, 1), 400000, payee="Employer", category_id="cat-paycheck"),
+            transaction(datetime.date(2026, 8, 7), -19500, payee="Bistro", category_id="cat-dining", notes="#Reimbursable"),
+            transaction(datetime.date(2026, 8, 9), 22500, payee="Venmo", category_id="cat-paycheck", notes="#reimbursement from Sam"),
+        ],
+        budgeted={"cat-rent": 180000},
+    )
+    report = budget_report(snap, settings, today=TODAY)
+    assert report["fronted_cents"] == 19500
+    assert report["reimbursed_cents"] == 22500
+    assert report["returned_cents"] == 3000
+    assert report["fronted_open_cents"] == 0
+    assert report["discretionary_spent_cents"] == 0
+    assert report["income_received_cents"] == 400000
+
+
+def test_the_reimbursement_tags_are_the_configured_ones(settings):
+    rows = [
+        transaction(datetime.date(2026, 8, 1), 400000, payee="Employer", category_id="cat-paycheck"),
+        transaction(datetime.date(2026, 8, 7), -19500, payee="Bistro", category_id="cat-dining", notes="#reimbursable"),
+        transaction(datetime.date(2026, 8, 8), -2500, payee="Cafe", category_id="cat-dining", notes="#fronted"),
+    ]
+    snap = snapshot(transactions=rows, budgeted={"cat-rent": 180000})
+
+    settings.reimbursable_tag = "fronted"
+    report = budget_report(snap, settings, today=TODAY)
+    assert report["fronted_cents"] == 2500
+    assert report["discretionary_spent_cents"] == 22000
+
+    settings.reimbursable_tag = ""
+    report = budget_report(snap, settings, today=TODAY)
+    assert report["fronted_cents"] == 0
+    assert report["discretionary_spent_cents"] == 22000
+
+
+def test_a_front_repaid_the_same_day_costs_yesterday_nothing(settings):
+    snap = _august(
+        transaction(datetime.date(2026, 8, 20), -19500, payee="Bistro", category_id="cat-dining", notes="#reimbursable"),
+        transaction(datetime.date(2026, 8, 20), 19500, payee="Venmo", category_id="cat-paycheck", notes="#reimbursement"),
+    )
+    result = budget_report(snap, settings, today=TODAY)["yesterday"]
+    assert result["spent_cents"] == 0
+    assert result["grade"] == "green"
+
+
 def test_a_phone_charge_from_yesterday_counts_against_it(settings):
     snap = _august(
         transaction(datetime.date(2026, 8, 20), -13500, payee="Market", category_id="cat-groceries"),

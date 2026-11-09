@@ -128,8 +128,8 @@ class Settings(BaseModel):
     memory_dispute_threshold: int = Field(default=2, ge=1, le=20)
     # Categories the user files by hand and nothing else: never offered to the
     # model, never learned from, and a row moved into one is not a correction.
-    # For money that is expected back -- a Reimbursable category -- where the
-    # merchant says nothing about where the next charge from it belongs.
+    # For a category that is a judgement about the purchase rather than about
+    # the shop, where the merchant says nothing about where its next charge belongs.
     protected_categories: list[str] = Field(default_factory=list)
 
     # --- Tagging ----------------------------------------------------------
@@ -137,6 +137,12 @@ class Settings(BaseModel):
     clerk_tag: str = Field(default="clerk", max_length=40)
     tag_provenance: bool = True
     tag_anomalies: bool = True
+    # Tags the user writes and Clerk only reads: a purchase made for someone
+    # else that is expected back, and the money that comes back for it. The
+    # budget nets the two while the categories stay what they are. Either one
+    # left empty turns the reading off.
+    reimbursable_tag: str = Field(default="reimbursable", max_length=40)
+    reimbursement_tag: str = Field(default="reimbursement", max_length=40)
 
     # --- Budget report ----------------------------------------------------
     # Empty means "every non-income category that carries a budget this month
@@ -240,14 +246,14 @@ class Settings(BaseModel):
     def normalize_plaid_client_name(cls, value: str) -> str:
         return " ".join(value.split()) or "Actual Clerk"
 
-    @field_validator("clerk_tag")
+    @field_validator("clerk_tag", "reimbursable_tag", "reimbursement_tag")
     @classmethod
     def normalize_tag(cls, value: str) -> str:
         # Actual writes tags into notes as `#tag`, so a tag holding whitespace
         # or a leading hash would not round-trip.
         value = value.strip().lstrip("#")
         if value and any(character.isspace() for character in value):
-            raise ValueError("the Clerk tag may not contain spaces")
+            raise ValueError("a tag may not contain spaces")
         return value
 
     @field_validator("committed_groups", "protected_categories", mode="before")
@@ -343,6 +349,11 @@ class Settings(BaseModel):
             raise ValueError("the model context must reserve at least 2048 input tokens")
         if self.tag_provenance and not self.clerk_tag:
             raise ValueError("a Clerk tag is required when provenance tagging is enabled")
+        if (
+            self.reimbursable_tag
+            and self.reimbursable_tag.casefold() == self.reimbursement_tag.casefold()
+        ):
+            raise ValueError("the reimbursable and reimbursement tags must differ")
         if self.anticipated_expire_days < self.anticipated_match_window_days:
             raise ValueError(
                 "anticipated charges must stay open at least as long as the match window"
@@ -466,6 +477,8 @@ ENVIRONMENT_FIELDS = {
     "CLERK_TAG": "clerk_tag",
     "CLERK_TAG_PROVENANCE": "tag_provenance",
     "CLERK_TAG_ANOMALIES": "tag_anomalies",
+    "CLERK_REIMBURSABLE_TAG": "reimbursable_tag",
+    "CLERK_REIMBURSEMENT_TAG": "reimbursement_tag",
     "CLERK_COMMITTED_GROUPS": "committed_groups",
     "CLERK_MONTHLY_INCOME": "monthly_income_override",
     "CLERK_INCOME_LOOKBACK_MONTHS": "income_lookback_months",

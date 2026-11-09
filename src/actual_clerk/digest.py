@@ -255,8 +255,13 @@ def build_digest(
             )
             if returned > 0:
                 budget_items.append(
-                    f"Plus {format_money(returned, currency)} refunded from an "
-                    "earlier month"
+                    f"Plus {format_money(returned, currency)} back from an earlier month"
+                )
+            fronted_open = int(report.get("fronted_open_cents", 0))
+            if fronted_open > 0:
+                budget_items.append(
+                    f"{format_money(fronted_open, currency)} you fronted for others "
+                    "is still owed to you"
                 )
             anticipated = int(report.get("anticipated_cents", 0))
             if anticipated > 0:

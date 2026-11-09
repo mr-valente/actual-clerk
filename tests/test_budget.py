@@ -251,6 +251,143 @@ def test_a_refund_on_a_committed_category_reduces_its_overspend():
     assert result.committed_overspend_cents == 0
 
 
+def fronted(transaction_id, day, amount_cents, category_id="out"):
+    """A purchase made for someone else, tagged as expected back."""
+    return TransactionInfo(
+        transaction_id, datetime.date(2026, *day), -amount_cents, category_id, reimbursable=True
+    )
+
+
+def repaid(transaction_id, day, amount_cents, category_id="inc", **kwargs):
+    """Money coming back for a front, filed as income the way Venmo lands."""
+    return TransactionInfo(
+        transaction_id, datetime.date(2026, *day), amount_cents, category_id, reimbursement=True, **kwargs
+    )
+
+
+PAYCHECK = TransactionInfo("pay", datetime.date(2026, 8, 1), 400000, "inc")
+
+
+def test_a_front_repaid_in_the_same_month_cancels_out_and_is_not_income():
+    result = report(
+        [
+            PAYCHECK,
+            fronted("1", (8, 7), 19500),
+            TransactionInfo("2", datetime.date(2026, 8, 7), -4500, "out"),
+            repaid("3", (8, 9), 19500),
+        ]
+    )
+    assert result.fronted_cents == 19500
+    assert result.reimbursed_cents == 19500
+    assert result.fronted_open_cents == 0
+    assert result.discretionary_spent_cents == 4500
+    assert result.spent_cents == 4500
+    assert result.returned_cents == 0
+    # The repayment was filed as income in Actual and is not counted as such.
+    assert result.income_received_cents == 400000
+    # Dining shows what was spent on dining; the fronted dinner is not in it.
+    assert [(line["category_id"], line["spent_cents"]) for line in result.top_categories] == [
+        ("out", 4500)
+    ]
+
+
+def test_a_front_repaid_in_a_later_month_comes_back_as_money_to_spend():
+    """July was charged for the dinner and July has been reported."""
+    result = report([PAYCHECK, fronted("1", (7, 28), 19500), repaid("2", (8, 4), 19500)])
+    assert result.fronted_cents == 0
+    assert result.reimbursed_cents == 19500
+    assert result.fronted_open_cents == 0
+    assert result.returned_cents == 19500
+    assert result.discretionary_spent_cents == 0
+    assert result.spent_cents == 0
+    assert result.free_cents == 208000
+    assert result.available_cents == 227500
+    assert result.remaining_cents == 227500
+
+
+def test_a_front_nobody_has_repaid_is_spending_and_stays_owed():
+    result = report([PAYCHECK, fronted("1", (8, 7), 20000, "food")])
+    assert result.fronted_cents == 20000
+    assert result.reimbursed_cents == 0
+    assert result.fronted_open_cents == 20000
+    assert result.discretionary_spent_cents == 20000
+    assert result.spent_cents == 20000
+    assert result.top_categories == []
+
+
+def test_an_overpayment_settles_an_older_front_before_it_becomes_income():
+    """An even twenty for a nineteen-fifty dinner, with three dollars still owed from July."""
+    result = report(
+        [
+            fronted("old", (7, 10), 300),
+            PAYCHECK,
+            fronted("1", (8, 7), 1950),
+            repaid("2", (8, 8), 2000),
+        ]
+    )
+    assert result.reimbursed_cents == 2000
+    assert result.discretionary_spent_cents == 0
+    assert result.returned_cents == 50
+    assert result.fronted_open_cents == 250
+    assert result.income_received_cents == 400000
+
+    # With nothing older owed, the last fifty cents are plain income.
+    result = report([PAYCHECK, fronted("1", (8, 7), 1950), repaid("2", (8, 8), 2000)])
+    assert result.reimbursed_cents == 1950
+    assert result.returned_cents == 0
+    assert result.fronted_open_cents == 0
+    assert result.income_received_cents == 400050
+
+
+def test_a_month_repaid_beyond_what_was_owed_does_not_leave_the_pool_in_credit():
+    june = [fronted("1", (6, 5), 2000), repaid("2", (6, 9), 2500)]
+    july = [fronted("3", (7, 12), 3000)]
+    result = report([*june, *july, PAYCHECK])
+    assert result.fronted_open_cents == 3000
+    assert result.returned_cents == 0
+
+    result = report([*june, *july, PAYCHECK, repaid("4", (8, 3), 3000)])
+    assert result.returned_cents == 3000
+    assert result.fronted_open_cents == 0
+
+
+def test_a_front_leaves_its_category_whether_or_not_it_is_a_bill():
+    """Tag only the share that is somebody else's: the whole bill is never theirs."""
+    result = report([PAYCHECK, fronted("1", (8, 5), 6000, "power")])
+    assert result.committed_spent_cents == 0
+    assert result.committed_overspend_cents == 0
+    assert result.fronted_cents == 6000
+    assert result.discretionary_spent_cents == 6000
+    assert result.spent_cents == 6000
+
+    result = report([PAYCHECK, fronted("1", (8, 5), 6000, "power"), repaid("2", (8, 6), 6000)])
+    assert result.spent_cents == 0
+    assert result.reimbursed_cents == 6000
+
+
+def test_a_tag_on_the_wrong_side_of_the_ledger_is_ignored():
+    result = report(
+        [
+            PAYCHECK,
+            # Money in, tagged as fronted: an ordinary refund in its category.
+            TransactionInfo("1", datetime.date(2026, 8, 3), 500, "out", reimbursable=True),
+            # Money out, tagged as a repayment: ordinary spending.
+            TransactionInfo("2", datetime.date(2026, 8, 4), -700, "food", reimbursement=True),
+            # Off-budget money and transfers never enter the pool.
+            repaid("3", (8, 5), 900, off_budget=True),
+            TransactionInfo(
+                "4", datetime.date(2026, 8, 6), -800, "out", is_transfer=True, reimbursable=True
+            ),
+        ]
+    )
+    assert result.fronted_cents == 0
+    assert result.reimbursed_cents == 0
+    assert result.fronted_open_cents == 0
+    assert result.discretionary_spent_cents == 700
+    assert result.returned_cents == 500
+    assert result.income_received_cents == 400000
+
+
 def test_explicit_committed_groups_replace_the_budgeted_default():
     transactions = [
         TransactionInfo("1", datetime.date(2026, 8, 1), 400000, "inc"),

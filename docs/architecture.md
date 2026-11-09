@@ -145,9 +145,9 @@ neither evidence nor a dispute; a review answered with it records nothing,
 and *Always* is refused for it. The budget counts it like any other
 category, and two things deliberately still reach it: a refund of a charge
 filed there, which follows its charge, and a rule the user wrote for it.
-This is what makes a category such as *Reimbursable* usable for money that
-is expected back, where the merchant says nothing about where its next
-charge belongs.
+This is for a category that is a judgement about the purchase rather than
+about the shop, where the merchant says nothing about where its next charge
+belongs.
 
 A rule whose category has left the budget files nothing and becomes a
 *repair* proposal, which asks for the replacement. Actual used to rewrite
@@ -165,6 +165,8 @@ Almost every tag Clerk writes is derived from history rather than from a model:
 - `#clerk` — provenance, so everything Clerk touched is findable and reversible from inside Actual.
 
 Tag writing is idempotent: notes are re-derived on the budget thread from whatever the transaction holds at write time, so a note the user edited between the proposal and the write is extended rather than replaced.
+
+Two tags go the other way: the user writes them and Clerk only reads them. `#reimbursable` marks a purchase made for someone else that is expected back, and `#reimbursement` marks the money when it comes back. Both names are settings (`reimbursable_tag`, `reimbursement_tag`). They are read from the notes when the snapshot's rows become budget transactions (`to_transaction_infos` in `reporting.py`) and matter only to the budget report, never to filing: the purchase keeps its category, so there is nothing for memory or the model to learn or unlearn.
 
 ## Connection health
 
@@ -192,7 +194,7 @@ Each account gets the most serious of its signals as a status, and keeps all of 
 
 ```
 free money = expected income - committed spending
-available  = free money + refunds reversing a month already reported
+available  = free money + money back from a month already reported
 remaining  = available - discretionary spending - committed overspend
 ```
 
@@ -205,6 +207,8 @@ Expected income prefers, in order: income budgeted in Actual for the month, a co
 Transfers, off-budget accounts, and starting balances never count. Uncategorized spending counts in full and is reported separately so its provisional share is visible.
 
 A refund belongs to the month that was charged for the purchase, so it is netted against its own category's spending for the month before anything else happens to it. What it cannot cancel there reverses a charge an earlier report already counted. That report is a record and is not restated; the money is instead reported as returned and added to what this month has to spend. Free money stays expected income minus commitments, so it remains exactly the figure Actual shows as Projected Savings, and the returned money sits beside it as its own line. Netting per category rather than across the month is what stops a refund in one category from being read as underspending in another; keeping the overflow out of spending is what stops a negative spend from extrapolating into a projected month-end richer than the month began, and keeps the remaining share at or under 100%. A refund on a committed category keeps the simpler rule: it draws on that category's own budget rather than on free money.
+
+Money fronted for someone else (`#reimbursable`) is spent until it comes back. In the report it leaves its category's figure, bill or not, for a line of its own, and the part not yet repaid is discretionary spending. Repayments (`#reimbursement`, whatever category they were filed under) form one pool with the fronts rather than being matched to them: a repayment cancels this month's fronts first, then fronts from earlier months, which were counted as spent then and so come back inside the returned figure; only what is left once nothing is owed counts as income. The pool is carried month by month and clamped at zero (`fronted_carryover`), so a month repaid beyond what it was owed leaves nothing in credit, and no window applies: a front stays owed until it is repaid or its tag is removed, which is how one is written off. The user tags only the share that is someone else's, since a whole bill tagged leaves its budget untouched and counts against free money instead.
 
 Each delivered digest stores the budget-state fields that actually move free money (`free_cents`, `returned_cents`, `spent_cents`, and `remaining_cents`) plus the current per-account SimpleFIN `balance-date`. Calendar-derived pace and daily-safe figures are intentionally excluded from change detection. If the budget-state tuple matches the prior delivered report in the same month, the financial blocks collapse to a quiet message while connection and review warnings remain. An advancing `balance-date` proves that newer bank data arrived; a non-advancing value proves only that SimpleFIN exposed no newer balance timestamp, because the protocol describes when the balance became its current value rather than a universal last-polled timestamp.
 
