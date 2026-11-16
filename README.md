@@ -343,6 +343,7 @@ Hourly is already generous: SimpleFIN itself refreshes each linked account rough
 
 - **Persistent storage:** `/app/data` holds Clerk's SQLite database and the official API's private cached copy of the budget. The cache makes restarts fast; the database holds jobs, decisions, learned merchants, health history, and settings. Clerk takes an exclusive lock on that API cache so two replicas cannot write it concurrently.
 - **Health check:** the image reports healthy once `/api/health` answers.
+- **Home dashboard tile:** `GET /api/summary` is flat and pre-worded for a widget such as gethomepage's `customapi`: `budget_left_text` ("73% left", "12% over", or "—"), `budget_left_percent`, `applied_today`, and `alerts` (transactions to review plus unhealthy bank connections, also given separately). It reads the stored snapshot, so it is as cheap as `/api/overview`.
 - **Network:** Clerk needs to reach your Actual server, your model server, and (optionally) SimpleFIN, Plaid, and ntfy. `host.docker.internal` is mapped for a model running on the host. The browser also needs `cdn.plaid.com` when connecting a bank through Plaid.
 - **Security:** Clerk has no authentication of its own. Put it behind whatever already protects your Actual instance, and do not expose it to the internet.
 

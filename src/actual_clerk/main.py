@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import math
 import mimetypes
 import os
 import secrets
@@ -327,6 +328,52 @@ async def overview(request: Request) -> dict[str, Any]:
         "apply_mode": settings.apply_mode,
         "sync_enabled": settings.sync_enabled,
         "stale": _snapshot_age(snapshot),
+    }
+
+
+def _whole_percent(ratio: float) -> int:
+    """Rounded the way the dashboard's ``percent()`` rounds, so the two agree."""
+    return math.floor(abs(ratio) * 100 + 0.5)
+
+
+@app.get("/api/summary")
+async def summary(request: Request) -> dict[str, Any]:
+    """The month's free money as a share, and what needs you, for a home dashboard tile.
+
+    Flat, and worded where a tile would print the value, so a box never reads
+    "NaN%". ``budget_left_text`` is phrased as the Overview's hero phrases it:
+    "73% left" while there is money left, "12% over" once past zero, and "—"
+    when there is no free money to measure against (no income found, or bills
+    budgeted beyond it). ``alerts`` is one number for everything waiting on
+    you: transactions to review plus bank connections that are not healthy.
+    Reads the stored snapshot, like ``/api/overview``; nothing is fetched.
+    """
+    database = _database(request)
+    snapshot = database.get_snapshot(OVERVIEW_SNAPSHOT) or {}
+    budget = snapshot.get("budget") or {}
+    counts = database.counts()
+    measurable = bool(budget.get("configured")) and int(budget.get("available_cents") or 0) > 0
+    ratio = float(budget.get("remaining_percent") or 0.0) if measurable else None
+    if ratio is None:
+        text = "—"
+    elif ratio < 0:
+        text = f"{_whole_percent(ratio)}% over"
+    else:
+        text = f"{_whole_percent(ratio)}% left"
+    return {
+        "month": budget.get("month"),
+        "budget_left_percent": round(ratio * 100, 1) if ratio is not None else None,
+        "budget_left_text": text,
+        "remaining_cents": budget.get("remaining_cents"),
+        "available_cents": budget.get("available_cents"),
+        "on_track": budget.get("on_track"),
+        "days_remaining": budget.get("days_remaining"),
+        "alerts": counts["needs_review"] + counts["degraded_accounts"],
+        "needs_review": counts["needs_review"],
+        "degraded_accounts": counts["degraded_accounts"],
+        "applied_today": counts["applied_today"],
+        "stale": _snapshot_age(snapshot),
+        "version": __version__,
     }
 
 
