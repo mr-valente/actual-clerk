@@ -156,6 +156,7 @@ def build_digest(
     sections: dict[str, bool] | None = None,
     previous: dict[str, Any] | None = None,
     proposal_count: int = 0,
+    posted_for_more_count: int = 0,
 ) -> dict[str, Any]:
     """Compose the digest payload: its fixed title, body, tags, and priority."""
 
@@ -337,6 +338,12 @@ def build_digest(
         if proposal_count:
             waiting.append(
                 f"{plural(proposal_count, 'question')} about your rules under Intelligence"
+            )
+        if posted_for_more_count:
+            # A tip added after approval: the charge counts twice until answered.
+            waiting.append(
+                f"{plural(posted_for_more_count, 'phone charge')} that may have posted "
+                "for more, to confirm under Intelligence"
             )
         uncategorized = int(report.get("uncategorized_count", 0))
         phone = int(report.get("anticipated_uncategorized_count", 0))

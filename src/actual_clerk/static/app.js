@@ -947,6 +947,14 @@ function proposalRow(item, categories) {
     title = `Is “${body.alias_label || body.alias_key}” the same shop as “${body.merchant_key}”?`;
     detail = `${escapeHtml(evidence.reason || "")} The model is ${percent(evidence.confidence || 0)} sure. Yes makes an alias, so the known merchant's rules and history apply to this name.`;
     acceptLabel = "Same shop";
+  } else if (item.kind === "settle") {
+    // A tip added after the card approved it: the phone's charge never
+    // settles by amount, so it counts twice until the person says which row.
+    const spent = -(Number(body.charge_cents) || 0);
+    const posted = -(Number(body.posted_cents) || 0);
+    title = `${body.merchant || "A phone charge"}: ${money(spent)} posted as ${money(posted)}?`;
+    detail = `Your phone saw ${money(spent)} on ${shortDate(body.noticed_date)}; ${escapeHtml(body.account_name || "the bank")} posted ${money(posted)} from ${escapeHtml(body.payee_name || "the same merchant")} on ${shortDate(body.posted_date)}, ${money(posted - spent)} more, as a tip added after the card was approved would. Both count until you answer: “Same purchase” settles the phone charge against that row, “No” keeps it waiting for a row of its own.`;
+    acceptLabel = "Same purchase";
   } else if (item.kind === "repair") {
     title = `${merchant}: ${body.from_category_name || body.from_category_id || "a category"} is gone`;
     detail = `${escapeHtml(evidence.reason || "")} Pick where it goes now.`;
@@ -1015,6 +1023,7 @@ const PROPOSAL_KINDS = [
   ["rule_retire", "Retirements"],
   ["alias", "Aliases"],
   ["repair", "Repairs"],
+  ["settle", "Posted for more"],
 ];
 const INTELLIGENCE_SEARCHES = ["rule-search", "merchant-search", "alias-search"];
 
@@ -1096,13 +1105,13 @@ function proposalsPanel(page) {
   if (!kinds.some(([kind]) => kind === state.proposalFilter)) state.proposalFilter = "all";
   const shown = proposals.filter((item) => state.proposalFilter === "all" || item.kind === state.proposalFilter);
   return `<article class="panel has-pickers">
-    <header class="panel-head"><div><h2>Proposals</h2><p>What Clerk wants to know: merchants filed the same way often enough to deserve a rule, rules your corrections in Actual disagree with, rules whose category has left the budget, and names the model believes belong to one shop.</p></div>
+    <header class="panel-head"><div><h2>Proposals</h2><p>What Clerk wants to know: merchants filed the same way often enough to deserve a rule, rules your corrections in Actual disagree with, rules whose category has left the budget, names the model believes belong to one shop, and phone charges the bank seems to have posted for more than your phone saw.</p></div>
       <div class="panel-actions">
         <button class="button ghost small" data-action="propose-from-history" title="Ask for a rule wherever your history has filed a merchant one way, every time, often enough">Propose from history</button>
         ${proposals.length > 3 ? `<button class="button ghost small" data-action="proposals-decline-all" data-count="${proposals.length}">Decline all</button>` : ""}
       </div></header>
     ${kinds.length > 1 ? `<div class="toolbar">${filterChips("proposal-filter", state.proposalFilter, [["all", "All", proposals.length], ...kinds])}</div>` : ""}
-    <div class="status-list">${shown.length ? shown.map((item) => proposalRow(item, categories)).join("") : emptyState("?", "Nothing to decide", "Clerk asks here when a merchant has been filed the same way a few times, when a correction in Actual disagrees with a rule, or when a name looks like a shop it already knows. Propose from history looks through everything filed so far.")}</div>
+    <div class="status-list">${shown.length ? shown.map((item) => proposalRow(item, categories)).join("") : emptyState("?", "Nothing to decide", "Clerk asks here when a merchant has been filed the same way a few times, when a correction in Actual disagrees with a rule, when a name looks like a shop it already knows, or when a charge your phone saw seems to have posted for more. Propose from history looks through everything filed so far.")}</div>
   </article>`;
 }
 
@@ -1359,9 +1368,12 @@ function anticipatedChargeRow(item, { sources = [], aliases = null } = {}) {
       : item.status === "expired"
         ? (isHeld(item) ? "Never posted again, so the bank evidently released it" : "Nothing matching arrived, so it stopped counting")
         : item.status === "dismissed" ? "Dismissed by hand" : escapeHtml((item.text || "").slice(0, 110));
-  const review = item.status === "open" && item.review?.status === "needs_review"
+  const larger = item.status === "open" ? item.posted_for_more : null;
+  const review = `${item.status === "open" && item.review?.status === "needs_review"
     ? `<a class="button secondary small" href="#intelligence-review">Categorize</a>`
-    : "";
+    : ""}${larger
+    ? `<a class="button secondary small" href="#intelligence-proposals" title="${escapeHtml(`${larger.payee_name || "The bank"} posted ${money(-larger.posted_cents)} on ${shortDate(larger.posted_date)}: the same purchase with a tip? Until you answer, both count.`)}">Posted for ${money(-larger.posted_cents)}?</a>`
+    : ""}`;
   const actions = item.status === "open"
     ? `<button class="button ghost small" data-action="anticipated-dismiss" data-id="${escapeHtml(item.id)}" title="Stop counting this charge now">Dismiss</button>`
     : item.status === "matched" || item.status === "dismissed" || item.status === "expired"
@@ -2593,7 +2605,8 @@ document.addEventListener("click", async (event) => {
     target.disabled = true;
     try {
       const result = await api(`/api/intelligence/proposals/${encodeURIComponent(target.dataset.id)}/resolve`, { method: "POST", body: JSON.stringify({ action: accept ? "accept" : "decline", ...(chosen ? { category_id: chosen } : {}) }) });
-      toast(accept ? "Done" : "Proposal declined", accept ? (result.rule ? `${result.rule.merchant_label || result.rule.merchant_key} → ${result.rule.category_name}${result.rule.status === "retired" ? " (retired)" : ""}` : "") : "Clerk will not ask this again.");
+      const settled = result.charge ? (result.settled ? "The phone charge settled against the bank's row and no longer counts twice." : "Recorded; it settles the next time Clerk reads Actual.") : "";
+      toast(accept ? "Done" : "Proposal declined", accept ? (result.rule ? `${result.rule.merchant_label || result.rule.merchant_key} → ${result.rule.category_name}${result.rule.status === "retired" ? " (retired)" : ""}` : settled) : "Clerk will not ask this again.");
       await renderRoute({ quiet: true });
     } catch (error) { toast("Could not resolve the proposal", error.message, "error"); target.disabled = false; }
   }

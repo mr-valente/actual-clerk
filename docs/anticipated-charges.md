@@ -101,6 +101,28 @@ card charged ──▶ card app notification ──▶ companion app ──▶ P
    month's end that decides which month the money counts in. A reconciled row
    is left alone, a date you later change in Actual is not changed back, and
    a Plaid update to the row never moves it again.
+
+   A purchase that **posts for more** than the phone saw never settles by
+   amount: a tip added after the card was approved ($10.00 approved, $11.00
+   posted) leaves the charge and the bank's row both counting. Clerk never
+   settles such a row by itself, because once the amounts differ only the
+   merchant says which purchase it is. It asks instead. A row on the same
+   account, from the same merchant (by key or a learned alias; shared words
+   are not enough), dated within the match window, and posted for more but
+   by no more than half again, becomes a question under **Intelligence →
+   Proposals** (*Posted for more*). The charge on the Connections page and
+   the Overview links to it, and the question is counted in the morning
+   report's *Waiting for you* and in the home tile's alerts.
+   **Same purchase** settles the charge against that row exactly as a match
+   by amount does: the row takes the phone's day and any answer given about
+   the charge, and Reopen undoes it. **No** is remembered for that pairing
+   alone; the charge keeps waiting for a row of its own until it expires.
+   A question withdraws itself when the charge settles, expires, or is
+   dismissed, or when its row leaves Actual or settles another charge. Each
+   charge is asked about one row at a time, the one that posted for the
+   least extra first, and each row is offered to one charge at a time.
+   Held pending charges are not asked about: they settle by the bank's own
+   link when it gives one, and are released within days when it does not.
 6. **Learns from the settlement.** When the notification's merchant and the
    posted payee differ ("Valve" on the phone, "Steam" on the statement), the
    pair is remembered as an alias; a taught alias is never overwritten by a

@@ -664,6 +664,9 @@ a.status-chip:hover { text-decoration: underline; }
   .review-panel .review-row > .cell-select, .review-panel .review-row > .row-actions { display: flex; grid-column: 1 / -1; }
   .review-panel .review-row > .cell-select { margin-top: 5px; }
   .review-panel .review-row > .row-actions { justify-content: flex-start; flex-wrap: wrap; }
+  /* A proposal is a question; on a phone it must still be answerable. */
+  .rule-row[data-proposal-id] > .row-meta, .rule-row[data-proposal-id] > .row-actions { display: flex; grid-column: 2 / -1; flex-wrap: wrap; align-items: center; gap: 6px; text-align: left; }
+  .rule-row[data-proposal-id] > .row-actions { justify-content: flex-start; }
   .category-picker-menu { position: fixed; inset: auto 15px 18px; width: auto; max-height: min(70vh, 520px); }
   .category-picker-options { max-height: calc(min(70vh, 520px) - 62px); }
   .settings-layout { display: block; }

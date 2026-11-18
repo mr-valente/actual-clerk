@@ -328,6 +328,10 @@ CREATE TABLE IF NOT EXISTS anticipated_charges (
     -- A withdrawn pending charge's posted transaction, once the bank names
     -- it: settles the charge by identity, whatever the posted amount.
     posted_imported_id TEXT NOT NULL DEFAULT '',
+    -- A phone charge's row in Actual, as the person confirmed it when it
+    -- posted for more than the phone saw (a tip added after approval):
+    -- settles the charge by identity, as a held charge's posted row does.
+    confirmed_transaction_id TEXT NOT NULL DEFAULT '',
     resolved_at REAL,
     created_at REAL NOT NULL,
     updated_at REAL NOT NULL
@@ -656,6 +660,7 @@ class Database:
             "renamed_to": "TEXT NOT NULL DEFAULT ''",
             "rejected_transaction_ids": "TEXT NOT NULL DEFAULT ''",
             "posted_imported_id": "TEXT NOT NULL DEFAULT ''",
+            "confirmed_transaction_id": "TEXT NOT NULL DEFAULT ''",
         }
         for column, definition in additions.items():
             if columns and column not in columns:
@@ -1684,12 +1689,18 @@ class Database:
             connection.commit()
         return proposal_id
 
-    def list_proposals(self, *, status: str = "open", limit: int = 200) -> list[dict[str, Any]]:
+    def list_proposals(
+        self, *, status: str = "open", kind: str | None = None, limit: int = 200
+    ) -> list[dict[str, Any]]:
+        sql = "SELECT * FROM proposals WHERE status=?"
+        values: list[Any] = [status]
+        if kind:
+            sql += " AND kind=?"
+            values.append(kind)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        values.append(limit)
         with self.connect() as connection:
-            rows = connection.execute(
-                "SELECT * FROM proposals WHERE status=? ORDER BY created_at DESC LIMIT ?",
-                (status, limit),
-            ).fetchall()
+            rows = connection.execute(sql, values).fetchall()
         return [self._proposal_row(row) for row in rows]
 
     def get_proposal(self, proposal_id: str) -> dict[str, Any] | None:
@@ -2626,6 +2637,20 @@ class Database:
                 ).rowcount
         return count
 
+    def confirm_anticipated_transaction(self, charge_id: str, transaction_id: str) -> bool:
+        """The person says this row in Actual is this open charge's purchase.
+
+        The next reconcile settles the charge against it by identity,
+        whatever amount it posted for. Only an open charge can be confirmed.
+        """
+        with self.connect() as connection:
+            cursor = connection.execute(
+                "UPDATE anticipated_charges SET confirmed_transaction_id=?, updated_at=? "
+                "WHERE id=? AND status='open'",
+                (transaction_id, time.time(), charge_id),
+            )
+        return cursor.rowcount > 0
+
     def get_anticipated_charge(self, charge_id: str) -> dict[str, Any] | None:
         with self.connect() as connection:
             row = connection.execute(
@@ -2838,7 +2863,7 @@ class Database:
                 "THEN rejected_transaction_ids WHEN rejected_transaction_ids='' "
                 "THEN matched_transaction_id "
                 "ELSE rejected_transaction_ids || ',' || matched_transaction_id END, "
-                "matched_transaction_id='', "
+                "matched_transaction_id='', confirmed_transaction_id='', "
                 "matched_payee='', matched_date='', match_reason='', date_carried=0, "
                 "name_carried=0, replaced_payee='', renamed_to='', "
                 "resolved_at=NULL, updated_at=? "
@@ -2955,6 +2980,9 @@ class Database:
             proposals = connection.execute(
                 "SELECT COUNT(*) FROM proposals WHERE status='open'"
             ).fetchone()[0]
+            settle_proposals = connection.execute(
+                "SELECT COUNT(*) FROM proposals WHERE status='open' AND kind='settle'"
+            ).fetchone()[0]
             rules = connection.execute(
                 "SELECT COUNT(*) FROM merchant_rules WHERE status='active'"
             ).fetchone()[0]
@@ -2971,6 +2999,7 @@ class Database:
             "skipped": skipped,
             "applied_today": applied_today,
             "proposals": proposals,
+            "settle_proposals": settle_proposals,
             "rules": rules,
             "degraded_accounts": degraded,
             "anticipated_open": anticipated,

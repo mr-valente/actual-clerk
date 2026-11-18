@@ -18,6 +18,7 @@ from actual_clerk.domain.anticipated import (
     expired_charges,
     match_charges,
     parse_notification,
+    posted_for_more,
 )
 from actual_clerk.domain.budget import (
     AnticipatedInfo,
@@ -1063,3 +1064,226 @@ def test_a_merchant_filed_by_hand_in_a_protected_category_is_not_anticipated_the
     summary = anticipated.reconcile(database, steam_history(), settings, today=TODAY)
     assert summary["categorized"] == 0
     assert database.get_anticipated_charge(row["id"])["category_id"] in ("", None)
+
+
+# ------------------------------------------------------------ posted for more
+#
+# A tip added after the card approved a purchase posts it for more than the
+# phone saw. Such a row is only ever asked about, never settled by itself.
+
+
+def test_a_row_that_posted_for_more_is_offered_but_never_matched():
+    tipped = candidate("t-tip", cents=-1100, date=TODAY + datetime.timedelta(days=1), key="mayo performing arts")
+    phone = charge(cents=-1000, key="mayo performing")
+    assert match_charges([phone], [tipped], window_days=10) == []
+    [found] = posted_for_more([phone], [tipped], window_days=10)
+    assert (found.charge_id, found.transaction_id, found.amount_cents) == ("c1", "t-tip", -1100)
+
+
+@pytest.mark.parametrize(
+    ("row", "why"),
+    [
+        (candidate("t", cents=-1100, key="walmart"), "another merchant"),
+        (candidate("t", cents=-1100), "a row with no merchant"),
+        (candidate("t", cents=-1100, key="mayo performing", account_id="acct-other"), "another account"),
+        (candidate("t", cents=-1000, key="mayo performing"), "the same amount is the exact matcher's"),
+        (candidate("t", cents=-900, key="mayo performing"), "posted for less"),
+        (candidate("t", cents=-1501, key="mayo performing"), "more than half again"),
+        (candidate("t", cents=-1100, key="mayo performing", date=TODAY + datetime.timedelta(days=11)), "after the window"),
+        (candidate("t", cents=-1100, key="mayo performing", date=TODAY - datetime.timedelta(days=2)), "before the window"),
+        (candidate("t", cents=-1100, key="performing arts guild"), "shared words alone"),
+    ],
+)
+def test_only_the_same_merchant_posting_a_little_more_is_offered(row, why):
+    assert posted_for_more([charge(cents=-1000, key="mayo performing")], [row], window_days=10) == [], why
+
+
+def test_half_again_is_still_offered_and_a_learned_alias_names_the_merchant():
+    phone = charge(cents=-1000, key="valve")
+    row = candidate("t-steam", cents=-1500, key="steam")
+    assert posted_for_more([phone], [row], window_days=10) == []
+    [found] = posted_for_more([phone], [row], window_days=10, aliases={"valve": "steam"})
+    assert found.transaction_id == "t-steam"
+
+
+def test_the_least_extra_is_offered_first_and_each_row_to_one_charge():
+    rows = [
+        candidate("t-big", cents=-1400, key="cafe roma"),
+        candidate("t-small", cents=-1150, key="cafe roma", date=TODAY + datetime.timedelta(days=3)),
+    ]
+    first = charge("c1", cents=-1000, key="cafe roma")
+    second = charge("c2", cents=-1000, key="cafe roma", noticed=TODAY + datetime.timedelta(days=1))
+    found = posted_for_more([second, first], rows, window_days=10)
+    assert [(item.charge_id, item.transaction_id) for item in found] == [("c1", "t-small"), ("c2", "t-big")]
+
+
+def test_a_declined_pairing_a_claimed_row_and_a_rejected_row_are_never_offered():
+    rows = [
+        candidate("t-declined", cents=-1100, key="cafe roma"),
+        candidate("t-claimed", cents=-1100, key="cafe roma"),
+        candidate("t-rejected", cents=-1100, key="cafe roma"),
+        candidate("t-next", cents=-1200, key="cafe roma"),
+    ]
+    phone = AnticipatedCharge("c1", "acct-card", -1000, TODAY, "cafe roma", frozenset({"t-rejected"}))
+    found = posted_for_more(
+        [phone], rows, window_days=10, used_transaction_ids={"t-claimed"}, declined={("c1", "t-declined")}
+    )
+    assert [item.transaction_id for item in found] == ["t-next"]
+
+
+MAYO_NOTICED = datetime.datetime(2026, 8, 20, 20, 29, tzinfo=datetime.UTC)
+MAYO_TEXT = "Your purchase for $10.00 at SQ *MAYO PERFORMING AR was approved."
+
+
+def mayo_charge(database, settings):
+    row, _ = anticipated.record_notification(
+        database, settings, source=source(database), posted_at_ms=int(MAYO_NOTICED.timestamp() * 1000),
+        title="Venture Credit Card…4273", text=MAYO_TEXT,
+    )
+    return row
+
+
+def mayo_snapshot(*rows):
+    return snapshot(
+        accounts=[account("Venture", account_id="acct-card")],
+        transactions=list(rows)
+        or [transaction(datetime.date(2026, 8, 21), -1100, payee="Mayo Performing Arts Center",
+                        account_id="acct-card", transaction_id="t-tipped")],
+    )
+
+
+def settle_questions(database, status="open"):
+    return database.list_proposals(status=status, kind=anticipated.SETTLE_PROPOSAL)
+
+
+def test_a_charge_that_posted_for_more_is_asked_about_and_keeps_counting(database, settings):
+    row = mayo_charge(database, settings)
+    summary = anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    assert summary["matched"] == 0
+    assert summary["questions"] == 1
+    [still] = summary["open"]
+    assert still["status"] == "open" and still["counts"] is True
+    assert still["posted_for_more"]["transaction_id"] == "t-tipped"
+    assert still["posted_for_more"]["posted_cents"] == -1100
+    [question] = settle_questions(database)
+    assert question["merchant_key"] == anticipated.settle_key(row["id"], "t-tipped")
+    assert question["payload"] == {
+        "charge_id": row["id"],
+        "transaction_id": "t-tipped",
+        "account_id": "acct-card",
+        "account_name": "Venture",
+        "merchant": "SQ *MAYO PERFORMING AR",
+        "merchant_key": "mayo performing",
+        "charge_cents": -1000,
+        "noticed_date": "2026-08-20",
+        "payee_name": "Mayo Performing Arts Center",
+        "posted_cents": -1100,
+        "posted_date": "2026-08-21",
+    }
+    assert question["evidence"]["extra_cents"] == 100
+    assert database.counts()["settle_proposals"] == 1
+    # Asked once, however often the overview is rebuilt.
+    again = anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    assert again["questions"] == 0
+    assert len(settle_questions(database)) == 1
+
+
+def test_confirming_settles_by_identity_with_the_phone_s_day_and_answer(database, settings):
+    row = mayo_charge(database, settings)
+    decision_id = phone_review(database, row, category_id="cat-fun", category_name="Entertainment")
+    database.resolve_decision(decision_id, "applied")
+    anticipated.apply_answer(database, row, category_id="cat-fun", category_name="Entertainment")
+    snap = mayo_snapshot()
+    anticipated.reconcile(database, snap, settings, today=TODAY)
+    [question] = settle_questions(database)
+    assert database.confirm_anticipated_transaction(row["id"], "t-tipped") is True
+    summary = anticipated.reconcile(database, snap, settings, today=TODAY)
+    settled = database.get_anticipated_charge(row["id"])
+    assert (settled["status"], settled["matched_transaction_id"]) == ("matched", "t-tipped")
+    assert settled["match_reason"] == anticipated.CONFIRMED_REASON
+    assert summary["open"] == [] and summary["carried"] == 1
+    carried = database.latest_decision_for("t-tipped")
+    assert (carried["status"], carried["category_id"], carried["source"]) == ("approved", "cat-fun", "person")
+    updates, _ = anticipated.date_corrections(database, snap)
+    assert updates == [{"charge_id": row["id"], "transaction_id": "t-tipped", "date": datetime.date(2026, 8, 20),
+                        "from_date": datetime.date(2026, 8, 21)}]
+    # The question had already been answered; nothing is left to ask.
+    assert database.get_proposal(question["id"])["status"] == "withdrawn"
+    assert settle_questions(database) == []
+
+
+def test_a_no_is_remembered_for_that_row_but_another_row_can_still_be_asked_about(database, settings):
+    row = mayo_charge(database, settings)
+    anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    [question] = settle_questions(database)
+    database.resolve_proposal(question["id"], "declined")
+    summary = anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    assert summary["questions"] == 0
+    assert summary["open"][0]["posted_for_more"] is None
+    assert database.get_anticipated_charge(row["id"])["status"] == "open"
+    other = transaction(datetime.date(2026, 8, 22), -1200, payee="Mayo Performing Arts Center",
+                        account_id="acct-card", transaction_id="t-other")
+    tipped = mayo_snapshot()["transactions"][0]
+    summary = anticipated.reconcile(database, mayo_snapshot(tipped, other), settings, today=TODAY)
+    assert summary["questions"] == 1
+    assert [q["payload"]["transaction_id"] for q in settle_questions(database)] == ["t-other"]
+
+
+def test_a_question_withdraws_itself_when_the_row_goes_or_the_charge_settles_by_amount(database, settings):
+    mayo_charge(database, settings)
+    anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    [first] = settle_questions(database)
+    # The row left Actual (deleted, or a pending row the bank replaced).
+    anticipated.reconcile(database, snapshot(accounts=[account("Venture", account_id="acct-card")]), settings, today=TODAY)
+    assert database.get_proposal(first["id"])["status"] == "withdrawn"
+    # It came back, so it is asked about again; then the charge's own $10.00 row posts.
+    anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    [second] = settle_questions(database)
+    exact = transaction(datetime.date(2026, 8, 22), -1000, payee="Mayo Performing Arts Center",
+                        account_id="acct-card", transaction_id="t-exact")
+    tipped = mayo_snapshot()["transactions"][0]
+    anticipated.reconcile(database, mayo_snapshot(tipped, exact), settings, today=TODAY)
+    assert database.get_proposal(second["id"])["status"] == "withdrawn"
+    assert settle_questions(database) == []
+
+
+def test_dismissing_or_expiring_the_charge_withdraws_its_question(database, settings):
+    row = mayo_charge(database, settings)
+    anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    database.resolve_anticipated_charge(row["id"], anticipated.DISMISSED)
+    # With nothing left open, the early return still tidies the question away.
+    anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    assert settle_questions(database) == []
+    assert settle_questions(database, status="withdrawn")
+
+
+def test_a_held_pending_charge_is_never_asked_about(database, settings):
+    database.hold_withdrawn_pending({
+        "actual_account_id": "acct-card", "notification_key": "pending:p1", "amount_cents": -1000,
+        "merchant": "Mayo Performing Arts Center", "merchant_key": "mayo performing arts", "title": "Venture",
+        "text": "MAYO PERFORMING ARTS", "noticed_at": MAYO_NOTICED.timestamp(), "noticed_date": "2026-08-20",
+        "category_id": "", "category_source": "", "category_confidence": 0.0,
+    })
+    summary = anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    assert summary["questions"] == 0
+    assert settle_questions(database) == []
+
+
+def test_reopening_a_confirmed_charge_never_settles_or_asks_about_that_row_again(database, settings):
+    row = mayo_charge(database, settings)
+    anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    database.confirm_anticipated_transaction(row["id"], "t-tipped")
+    anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    assert database.reopen_anticipated_charge(row["id"]) is True
+    reopened = database.get_anticipated_charge(row["id"])
+    assert reopened["confirmed_transaction_id"] == "" and reopened["rejected_transaction_ids"] == "t-tipped"
+    summary = anticipated.reconcile(database, mayo_snapshot(), settings, today=TODAY)
+    assert database.get_anticipated_charge(row["id"])["status"] == "open"
+    assert summary["questions"] == 0
+    assert settle_questions(database) == []
+
+
+def test_only_an_open_charge_can_be_confirmed(database, settings):
+    row = mayo_charge(database, settings)
+    database.resolve_anticipated_charge(row["id"], anticipated.DISMISSED)
+    assert database.confirm_anticipated_transaction(row["id"], "t-tipped") is False

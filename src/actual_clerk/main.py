@@ -345,8 +345,9 @@ async def summary(request: Request) -> dict[str, Any]:
     "73% left" while there is money left, "12% over" once past zero, and "—"
     when there is no free money to measure against (no income found, or bills
     budgeted beyond it). ``alerts`` is one number for everything waiting on
-    you: transactions to review plus bank connections that are not healthy.
-    Reads the stored snapshot, like ``/api/overview``; nothing is fetched.
+    you: transactions to review, bank connections that are not healthy, and
+    phone charges that may have posted for more (each counts twice until
+    answered). Reads the stored snapshot, like ``/api/overview``; nothing is fetched.
     """
     database = _database(request)
     snapshot = database.get_snapshot(OVERVIEW_SNAPSHOT) or {}
@@ -368,9 +369,10 @@ async def summary(request: Request) -> dict[str, Any]:
         "available_cents": budget.get("available_cents"),
         "on_track": budget.get("on_track"),
         "days_remaining": budget.get("days_remaining"),
-        "alerts": counts["needs_review"] + counts["degraded_accounts"],
+        "alerts": counts["needs_review"] + counts["degraded_accounts"] + counts["settle_proposals"],
         "needs_review": counts["needs_review"],
         "degraded_accounts": counts["degraded_accounts"],
+        "posted_for_more": counts["settle_proposals"],
         "applied_today": counts["applied_today"],
         "stale": _snapshot_age(snapshot),
         "version": __version__,
@@ -1156,6 +1158,10 @@ async def resolve_proposal(
         raise HTTPException(status_code=409, detail="This proposal has already been resolved")
     if payload.action == "decline":
         database.resolve_proposal(proposal_id, "declined")
+        if proposal["kind"] == anticipated.SETTLE_PROPOSAL:
+            # The charge keeps counting; redraw so the overview stops asking.
+            with contextlib.suppress(Exception):
+                await _jobs(request).refresh_now()
         return {"status": "declined"}
     body = proposal["payload"]
     kind = proposal["kind"]
@@ -1163,6 +1169,9 @@ async def resolve_proposal(
     def hand_back(detail: str) -> HTTPException:
         database.resolve_proposal(proposal_id, "open")
         return HTTPException(status_code=422, detail=detail)
+
+    if kind == anticipated.SETTLE_PROPOSAL:
+        return await _settle_posted_for_more(request, proposal_id, body)
 
     if kind == "rule":
         category_id = payload.category_id or body.get("category_id", "")
@@ -1219,6 +1228,46 @@ async def resolve_proposal(
         database.resolve_proposal(proposal_id, "accepted")
         return {"status": "accepted", "rule": _serialize_record(updated)}
     raise hand_back(f"Clerk cannot act on a {kind} proposal")
+
+
+async def _settle_posted_for_more(
+    request: Request, proposal_id: str, body: dict[str, Any]
+) -> dict[str, Any]:
+    """Yes to "did this charge post for more?": settle it against that row.
+
+    The answer is recorded on the charge and the overview rebuilt, which
+    settles it by identity the way every other settlement happens: the row
+    takes the phone's day and any answer given about the charge. If Actual
+    cannot be read just now, the answer waits on the charge and the next
+    refresh settles it.
+    """
+    database = _database(request)
+    charge_id = str(body.get("charge_id") or "")
+    transaction_id = str(body.get("transaction_id") or "")
+    charge = database.get_anticipated_charge(charge_id) if charge_id else None
+    if charge is None or charge["status"] != anticipated.OPEN:
+        database.resolve_proposal(proposal_id, "withdrawn")
+        raise HTTPException(status_code=409, detail="This charge is no longer waiting for the bank")
+    if not transaction_id or transaction_id in database.matched_transaction_ids():
+        database.resolve_proposal(proposal_id, "withdrawn")
+        raise HTTPException(
+            status_code=409, detail="Another charge has already settled against that transaction"
+        )
+    database.confirm_anticipated_transaction(charge_id, transaction_id)
+    database.resolve_proposal(proposal_id, "accepted")
+    refresh_error = ""
+    try:
+        await _jobs(request).refresh_now()
+    except Exception as exc:  # noqa: BLE001 - the answer is kept; the next refresh settles it
+        refresh_error = str(exc) or type(exc).__name__
+        log.warning("Could not settle a confirmed charge at once: %s", refresh_error)
+    settled = database.get_anticipated_charge(charge_id) or charge
+    return {
+        "status": "accepted",
+        "settled": settled["status"] == anticipated.MATCHED,
+        "charge": anticipated.public_charge(settled),
+        **({"refresh_error": refresh_error} if refresh_error else {}),
+    }
 
 
 @app.post("/api/categories", status_code=status.HTTP_201_CREATED)

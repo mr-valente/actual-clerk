@@ -1317,11 +1317,13 @@ class JobManager:
             snapshot = await self.snapshot(today=today)
             overview = await self._refresh_overview(snapshot, settings, today)
             previous_digest = self.database.latest_digest()
+            counts = self.database.counts()
             payload = build_digest(
                 report=overview["budget"],
                 health=self.database.health_snapshots(),
-                review_count=self.database.counts()["needs_review"],
-                proposal_count=self.database.counts()["proposals"],
+                review_count=counts["needs_review"],
+                proposal_count=counts["proposals"] - counts["settle_proposals"],
+                posted_for_more_count=counts["settle_proposals"],
                 accounts=overview["accounts"],
                 currency=settings.budget_currency,
                 today=today,

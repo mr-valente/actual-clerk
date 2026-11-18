@@ -37,6 +37,13 @@ KIND_UNKNOWN = "unknown"
 # merchant that batches overnight can put the bank's date one day earlier.
 LEAD_DAYS = 1
 
+# How much more than the phone saw a row may have posted for and still be
+# offered as the same purchase: a tip added after the card was approved
+# ($10.00 approved, $11.00 posted). Generous, because a person confirms every
+# one; the bound only keeps a different, bigger purchase at the same shop
+# from being asked about.
+POSTED_FOR_MORE_PERCENT = 50
+
 _MONEY = re.compile(
     r"(?<![\w.])(?:\$|USD\s?)\s?(\d{1,3}(?:,\d{3})+|\d+)(?:\.(\d{1,2}))?(?!\d)",
 )
@@ -257,6 +264,89 @@ def match_charges(
             )
         )
     return matches
+
+
+@dataclass(frozen=True)
+class PostedForMore:
+    """A row that may be an open charge's purchase, posted for more than the phone saw."""
+
+    charge_id: str
+    transaction_id: str
+    payee_name: str
+    date: datetime.date
+    amount_cents: int  # what the bank posted, in Actual's sign
+
+
+def posted_for_more(
+    charges: Sequence[AnticipatedCharge],
+    transactions: Iterable[CandidateTransaction],
+    *,
+    window_days: int,
+    used_transaction_ids: Iterable[str] = (),
+    aliases: Mapping[str, str] | None = None,
+    declined: Iterable[tuple[str, str]] = (),
+) -> list[PostedForMore]:
+    """Rows an open charge may have posted as, for more than the phone saw.
+
+    A tip added after the card approved a purchase posts it for more than
+    the notification said, so the amount, which settles every other charge,
+    cannot say which row this is. These are only ever *questions*: the
+    caller asks the person, and nothing settles until they say so.
+
+    So that the question is worth asking, a row must sit on the same
+    account, read as the same merchant (by key or a learned alias; shared
+    words are not enough), be dated within the window, and have posted for
+    more, but by no more than ``POSTED_FOR_MORE_PERCENT``. The row that
+    posted for the least extra is offered first, then the nearest date,
+    then a bank-imported row. Each row is offered to one charge at a time,
+    earliest notification first, and a pairing the person turned down, or a
+    row they reopened the charge from, is never offered again.
+    """
+
+    used = set(used_transaction_ids)
+    aliases = dict(aliases or {})
+    refused = set(declined)
+    rows = list(transactions)
+    found: list[PostedForMore] = []
+    for charge in sorted(charges, key=lambda item: item.noticed_date):
+        if charge.amount_cents >= 0 or not charge.merchant_key:
+            continue
+        spent = -charge.amount_cents
+        earliest = charge.noticed_date - datetime.timedelta(days=LEAD_DAYS)
+        latest = charge.noticed_date + datetime.timedelta(days=window_days)
+        candidates = [
+            row
+            for row in rows
+            if row.account_id == charge.account_id
+            and row.id not in used
+            and row.id not in charge.rejected
+            and (charge.id, row.id) not in refused
+            and earliest <= row.date <= latest
+            and spent < -row.amount_cents
+            and (-row.amount_cents - spent) * 100 <= spent * POSTED_FOR_MORE_PERCENT
+            and same_merchant(charge.merchant_key, row.merchant_key, aliases)
+        ]
+        if not candidates:
+            continue
+        best = min(
+            candidates,
+            key=lambda row, charge=charge: (
+                -row.amount_cents,
+                abs((row.date - charge.noticed_date).days),
+                0 if row.imported else 1,
+            ),
+        )
+        used.add(best.id)
+        found.append(
+            PostedForMore(
+                charge_id=charge.id,
+                transaction_id=best.id,
+                payee_name=best.payee_name,
+                date=best.date,
+                amount_cents=best.amount_cents,
+            )
+        )
+    return found
 
 
 def same_merchant(charge_key: str, transaction_key: str, aliases: Mapping[str, str]) -> bool:

@@ -673,6 +673,7 @@ def test_dashboard_counts_reflect_the_work_outstanding(database):
         "skipped": 0,
         "applied_today": 1,
         "proposals": 1,
+        "settle_proposals": 0,
         "rules": 1,
         "degraded_accounts": 1,
         "anticipated_open": 0,

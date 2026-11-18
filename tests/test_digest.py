@@ -37,6 +37,12 @@ def test_open_proposals_are_listed_as_waiting():
     assert "Waiting for you" in payload["message"]
 
 
+def test_a_charge_that_may_have_posted_for_more_is_listed_apart_from_rule_questions():
+    payload = digest(review_count=0, proposal_count=0, posted_for_more_count=1)
+    assert "1 phone charge that may have posted for more, to confirm under Intelligence" in payload["message"]
+    assert "about your rules" not in payload["message"]
+
+
 def only(*names):
     """Every block off but the ones named, as the settings checkboxes do."""
     blocks = (

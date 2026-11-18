@@ -36,6 +36,7 @@ from actual_clerk.domain.anticipated import (
     expired_charges,
     match_charges,
     parse_notification,
+    posted_for_more,
     same_merchant,
 )
 from actual_clerk.domain.intelligence import (
@@ -93,6 +94,17 @@ IGNORED = "ignored"
 # The same words from the same app inside this window are one notification,
 # whatever key they arrive under. Mirrors the phone's own repeat filter.
 REPEAT_WINDOW_SECONDS = 10 * 60
+
+# The proposal asking whether a row that posted for more than the phone saw
+# is that charge's purchase. It is about one charge and one row rather than
+# a merchant, so the pair is its key: a No is remembered for that pairing
+# alone, and the same charge can still be asked about a different row.
+SETTLE_PROPOSAL = "settle"
+CONFIRMED_REASON = "posted for more, as you confirmed"
+
+
+def settle_key(charge_id: str, transaction_id: str) -> str:
+    return f"{charge_id}>{transaction_id}"
 
 
 def phone_transaction_id(charge_id: str) -> str:
@@ -267,6 +279,8 @@ def reconcile(
     summary: dict[str, Any] = {"open": [], "matched": 0, "expired": 0, "categorized": 0}
     if not open_rows:
         close_overtaken_reviews(database)
+        # Nothing is waiting, so no question about one is either.
+        ask_posted_for_more(database, [], [], settings=settings, aliases={}, account_names=names)
         summary["open"] = public_charges(database, open_rows, account_names=names)
         return summary
 
@@ -291,8 +305,9 @@ def reconcile(
     by_id = {row["id"]: row for row in open_rows}
     by_transaction = {candidate.id: candidate for candidate in candidates}
     used = database.matched_transaction_ids()
-    # A held charge whose posted transaction the bank has named settles
-    # against that row by identity, whatever amount it posted for.
+    # A held charge whose posted transaction the bank has named, and a phone
+    # charge whose row the person has confirmed, settle against that row by
+    # identity, whatever amount it posted for.
     matches = _posted_matches(open_rows, candidates, snapshot, used)
     used |= {match.transaction_id for match in matches}
     named = {match.charge_id for match in matches}
@@ -361,6 +376,9 @@ def reconcile(
     summary["categorized"] = classify(database, snapshot, settings, still_open(), today=today)
     close_overtaken_reviews(database)
     summary["asking"] = open_reviews(database, still_open(), settings)
+    summary["questions"] = ask_posted_for_more(
+        database, still_open(), candidates, settings=settings, aliases=aliases, account_names=names
+    )
     summary["open"] = public_charges(database, still_open(), account_names=names)
     return summary
 
@@ -371,7 +389,12 @@ def _posted_matches(
     snapshot: dict[str, Any],
     used: set[str],
 ) -> list[ChargeMatch]:
-    """Held charges whose posted row is in Actual under the id the bank gave it."""
+    """Charges whose row in Actual is known by identity rather than by amount.
+
+    A held charge's posted row is the one the bank named, under the id it
+    gave it; a phone charge's is the one the person confirmed when it
+    posted for more than the phone saw.
+    """
     by_imported = {
         str(item.get("imported_id") or ""): str(item.get("id") or "")
         for item in snapshot.get("transactions") or []
@@ -380,24 +403,129 @@ def _posted_matches(
     by_id = {candidate.id: candidate for candidate in candidates}
     matches = []
     for row in rows:
-        posted = str(row.get("posted_imported_id") or "")
-        candidate = by_id.get(by_imported.get(posted, "")) if posted else None
+        if is_phone(row):
+            candidate = by_id.get(str(row.get("confirmed_transaction_id") or ""))
+            reason = CONFIRMED_REASON
+        else:
+            posted = str(row.get("posted_imported_id") or "")
+            candidate = by_id.get(by_imported.get(posted, "")) if posted else None
+            reason = "posted by the bank"
         rejected = set(str(row.get("rejected_transaction_ids") or "").split(","))
-        # A row the person reopened the hold from is not its posted row,
-        # whatever the bank says.
-        if is_phone(row) or candidate is None or candidate.id in used or candidate.id in rejected:
+        # A row the person reopened the charge from is not its row, whatever
+        # the bank (or an earlier answer) says.
+        if candidate is None or candidate.id in used or candidate.id in rejected:
             continue
         used.add(candidate.id)
         matches.append(
             ChargeMatch(
                 charge_id=str(row["id"]),
                 transaction_id=candidate.id,
-                reason="posted by the bank",
+                reason=reason,
                 payee_name=candidate.payee_name,
                 date=candidate.date,
             )
         )
     return matches
+
+
+def ask_posted_for_more(
+    database: Database,
+    rows: Sequence[dict[str, Any]],
+    candidates: Sequence[CandidateTransaction],
+    *,
+    settings: Settings,
+    aliases: dict[str, str],
+    account_names: dict[str, str],
+) -> int:
+    """Ask the person about phone charges that may have posted for more.
+
+    A tip added after the card approved a purchase posts it for more than
+    the phone saw, so the charge never settles by amount and counts twice,
+    as itself and as the bank's row, until it expires. Clerk never decides
+    that on its own: the amount no longer says which purchase the row is.
+    It asks, as a proposal, and only Yes settles the charge (through the
+    identity match above, on the next refresh).
+
+    Questions that no longer apply are withdrawn first: the charge settled
+    some other way, expired or was dismissed, or the row has gone from
+    Actual or been claimed by another charge. A charge is asked about one
+    row at a time, and a row is offered to one charge at a time. Returns
+    how many questions were newly asked.
+    """
+
+    open_ids = {str(row["id"]) for row in rows}
+    rows_by_id = {candidate.id: candidate for candidate in candidates}
+    used = database.matched_transaction_ids()
+    asked_charges: set[str] = set()
+    asked_rows: set[str] = set()
+    for proposal in database.list_proposals(kind=SETTLE_PROPOSAL):
+        body = proposal["payload"]
+        charge_id = str(body.get("charge_id") or "")
+        transaction_id = str(body.get("transaction_id") or "")
+        if charge_id not in open_ids or transaction_id not in rows_by_id or transaction_id in used:
+            database.resolve_proposal(proposal["id"], "withdrawn")
+            continue
+        asked_charges.add(charge_id)
+        asked_rows.add(transaction_id)
+    waiting = {
+        str(row["id"]): row
+        for row in rows
+        if is_phone(row)
+        and row.get("kind") == KIND_CHARGE
+        and not row.get("confirmed_transaction_id")
+        and str(row["id"]) not in asked_charges
+    }
+    if not waiting:
+        return 0
+    declined = {
+        (str(proposal["payload"].get("charge_id") or ""), str(proposal["payload"].get("transaction_id") or ""))
+        for proposal in database.list_proposals(
+            status="declined", kind=SETTLE_PROPOSAL, limit=10_000
+        )
+    }
+    found = posted_for_more(
+        [_as_charge(row) for row in waiting.values()],
+        candidates,
+        window_days=settings.anticipated_match_window_days,
+        used_transaction_ids=used | asked_rows,
+        aliases=aliases,
+        declined=declined,
+    )
+    asked = 0
+    for item in found:
+        row = waiting[item.charge_id]
+        spent = -int(row.get("amount_cents", 0))
+        posted = -item.amount_cents
+        account_id = str(row.get("actual_account_id") or "")
+        proposal_id = database.add_proposal(
+            kind=SETTLE_PROPOSAL,
+            merchant_key=settle_key(item.charge_id, item.transaction_id),
+            payload={
+                "charge_id": item.charge_id,
+                "transaction_id": item.transaction_id,
+                "account_id": account_id,
+                "account_name": account_names.get(account_id, ""),
+                "merchant": str(row.get("merchant") or ""),
+                "merchant_key": str(row.get("merchant_key") or ""),
+                "charge_cents": int(row.get("amount_cents", 0)),
+                "noticed_date": str(row.get("noticed_date") or ""),
+                "payee_name": item.payee_name,
+                "posted_cents": item.amount_cents,
+                "posted_date": item.date.isoformat(),
+            },
+            evidence={
+                "reason": (
+                    "The same merchant posted this for more than your phone saw, the way "
+                    "a tip added after the card was approved does."
+                ),
+                "extra_cents": posted - spent,
+                "share": round((posted - spent) / spent, 4) if spent else 0,
+            },
+        )
+        asked += int(proposal_id is not None)
+    if asked:
+        log.info("Anticipated charges: asked about %d that may have posted for more", asked)
+    return asked
 
 
 def _released_holds(
@@ -1041,6 +1169,10 @@ def public_charges(
     waiting = {
         decision["anticipated_id"]: decision for decision in database.open_phone_decisions()
     }
+    questions = {
+        str(proposal["payload"].get("charge_id") or ""): proposal
+        for proposal in database.list_proposals(kind=SETTLE_PROPOSAL)
+    }
     names = account_names or {}
     items = []
     for row in rows:
@@ -1057,6 +1189,18 @@ def public_charges(
                 "asking": bool(decision["rationale"].get("asking")),
             }
             if decision
+            else None
+        )
+        question = questions.get(str(row.get("id") or "")) if row.get("status") == OPEN else None
+        item["posted_for_more"] = (
+            {
+                "proposal_id": question["id"],
+                "transaction_id": question["payload"].get("transaction_id") or "",
+                "payee_name": question["payload"].get("payee_name") or "",
+                "posted_cents": int(question["payload"].get("posted_cents") or 0),
+                "posted_date": question["payload"].get("posted_date") or "",
+            }
+            if question
             else None
         )
         items.append(item)

@@ -431,6 +431,102 @@ async def test_a_slow_budget_read_does_not_hold_the_phone(client, monkeypatch):
     assert len((await client.get("/api/anticipated")).json()["open"]) == 1
 
 
+# ---------------------------------------------------------- posted for more
+
+
+def tipped_charge(client):
+    """A $10.00 phone charge whose bank row posted for $11.00, asked about once."""
+    import datetime
+
+    from actual_clerk import anticipated
+
+    from .factories import account, snapshot, transaction
+
+    seed_overview(client.database)
+    settings = client.settings_manager.get()
+    src = client.database.upsert_notification_source({
+        **DEVICE, "package_name": PACKAGE, "app_label": "Capital One",
+        "actual_account_id": "acct-card", "account_name": "Venture",
+    })
+    row, _ = anticipated.record_notification(
+        client.database, settings, source=src, posted_at_ms=1_755_780_000_000,
+        title="Venture", text="Your purchase for $10.00 at SQ *MAYO PERFORMING AR was approved.",
+    )
+    snap = snapshot(
+        accounts=[account("Venture", account_id="acct-card")],
+        transactions=[transaction(datetime.date.fromisoformat(row["noticed_date"]) + datetime.timedelta(days=1), -1100,
+                                  payee="Mayo Performing Arts Center", account_id="acct-card", transaction_id="t-tipped")],
+    )
+    today = datetime.date.fromisoformat(row["noticed_date"]) + datetime.timedelta(days=2)
+    anticipated.reconcile(client.database, snap, settings, today=today)
+    [question] = client.database.list_proposals(kind=anticipated.SETTLE_PROPOSAL)
+
+    async def refresh_now():
+        return anticipated.reconcile(client.database, snap, client.settings_manager.get(), today=today)
+
+    return row, question, refresh_now
+
+
+async def test_saying_same_purchase_settles_the_charge_against_the_row(client, monkeypatch):
+    from actual_clerk import main as clerk_main
+
+    row, question, refresh_now = tipped_charge(client)
+    page = (await client.get("/api/intelligence")).json()
+    assert [p["kind"] for p in page["proposals"]] == ["settle"]
+    [waiting] = (await client.get("/api/anticipated")).json()["open"]
+    assert waiting["posted_for_more"]["proposal_id"] == question["id"]
+    monkeypatch.setattr(clerk_main.app.state.job_manager, "refresh_now", refresh_now)
+    body = (await client.post(f"/api/intelligence/proposals/{question['id']}/resolve", json={"action": "accept"})).json()
+    assert body["status"] == "accepted" and body["settled"] is True
+    assert body["charge"]["matched_transaction_id"] == "t-tipped"
+    assert client.database.get_proposal(question["id"])["status"] == "accepted"
+    overview = (await client.get("/api/anticipated")).json()
+    assert overview["open"] == []
+    assert overview["recent"][0]["match_reason"] == "posted for more, as you confirmed"
+    again = await client.post(f"/api/intelligence/proposals/{question['id']}/resolve", json={"action": "accept"})
+    assert again.status_code == 409
+
+
+async def test_a_yes_is_kept_when_actual_cannot_be_read_at_once(client, monkeypatch):
+    from actual_clerk import main as clerk_main
+
+    row, question, _ = tipped_charge(client)
+
+    async def down():
+        raise RuntimeError("Actual is down")
+
+    monkeypatch.setattr(clerk_main.app.state.job_manager, "refresh_now", down)
+    body = (await client.post(f"/api/intelligence/proposals/{question['id']}/resolve", json={"action": "accept"})).json()
+    assert body["settled"] is False and "Actual is down" in body["refresh_error"]
+    assert client.database.get_anticipated_charge(row["id"])["confirmed_transaction_id"] == "t-tipped"
+
+
+async def test_a_question_about_a_charge_no_longer_waiting_is_withdrawn(client):
+    row, question, _ = tipped_charge(client)
+    client.database.resolve_anticipated_charge(row["id"], "dismissed")
+    response = await client.post(f"/api/intelligence/proposals/{question['id']}/resolve", json={"action": "accept"})
+    assert response.status_code == 409
+    assert client.database.get_proposal(question["id"])["status"] == "withdrawn"
+    assert client.database.get_anticipated_charge(row["id"])["confirmed_transaction_id"] == ""
+
+
+async def test_saying_no_leaves_the_charge_counting(client):
+    row, question, _ = tipped_charge(client)
+    body = (await client.post(f"/api/intelligence/proposals/{question['id']}/resolve", json={"action": "decline"})).json()
+    assert body == {"status": "declined"}
+    charge = client.database.get_anticipated_charge(row["id"])
+    assert (charge["status"], charge["confirmed_transaction_id"]) == ("open", "")
+    [waiting] = (await client.get("/api/anticipated")).json()["open"]
+    assert waiting["posted_for_more"] is None
+
+
+async def test_the_summary_tile_counts_a_charge_that_may_have_posted_for_more(client):
+    tipped_charge(client)
+    body = (await client.get("/api/summary")).json()
+    # The charge's own category question is waiting too.
+    assert (body["posted_for_more"], body["needs_review"], body["alerts"]) == (1, 1, 2)
+
+
 # ------------------------------------------------------- reviews on the phone
 
 KEYS = {
